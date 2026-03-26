@@ -247,6 +247,16 @@ img {
   pointer-events: none;
 }
 
+.hero-avatar {
+  margin-bottom: 32px;
+}
+
+.hero-jack-img {
+  width: 160px;
+  height: 160px;
+  object-fit: contain;
+}
+
 .hero-content {
   position: relative;
   z-index: 1;
@@ -365,7 +375,134 @@ img {
   margin-bottom: 48px;
 }
 
-/* ---- Services ---- */
+/* ---- Page Hero (subpages) ---- */
+.page-hero {
+  padding: 140px 0 32px;
+  background: linear-gradient(180deg, var(--blue-50) 0%, var(--white) 100%);
+  text-align: center;
+}
+
+.page-hero .section-title {
+  font-size: clamp(2.2rem, 5vw, 3rem);
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.page-hero .section-subtitle {
+  font-size: clamp(1.4rem, 3vw, 1.8rem);
+  font-weight: 500;
+  color: var(--gray-600);
+  margin-bottom: 0;
+}
+
+/* ---- Meet Jack ---- */
+.meet-jack {
+  padding: 40px 0 80px;
+  background: var(--white);
+}
+
+.meet-jack .section-title,
+.meet-jack .section-subtitle {
+  text-align: center;
+}
+
+.meet-jack-avatar {
+  text-align: center;
+  margin-bottom: 32px;
+  margin-top: -20px;
+}
+
+.meet-jack-img {
+  width: 200px;
+  height: 200px;
+  object-fit: contain;
+}
+
+.jack-intro {
+  max-width: 720px;
+  margin: 0 auto 64px;
+  text-align: center;
+}
+
+.jack-intro p {
+  font-size: 1.15rem;
+  color: var(--gray-600);
+  line-height: 1.7;
+  margin-bottom: 16px;
+}
+
+.jack-intro p strong {
+  color: var(--blue-600);
+}
+
+.jack-features {
+  display: flex;
+  flex-direction: column;
+  gap: 48px;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+.jack-feature {
+  display: flex;
+  align-items: center;
+  gap: 48px;
+  padding: 40px;
+  border-radius: var(--radius);
+  border: 1px solid var(--gray-100);
+  background: var(--white);
+  transition: all 0.3s ease;
+}
+
+.jack-feature:hover {
+  border-color: var(--blue-200);
+  box-shadow: var(--shadow-lg);
+  transform: translateY(-2px);
+}
+
+.jack-feature-reverse {
+  flex-direction: row-reverse;
+}
+
+.jack-feature-graphic {
+  flex-shrink: 0;
+  width: 220px;
+}
+
+.jack-feature-graphic svg {
+  width: 100%;
+  height: auto;
+}
+
+.jack-feature-text {
+  flex: 1;
+}
+
+.jack-feature-text h3 {
+  font-size: 1.3rem;
+  font-weight: 600;
+  color: var(--gray-900);
+  letter-spacing: -0.02em;
+  margin-bottom: 12px;
+}
+
+.jack-feature-text p {
+  font-size: 1.05rem;
+  color: var(--gray-500);
+  line-height: 1.7;
+}
+
+.jack-stats {
+  display: flex;
+  justify-content: center;
+  gap: 48px;
+  margin-top: 64px;
+  padding-top: 48px;
+  border-top: 1px solid var(--gray-100);
+  flex-wrap: wrap;
+}
+
+/* ---- Services (subpage) ---- */
 .services {
   padding: 80px 0;
   background: var(--white);
@@ -595,6 +732,21 @@ img {
   .hero-headline {
     flex-direction: column;
     gap: 8px;
+  }
+
+  .jack-feature,
+  .jack-feature-reverse {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+
+  .jack-feature-graphic {
+    width: 180px;
+  }
+
+  .jack-stats {
+    gap: 24px;
   }
 
   .services-grid {

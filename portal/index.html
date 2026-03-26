@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>client login | jack does</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="portal.css">
+</head>
+<body class="login-page">
+  <div class="login-container">
+    <div class="login-card">
+      <div class="login-header">
+        <img src="../jack-avatar-clean.png" alt="jack" class="login-avatar">
+        <h1 class="login-brand">jack does</h1>
+        <p class="login-subtitle">client portal</p>
+      </div>
+      <form class="login-form" id="login-form">
+        <div class="form-group">
+          <label for="email">email</label>
+          <input type="email" id="email" name="email" placeholder="you@company.com" required>
+        </div>
+        <div class="form-group">
+          <label for="password">password</label>
+          <input type="password" id="password" name="password" placeholder="your password" required>
+        </div>
+        <button type="submit" class="btn btn-primary btn-full">sign in</button>
+      </form>
+      <div class="login-footer">
+        <a href="#">forgot password?</a>
+        <span class="divider">|</span>
+        <a href="../index.html">back to site</a>
+      </div>
+    </div>
+  </div>
+  <script>
+    document.getElementById('login-form').addEventListener('submit', function(e) {
+      e.preventDefault();
+      window.location.href = 'dashboard.html';
+    });
+  </script>
+</body>
+</html>

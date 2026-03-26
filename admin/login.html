@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>admin | jack does</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="admin.css">
+</head>
+<body>
+  <div class="login-page">
+    <div class="login-container">
+      <div class="login-card">
+        <div class="login-header">
+          <img src="../jack-avatar-clean.png" alt="jack" class="login-avatar">
+          <div class="login-brand">jack does</div>
+          <div class="login-subtitle">admin panel</div>
+        </div>
+        <form id="admin-login-form">
+          <div class="form-group">
+            <label>password</label>
+            <input type="password" id="admin-password" placeholder="enter admin password" required autofocus>
+          </div>
+          <div id="login-error" class="login-error" style="display:none;"></div>
+          <button type="submit" class="btn btn-primary btn-full">sign in</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  <script>
+    document.getElementById('admin-login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const password = document.getElementById('admin-password').value;
+      const errorEl = document.getElementById('login-error');
+
+      try {
+        const res = await fetch('/api/admin/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password }),
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          document.cookie = `admin_auth=${password};path=/;max-age=86400`;
+          window.location.href = '/admin/dashboard.html';
+        } else {
+          errorEl.textContent = 'invalid password';
+          errorEl.style.display = 'block';
+        }
+      } catch (err) {
+        errorEl.textContent = 'could not connect to server';
+        errorEl.style.display = 'block';
+      }
+    });
+  </script>
+</body>
+</html>

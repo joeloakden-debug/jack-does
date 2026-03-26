@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>dashboard | jack does</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="portal.css">
+</head>
+<body>
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <img src="../jack-avatar-clean.png" alt="jack" class="sidebar-avatar">
+      <span class="sidebar-brand">jack does</span>
+    </div>
+    <nav class="sidebar-nav">
+      <a href="#" class="sidebar-link active" data-view="dashboard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+        dashboard
+      </a>
+      <a href="#" class="sidebar-link" data-view="files">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        my uploaded files
+      </a>
+      <a href="#" class="sidebar-link" data-view="financials">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+        my financial statements
+      </a>
+      <a href="#" class="sidebar-link" data-view="taxreturns">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M12 18v-6"/><path d="M9 15l3 3 3-3"/></svg>
+        my tax returns
+      </a>
+      <a href="#" class="sidebar-link" data-view="notifications">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        notifications
+        <span class="notification-badge" id="notification-badge">0</span>
+      </a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="sidebar-user">
+        <div class="user-avatar">JD</div>
+        <div class="user-info">
+          <span class="user-name">Demo Client</span>
+          <span class="user-email">demo@company.com</span>
+        </div>
+      </div>
+      <a href="index.html" class="sidebar-link sidebar-logout">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        sign out
+      </a>
+    </div>
+  </aside>
+
+  <!-- Main content area -->
+  <main class="main-content">
+
+    <!-- QuickBooks Connection Banner -->
+    <div class="qbo-banner" id="qbo-banner">
+      <div class="qbo-banner-content">
+        <div class="qbo-banner-text">
+          <strong>connect quickbooks</strong> for real-time financial insights from jack
+        </div>
+        <a href="/api/qbo/connect" class="btn btn-qbo" id="qbo-connect-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          connect
+        </a>
+      </div>
+    </div>
+
+    <!-- Dashboard View: Chat + Upload side by side -->
+    <div class="view active" id="view-dashboard">
+      <div class="split-panel">
+
+        <!-- Left: Ask Jack Chat -->
+        <div class="panel panel-chat">
+          <div class="panel-header">
+            <h2>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              ask jack
+            </h2>
+            <p>ask anything about your finances</p>
+          </div>
+          <div class="chat-container">
+            <div class="chat-messages" id="chat-messages">
+              <div class="chat-message jack">
+                <img src="../jack-avatar-clean.png" alt="jack" class="chat-avatar">
+                <div class="chat-bubble">
+                  <p>hey there! i'm jack, your AI accountant. ask me anything about your finances — how profitable was last month? what's your cash flow forecast? any overdue receivables? i'm here 24/7.</p>
+                </div>
+              </div>
+            </div>
+            <div class="chat-input-area">
+              <div class="chat-input-wrapper">
+                <textarea id="chat-input" placeholder="ask jack something..." rows="1"></textarea>
+                <button class="chat-send-btn" id="chat-send">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                </button>
+              </div>
+              <p class="chat-disclaimer">jack is powered by AI. always verify important financial decisions with a qualified professional.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: Upload Documents -->
+        <div class="panel panel-upload">
+          <div class="panel-header">
+            <h2>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              upload documents
+            </h2>
+            <p>upload data for jack to process</p>
+          </div>
+          <div class="upload-panel-content">
+            <div class="upload-dropzone" id="dropzone">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="upload-icon"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              <h3>drag & drop files here</h3>
+              <p>or click to browse</p>
+              <p class="upload-formats">PDF, CSV, XLSX, JPG, PNG</p>
+              <input type="file" id="file-input" multiple accept=".pdf,.csv,.xlsx,.xls,.jpg,.jpeg,.png,.doc,.docx" hidden>
+            </div>
+            <div class="upload-categories">
+              <h3>category</h3>
+              <div class="category-tags">
+                <button class="category-tag active">general</button>
+                <button class="category-tag">invoices</button>
+                <button class="category-tag">receipts</button>
+                <button class="category-tag">bank statements</button>
+                <button class="category-tag">tax documents</button>
+                <button class="category-tag">payroll</button>
+              </div>
+            </div>
+            <div class="upload-queue" id="upload-queue"></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- My Files View -->
+    <div class="view" id="view-files">
+      <div class="view-header">
+        <h1>my uploaded files</h1>
+        <p>all documents you've uploaded to jack</p>
+      </div>
+      <div class="files-list" id="files-list">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+
+    <!-- My Financial Statements View -->
+    <div class="view" id="view-financials">
+      <div class="view-header">
+        <h1>my financial statements</h1>
+        <p>financial statements prepared by jack for your review and download</p>
+      </div>
+      <div class="files-list">
+        <div class="files-empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="files-empty-icon"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+          <p>no financial statements available yet</p>
+          <span class="files-empty-hint">once jack prepares your financials, they'll appear here</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- My Tax Returns View -->
+    <div class="view" id="view-taxreturns">
+      <div class="view-header">
+        <h1>my tax returns</h1>
+        <p>tax returns prepared by jack for your review and download</p>
+      </div>
+      <div class="files-list">
+        <div class="files-empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="files-empty-icon"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M12 18v-6"/><path d="M9 15l3 3 3-3"/></svg>
+          <p>no tax returns available yet</p>
+          <span class="files-empty-hint">once jack prepares your tax returns, they'll appear here for download</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Notifications View -->
+    <div class="view" id="view-notifications">
+      <div class="view-header">
+        <h1>notifications</h1>
+        <p>documents that need your attention</p>
+      </div>
+      <div id="notifications-list">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+
+  </main>
+
+  <script src="portal.js"></script>
+</body>
+</html>

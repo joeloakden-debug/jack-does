@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>admin dashboard | jack does</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="admin.css">
+</head>
+<body>
+  <div class="admin-layout">
+    <!-- Top bar -->
+    <header class="admin-topbar">
+      <div class="admin-topbar-left">
+        <img src="../jack-avatar-clean.png" alt="jack" class="admin-logo">
+        <span class="admin-brand">jack does</span>
+        <span class="admin-badge">admin</span>
+      </div>
+      <div class="admin-topbar-right">
+        <span class="qbo-status" id="qbo-status">
+          <span class="status-dot disconnected"></span> quickbooks
+        </span>
+        <button class="btn-logout" onclick="logout()">sign out</button>
+      </div>
+    </header>
+
+    <!-- Stats bar -->
+    <div class="admin-stats" id="admin-stats">
+      <div class="stat-card stat-pending">
+        <span class="stat-number" id="stat-pending">0</span>
+        <span class="stat-label">pending review</span>
+      </div>
+      <div class="stat-card stat-approved">
+        <span class="stat-number" id="stat-approved">0</span>
+        <span class="stat-label">approved</span>
+      </div>
+      <div class="stat-card stat-rejected">
+        <span class="stat-number" id="stat-rejected">0</span>
+        <span class="stat-label">rejected</span>
+      </div>
+    </div>
+
+    <!-- Filter tabs -->
+    <div class="admin-filters">
+      <button class="filter-btn active" data-filter="pending">pending</button>
+      <button class="filter-btn" data-filter="all">all</button>
+      <button class="filter-btn" data-filter="approved">approved</button>
+      <button class="filter-btn" data-filter="rejected">rejected</button>
+      <button class="btn-refresh" onclick="loadAnalyses()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        refresh
+      </button>
+    </div>
+
+    <!-- Analyses list -->
+    <div class="admin-content" id="admin-content">
+      <div class="empty-state">
+        <p>no documents to review yet</p>
+        <span>when clients upload documents, they'll appear here for your review</span>
+      </div>
+    </div>
+  </div>
+
+  <script src="admin.js"></script>
+</body>
+</html>
