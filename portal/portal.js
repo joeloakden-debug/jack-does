@@ -1,10 +1,25 @@
 // ========================================
-// CLIENT IDENTITY (swap with real auth in production)
+// CLIENT IDENTITY (read from session cookie)
 // ========================================
-const CLIENT_ID = 'demo-client';
+function getClientId() {
+  const cookie = document.cookie.split(';').find(c => c.trim().startsWith('portal_client='));
+  return cookie ? cookie.split('=')[1] : null;
+}
+
+const CLIENT_ID = getClientId();
+
+// Redirect to login if no valid session
+if (!CLIENT_ID) {
+  window.location.href = '/portal/';
+}
 
 function clientHeaders(extra = {}) {
   return { 'X-Client-Id': CLIENT_ID, ...extra };
+}
+
+function portalLogout() {
+  document.cookie = 'portal_client=;path=/;max-age=0';
+  window.location.href = '/portal/';
 }
 
 
@@ -268,10 +283,22 @@ function updateStepIndicator(stepNum, isComplete) {
   }
 }
 
-// Initialize: fetch config then render workflow
+// Initialize: fetch config then render workflow and populate user info
 (async () => {
   await loadClientConfig();
   updateWorkflowUI();
+
+  // Populate sidebar user info
+  const name = CLIENT_CONFIG.name || CLIENT_ID;
+  const nameEl = document.getElementById('user-name');
+  const emailEl = document.getElementById('user-email');
+  const avatarEl = document.getElementById('user-avatar');
+  if (nameEl) nameEl.textContent = name;
+  if (emailEl) emailEl.textContent = CLIENT_CONFIG.email || '';
+  if (avatarEl) {
+    const initials = name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
+    avatarEl.textContent = initials;
+  }
 })();
 
 

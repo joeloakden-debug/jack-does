@@ -30,6 +30,7 @@
     <nav class="admin-nav" id="admin-nav">
       <button class="nav-btn active" data-admin-view="documents">documents</button>
       <button class="nav-btn" data-admin-view="clients">clients</button>
+      <button class="nav-btn" data-admin-view="settings">settings</button>
     </nav>
 
     <!-- Documents view (existing) -->
@@ -89,6 +90,10 @@
             <input type="email" id="client-email" placeholder="contact@acme.com">
           </div>
           <div class="form-group">
+            <label>portal password</label>
+            <input type="text" id="client-password" placeholder="set a password for portal login">
+          </div>
+          <div class="form-group">
             <label>billing frequency</label>
             <select id="client-billing">
               <option value="monthly">monthly</option>
@@ -105,6 +110,31 @@
       </div>
     </div>
   </div>
+
+    <!-- Settings view -->
+    <div class="admin-view" id="view-settings" style="display:none;">
+      <div class="settings-section">
+        <h2 class="settings-title">change admin password</h2>
+        <p class="settings-desc">update the password used to access this admin portal.</p>
+        <div class="settings-form">
+          <div class="form-group">
+            <label>current password</label>
+            <input type="password" id="settings-current-pw" placeholder="enter current password">
+          </div>
+          <div class="form-group">
+            <label>new password</label>
+            <input type="password" id="settings-new-pw" placeholder="enter new password (min 6 characters)">
+          </div>
+          <div class="form-group">
+            <label>confirm new password</label>
+            <input type="password" id="settings-confirm-pw" placeholder="confirm new password">
+          </div>
+          <div id="settings-pw-error" class="login-error" style="display:none;"></div>
+          <div id="settings-pw-success" class="settings-success" style="display:none;"></div>
+          <button class="btn-modal-save" id="btn-change-pw">update password</button>
+        </div>
+      </div>
+    </div>
 
   <script src="admin.js"></script>
 </body>

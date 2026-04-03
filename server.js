@@ -53,15 +53,35 @@ let CLIENTS = loadClients();
  * In production, this will extract clientId from a JWT or session token.
  */
 function resolveClient(req, res, next) {
-  const clientId = req.headers['x-client-id'] || req.query.clientId || req.body?.clientId || 'demo-client';
-  const client = CLIENTS[clientId] || { name: 'Unknown Client' };
+  // Check portal cookie first, then header/query/body
+  const cookie = req.headers.cookie?.split(';')
+    .find(c => c.trim().startsWith('portal_client='));
+  const cookieClientId = cookie?.split('=')[1];
+  const clientId = cookieClientId || req.headers['x-client-id'] || req.query.clientId || req.body?.clientId;
+  if (!clientId || !CLIENTS[clientId]) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   req.clientId = clientId;
-  req.clientName = client.name;
+  req.clientName = CLIENTS[clientId].name;
   next();
 }
 
-// Admin auth middleware — simple password protection
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'jackdoes2026';
+// Admin auth — file-backed, falls back to env variable
+const ADMIN_SETTINGS_FILE = path.join(__dirname, '.admin-settings.json');
+
+function getAdminPassword() {
+  try {
+    if (fs.existsSync(ADMIN_SETTINGS_FILE)) {
+      const settings = JSON.parse(fs.readFileSync(ADMIN_SETTINGS_FILE, 'utf-8'));
+      if (settings.password) return settings.password;
+    }
+  } catch (e) { /* fall through */ }
+  return process.env.ADMIN_PASSWORD || 'jackdoes2026';
+}
+
+function saveAdminPassword(password) {
+  fs.writeFileSync(ADMIN_SETTINGS_FILE, JSON.stringify({ password }, null, 2), 'utf-8');
+}
 
 function requireAdmin(req, res, next) {
   // Check for auth header (for API calls) or session cookie
@@ -70,7 +90,8 @@ function requireAdmin(req, res, next) {
     .find(c => c.trim().startsWith('admin_auth='))
     ?.split('=')[1];
 
-  if (authHeader === ADMIN_PASSWORD || cookieAuth === ADMIN_PASSWORD) {
+  const adminPw = getAdminPassword();
+  if (authHeader === adminPw || cookieAuth === adminPw) {
     return next();
   }
 
@@ -90,11 +111,24 @@ app.use('/admin/admin.js', express.static(path.join(__dirname, 'admin', 'admin.j
 // Admin login endpoint
 app.post('/api/admin/login', (req, res) => {
   const { password } = req.body;
-  if (password === ADMIN_PASSWORD) {
+  if (password === getAdminPassword()) {
     res.json({ success: true });
   } else {
     res.status(401).json({ error: 'Invalid password' });
   }
+});
+
+// Admin: Change password
+app.post('/api/admin/change-password', requireAdmin, (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (currentPassword !== getAdminPassword()) {
+    return res.status(401).json({ error: 'Current password is incorrect' });
+  }
+  if (!newPassword || newPassword.length < 6) {
+    return res.status(400).json({ error: 'New password must be at least 6 characters' });
+  }
+  saveAdminPassword(newPassword);
+  res.json({ success: true });
 });
 
 // Admin pages require auth
@@ -103,6 +137,46 @@ app.get('/admin', requireAdmin, (req, res) => {
 });
 app.get('/admin/dashboard.html', requireAdmin, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'dashboard.html'));
+});
+
+// ========================================
+// CLIENT PORTAL AUTH
+// ========================================
+
+// Portal login — authenticates by email + password, returns clientId
+app.post('/api/portal/login', (req, res) => {
+  const { email, password } = req.body;
+  const entry = Object.entries(CLIENTS).find(
+    ([, c]) => c.email === email && c.password === password
+  );
+  if (entry) {
+    const [clientId, client] = entry;
+    res.json({ success: true, clientId, name: client.name });
+  } else {
+    res.status(401).json({ error: 'Invalid email or password' });
+  }
+});
+
+// Middleware: require authenticated client (checks cookie)
+function requireClient(req, res, next) {
+  const cookie = req.headers.cookie?.split(';')
+    .find(c => c.trim().startsWith('portal_client='));
+  const clientId = cookie?.split('=')[1];
+  if (clientId && CLIENTS[clientId]) {
+    req.clientId = clientId;
+    req.clientName = CLIENTS[clientId].name;
+    return next();
+  }
+  // For API calls return 401, otherwise redirect to login
+  if (req.path.startsWith('/api/')) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  return res.redirect('/portal/');
+}
+
+// Protect portal dashboard
+app.get('/portal/dashboard.html', requireClient, (req, res) => {
+  res.sendFile(path.join(__dirname, 'portal', 'dashboard.html'));
 });
 
 // ========================================
@@ -893,6 +967,7 @@ app.get('/api/client/config', resolveClient, (req, res) => {
   res.json({
     billingFrequency: client.billingFrequency || 'monthly',
     name: client.name,
+    email: client.email,
   });
 });
 
@@ -900,18 +975,21 @@ app.get('/api/client/config', resolveClient, (req, res) => {
 // CLIENT MANAGEMENT (admin)
 // ========================================
 app.get('/api/admin/clients', requireAdmin, (req, res) => {
-  const clientList = Object.entries(CLIENTS).map(([id, data]) => ({
-    id,
-    ...data,
-  }));
+  const clientList = Object.entries(CLIENTS).map(([id, data]) => {
+    const { password, ...rest } = data;
+    return { id, ...rest };
+  });
   clientList.sort((a, b) => a.name.localeCompare(b.name));
   res.json({ clients: clientList });
 });
 
 app.post('/api/admin/clients', requireAdmin, (req, res) => {
-  const { name, email, billingFrequency } = req.body;
+  const { name, email, password, billingFrequency } = req.body;
   if (!name || !email) {
     return res.status(400).json({ error: 'Name and email are required' });
+  }
+  if (!password) {
+    return res.status(400).json({ error: 'Password is required' });
   }
   const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
   if (CLIENTS[id]) {
@@ -921,11 +999,12 @@ app.post('/api/admin/clients', requireAdmin, (req, res) => {
   CLIENTS[id] = {
     name,
     email,
+    password,
     billingFrequency: validFreqs.includes(billingFrequency) ? billingFrequency : 'monthly',
     createdAt: new Date().toISOString(),
   };
   saveClients(CLIENTS);
-  res.json({ success: true, id, client: CLIENTS[id] });
+  res.json({ success: true, id, client: { ...CLIENTS[id], password: undefined } });
 });
 
 app.put('/api/admin/clients/:id', requireAdmin, (req, res) => {
@@ -933,16 +1012,17 @@ app.put('/api/admin/clients/:id', requireAdmin, (req, res) => {
   if (!client) {
     return res.status(404).json({ error: 'Client not found' });
   }
-  const { name, email, billingFrequency } = req.body;
+  const { name, email, password, billingFrequency } = req.body;
   if (name) client.name = name;
   if (email) client.email = email;
+  if (password) client.password = password;
   const validFreqs = ['monthly', 'quarterly', 'annual'];
   if (billingFrequency && validFreqs.includes(billingFrequency)) {
     client.billingFrequency = billingFrequency;
   }
   CLIENTS[req.params.id] = client;
   saveClients(CLIENTS);
-  res.json({ success: true, client });
+  res.json({ success: true, client: { ...client, password: undefined } });
 });
 
 // ========================================

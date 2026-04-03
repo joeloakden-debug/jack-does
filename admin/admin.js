@@ -649,6 +649,8 @@ function openAddClient() {
   document.getElementById('client-modal-title').textContent = 'add client';
   document.getElementById('client-name').value = '';
   document.getElementById('client-email').value = '';
+  document.getElementById('client-password').value = '';
+  document.getElementById('client-password').placeholder = 'set a password for portal login';
   document.getElementById('client-billing').value = 'monthly';
   document.getElementById('client-modal-error').style.display = 'none';
   document.getElementById('client-modal').style.display = '';
@@ -661,6 +663,8 @@ function openEditClient(id) {
   document.getElementById('client-modal-title').textContent = 'edit client';
   document.getElementById('client-name').value = client.name;
   document.getElementById('client-email').value = client.email;
+  document.getElementById('client-password').value = '';
+  document.getElementById('client-password').placeholder = 'leave blank to keep current password';
   document.getElementById('client-billing').value = client.billingFrequency || 'monthly';
   document.getElementById('client-modal-error').style.display = 'none';
   document.getElementById('client-modal').style.display = '';
@@ -673,6 +677,7 @@ function closeClientModal() {
 async function saveClient() {
   const name = document.getElementById('client-name').value.trim();
   const email = document.getElementById('client-email').value.trim();
+  const password = document.getElementById('client-password').value;
   const billingFrequency = document.getElementById('client-billing').value;
   const errorEl = document.getElementById('client-modal-error');
 
@@ -681,6 +686,15 @@ async function saveClient() {
     errorEl.style.display = '';
     return;
   }
+
+  if (!editingClientId && !password) {
+    errorEl.textContent = 'password is required for new clients';
+    errorEl.style.display = '';
+    return;
+  }
+
+  const body = { name, email, billingFrequency };
+  if (password) body.password = password;
 
   const url = editingClientId
     ? `/api/admin/clients/${editingClientId}`
@@ -691,7 +705,7 @@ async function saveClient() {
     const res = await fetch(url, {
       method,
       headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
-      body: JSON.stringify({ name, email, billingFrequency }),
+      body: JSON.stringify(body),
     });
     const data = await res.json();
     if (data.error) {
@@ -714,6 +728,61 @@ document.getElementById('client-modal-save').addEventListener('click', () => sav
 // Close modal on overlay click
 document.getElementById('client-modal').addEventListener('click', (e) => {
   if (e.target === e.currentTarget) closeClientModal();
+});
+
+
+// ========================================
+// SETTINGS — CHANGE PASSWORD
+// ========================================
+document.getElementById('btn-change-pw').addEventListener('click', async () => {
+  const currentPw = document.getElementById('settings-current-pw').value;
+  const newPw = document.getElementById('settings-new-pw').value;
+  const confirmPw = document.getElementById('settings-confirm-pw').value;
+  const errorEl = document.getElementById('settings-pw-error');
+  const successEl = document.getElementById('settings-pw-success');
+
+  errorEl.style.display = 'none';
+  successEl.style.display = 'none';
+
+  if (!currentPw || !newPw) {
+    errorEl.textContent = 'all fields are required';
+    errorEl.style.display = '';
+    return;
+  }
+  if (newPw.length < 6) {
+    errorEl.textContent = 'new password must be at least 6 characters';
+    errorEl.style.display = '';
+    return;
+  }
+  if (newPw !== confirmPw) {
+    errorEl.textContent = 'new passwords do not match';
+    errorEl.style.display = '';
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/admin/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ currentPassword: currentPw, newPassword: newPw }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      errorEl.textContent = data.error;
+      errorEl.style.display = '';
+      return;
+    }
+    // Update the auth cookie with the new password
+    document.cookie = `admin_auth=${newPw};path=/;max-age=86400`;
+    successEl.textContent = 'password updated successfully';
+    successEl.style.display = '';
+    document.getElementById('settings-current-pw').value = '';
+    document.getElementById('settings-new-pw').value = '';
+    document.getElementById('settings-confirm-pw').value = '';
+  } catch (e) {
+    errorEl.textContent = 'failed to update password';
+    errorEl.style.display = '';
+  }
 });
 
 
