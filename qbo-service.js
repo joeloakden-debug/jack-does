@@ -401,13 +401,6 @@ async function fetchRelevantData(question, realmId = 'default') {
   const today = now.toISOString().split('T')[0];
   const startOfYear = `${now.getFullYear()}-01-01`;
 
-  try {
-    // Always try to get company info for context
-    results.companyInfo = await getCompanyInfo(realmId);
-  } catch (e) {
-    // Not critical
-  }
-
   // Determine the relevant date range for transaction queries
   let txnStart = firstOfLastMonth;
   let txnEnd = today;
@@ -426,124 +419,130 @@ async function fetchRelevantData(question, realmId = 'default') {
   }
 
   // Detect if user is asking about specific line items, transactions, or details
-  const wantsDetail = q.match(/detail|breakdown|transaction|what.*made up|what.*in|drill.*down|line.*item|specific|individual|tell me more|more info|what.*include|what.*consist|explain.*expense|explain.*cost|break.*down|itemize|list.*transaction|show.*transaction|what.*charge|what.*pay.*for|each|every|subscript/);
+  const wantsDetail = q.match(/detail|breakdown|transaction|what.*made up|what.*in|drill.*down|line.*item|specific|individual|tell me more|more info|what.*include|what.*consist|explain.*expense|explain.*cost|break.*down|itemize|list.*transaction|show.*transaction|what.*charge|what.*pay.*for|each|every|subscript|licen/);
 
-  try {
-    // Profit / revenue / income questions
-    if (q.match(/profit|revenue|income|earn|loss|p&l|p\+l|how.*doing|performance/)) {
-      if (q.includes('last month') || q.includes('previous month')) {
-        results.profitAndLoss = await getProfitAndLoss(firstOfLastMonth, lastOfLastMonth, realmId);
-      } else if (q.includes('this month')) {
-        results.profitAndLoss = await getProfitAndLoss(firstOfThisMonth, today, realmId);
-      } else if (q.includes('this year') || q.includes('ytd') || q.includes('year to date')) {
-        results.profitAndLoss = await getProfitAndLoss(startOfYear, today, realmId);
-      } else {
-        results.profitAndLossLastMonth = await getProfitAndLoss(firstOfLastMonth, lastOfLastMonth, realmId);
-        results.profitAndLossThisMonth = await getProfitAndLoss(firstOfThisMonth, today, realmId);
-      }
+  // Helper to safely fetch data without one failure killing everything
+  async function safeFetch(label, fn) {
+    try {
+      return await fn();
+    } catch (e) {
+      console.error(`[QBO] Failed to fetch ${label}:`, e.message);
+      return null;
     }
-
-    // Balance sheet / assets / liabilities / equity
-    if (q.match(/balance sheet|assets|liabilities|equity|net worth|what.*own|what.*owe/)) {
-      results.balanceSheet = await getBalanceSheet(today, realmId);
-    }
-
-    // Cash flow
-    if (q.match(/cash flow|cash.*forecast|liquidity|cash.*position|cash.*need/)) {
-      results.cashFlow = await getCashFlow(firstOfLastMonth, today, realmId);
-      results.balanceSheet = results.balanceSheet || await getBalanceSheet(today, realmId);
-    }
-
-    // Receivables / who owes / overdue / outstanding
-    if (q.match(/receivable|owed|overdue|outstanding|unpaid|collect|aging|past due/)) {
-      results.agedReceivables = await getAgedReceivables(realmId);
-    }
-
-    // Payables / bills / what we owe
-    if (q.match(/payable|bills|what.*we owe|what.*i owe|vendor.*balance|accounts payable/)) {
-      results.agedPayables = await getAgedPayables(realmId);
-      if (wantsDetail) {
-        results.billTransactions = await getBills(txnStart, txnEnd, 100, realmId);
-      }
-    }
-
-    // Invoices
-    if (q.match(/invoice|billed|billing/)) {
-      results.recentInvoices = await getInvoicesByDate(txnStart, txnEnd, 50, realmId);
-    }
-
-    // Expenses / spending — always fetch transactions for detail
-    if (q.match(/expense|spend|cost|purchase|bought|subscript|software|rent|office|utilit|insurance|advertising|marketing|meal|travel|phone|internet/) || wantsDetail) {
-      results.expenseTransactions = await getExpenseTransactions(txnStart, txnEnd, 100, realmId);
-      results.billTransactions = results.billTransactions || await getBills(txnStart, txnEnd, 100, realmId);
-      if (!results.profitAndLoss) {
-        if (q.includes('last month') || q.includes('previous month')) {
-          results.profitAndLoss = await getProfitAndLoss(firstOfLastMonth, lastOfLastMonth, realmId);
-        } else {
-          results.profitAndLoss = await getProfitAndLoss(txnStart, txnEnd, realmId);
-        }
-      }
-    }
-
-    // Customers
-    if (q.match(/customer|client list|who.*buy/)) {
-      results.customers = await getCustomers(realmId);
-    }
-
-    // Vendors / suppliers
-    if (q.match(/vendor|supplier|who.*pay/)) {
-      results.vendors = await getVendors(realmId);
-      if (wantsDetail) {
-        results.billTransactions = results.billTransactions || await getBills(txnStart, txnEnd, 100, realmId);
-      }
-    }
-
-    // Deposits / payments received
-    if (q.match(/deposit|payment.*received|money.*in|received/)) {
-      results.deposits = await getDeposits(txnStart, txnEnd, 50, realmId);
-      results.payments = await getPayments(txnStart, txnEnd, 50, realmId);
-    }
-
-    // Transfers between accounts
-    if (q.match(/transfer|moved.*money|between.*account/)) {
-      results.transfers = await getTransfers(txnStart, txnEnd, 50, realmId);
-    }
-
-    // Journal entries
-    if (q.match(/journal entr|adjustment|accrual/)) {
-      results.journalEntries = await getJournalEntries(txnStart, txnEnd, 50, realmId);
-    }
-
-    // Tax related
-    if (q.match(/tax|deduct|write.*off|1099|w-2/)) {
-      results.profitAndLoss = results.profitAndLoss ||
-        await getProfitAndLoss(startOfYear, today, realmId);
-      results.balanceSheet = results.balanceSheet ||
-        await getBalanceSheet(today, realmId);
-      results.expenseTransactions = results.expenseTransactions ||
-        await getExpenseTransactions(startOfYear, today, 100, realmId);
-    }
-
-    // General / overview / summary
-    if (q.match(/overview|summary|how.*business|status|snapshot|dashboard/)) {
-      results.profitAndLoss = results.profitAndLoss ||
-        await getProfitAndLoss(firstOfThisMonth, today, realmId);
-      results.balanceSheet = results.balanceSheet ||
-        await getBalanceSheet(today, realmId);
-      results.agedReceivables = results.agedReceivables ||
-        await getAgedReceivables(realmId);
-    }
-
-    // If nothing matched, get P&L + transactions for a general overview
-    if (Object.keys(results).length <= 1) {
-      results.profitAndLoss = await getProfitAndLoss(txnStart, txnEnd, realmId);
-      results.balanceSheet = await getBalanceSheet(today, realmId);
-      results.expenseTransactions = await getExpenseTransactions(txnStart, txnEnd, 50, realmId);
-    }
-
-  } catch (error) {
-    results.error = `Error fetching data: ${error.message}`;
   }
+
+  // Always try to get company info for context
+  results.companyInfo = await safeFetch('companyInfo', () => getCompanyInfo(realmId));
+
+  // Profit / revenue / income questions
+  if (q.match(/profit|revenue|income|earn|loss|p&l|p\+l|how.*doing|performance/)) {
+    if (q.includes('last month') || q.includes('previous month')) {
+      results.profitAndLoss = await safeFetch('P&L last month', () => getProfitAndLoss(firstOfLastMonth, lastOfLastMonth, realmId));
+    } else if (q.includes('this month')) {
+      results.profitAndLoss = await safeFetch('P&L this month', () => getProfitAndLoss(firstOfThisMonth, today, realmId));
+    } else if (q.includes('this year') || q.includes('ytd') || q.includes('year to date')) {
+      results.profitAndLoss = await safeFetch('P&L YTD', () => getProfitAndLoss(startOfYear, today, realmId));
+    } else {
+      results.profitAndLossLastMonth = await safeFetch('P&L last month', () => getProfitAndLoss(firstOfLastMonth, lastOfLastMonth, realmId));
+      results.profitAndLossThisMonth = await safeFetch('P&L this month', () => getProfitAndLoss(firstOfThisMonth, today, realmId));
+    }
+  }
+
+  // Balance sheet / assets / liabilities / equity
+  if (q.match(/balance sheet|assets|liabilities|equity|net worth|what.*own|what.*owe/)) {
+    results.balanceSheet = await safeFetch('balance sheet', () => getBalanceSheet(today, realmId));
+  }
+
+  // Cash flow
+  if (q.match(/cash flow|cash.*forecast|liquidity|cash.*position|cash.*need/)) {
+    results.cashFlow = await safeFetch('cash flow', () => getCashFlow(firstOfLastMonth, today, realmId));
+    if (!results.balanceSheet) results.balanceSheet = await safeFetch('balance sheet', () => getBalanceSheet(today, realmId));
+  }
+
+  // Receivables / who owes / overdue / outstanding
+  if (q.match(/receivable|owed|overdue|outstanding|unpaid|collect|aging|past due/)) {
+    results.agedReceivables = await safeFetch('aged receivables', () => getAgedReceivables(realmId));
+  }
+
+  // Payables / bills / what we owe
+  if (q.match(/payable|bills|what.*we owe|what.*i owe|vendor.*balance|accounts payable/)) {
+    results.agedPayables = await safeFetch('aged payables', () => getAgedPayables(realmId));
+    if (wantsDetail) {
+      results.billTransactions = await safeFetch('bills', () => getBills(txnStart, txnEnd, 100, realmId));
+    }
+  }
+
+  // Invoices
+  if (q.match(/invoice|billed|billing/)) {
+    results.recentInvoices = await safeFetch('invoices', () => getInvoicesByDate(txnStart, txnEnd, 50, realmId));
+  }
+
+  // Expenses / spending — always fetch transactions for detail
+  if (q.match(/expense|spend|cost|purchase|bought|subscript|software|rent|office|utilit|insurance|advertising|marketing|meal|travel|phone|internet|licen/) || wantsDetail) {
+    results.expenseTransactions = await safeFetch('expense transactions', () => getExpenseTransactions(txnStart, txnEnd, 100, realmId));
+    if (!results.billTransactions) results.billTransactions = await safeFetch('bills', () => getBills(txnStart, txnEnd, 100, realmId));
+    if (!results.profitAndLoss) {
+      if (q.includes('last month') || q.includes('previous month')) {
+        results.profitAndLoss = await safeFetch('P&L', () => getProfitAndLoss(firstOfLastMonth, lastOfLastMonth, realmId));
+      } else {
+        results.profitAndLoss = await safeFetch('P&L', () => getProfitAndLoss(txnStart, txnEnd, realmId));
+      }
+    }
+  }
+
+  // Customers
+  if (q.match(/customer|client list|who.*buy/)) {
+    results.customers = await safeFetch('customers', () => getCustomers(realmId));
+  }
+
+  // Vendors / suppliers
+  if (q.match(/vendor|supplier|who.*pay/)) {
+    results.vendors = await safeFetch('vendors', () => getVendors(realmId));
+    if (wantsDetail && !results.billTransactions) {
+      results.billTransactions = await safeFetch('bills', () => getBills(txnStart, txnEnd, 100, realmId));
+    }
+  }
+
+  // Deposits / payments received
+  if (q.match(/deposit|payment.*received|money.*in|received/)) {
+    results.deposits = await safeFetch('deposits', () => getDeposits(txnStart, txnEnd, 50, realmId));
+    results.payments = await safeFetch('payments', () => getPayments(txnStart, txnEnd, 50, realmId));
+  }
+
+  // Transfers between accounts
+  if (q.match(/transfer|moved.*money|between.*account/)) {
+    results.transfers = await safeFetch('transfers', () => getTransfers(txnStart, txnEnd, 50, realmId));
+  }
+
+  // Journal entries
+  if (q.match(/journal entr|adjustment|accrual/)) {
+    results.journalEntries = await safeFetch('journal entries', () => getJournalEntries(txnStart, txnEnd, 50, realmId));
+  }
+
+  // Tax related
+  if (q.match(/tax|deduct|write.*off|1099|w-2/)) {
+    if (!results.profitAndLoss) results.profitAndLoss = await safeFetch('P&L YTD', () => getProfitAndLoss(startOfYear, today, realmId));
+    if (!results.balanceSheet) results.balanceSheet = await safeFetch('balance sheet', () => getBalanceSheet(today, realmId));
+    if (!results.expenseTransactions) results.expenseTransactions = await safeFetch('expenses YTD', () => getExpenseTransactions(startOfYear, today, 100, realmId));
+  }
+
+  // General / overview / summary
+  if (q.match(/overview|summary|how.*business|status|snapshot|dashboard/)) {
+    if (!results.profitAndLoss) results.profitAndLoss = await safeFetch('P&L', () => getProfitAndLoss(firstOfThisMonth, today, realmId));
+    if (!results.balanceSheet) results.balanceSheet = await safeFetch('balance sheet', () => getBalanceSheet(today, realmId));
+    if (!results.agedReceivables) results.agedReceivables = await safeFetch('aged receivables', () => getAgedReceivables(realmId));
+  }
+
+  // If nothing matched, get P&L + transactions for a general overview
+  const dataKeys = Object.keys(results).filter(k => results[k] != null);
+  if (dataKeys.length <= 1) {
+    results.profitAndLoss = await safeFetch('P&L default', () => getProfitAndLoss(txnStart, txnEnd, realmId));
+    results.balanceSheet = await safeFetch('balance sheet default', () => getBalanceSheet(today, realmId));
+    results.expenseTransactions = await safeFetch('expenses default', () => getExpenseTransactions(txnStart, txnEnd, 50, realmId));
+  }
+
+  // Clean out null results from failed fetches
+  Object.keys(results).forEach(k => { if (results[k] == null) delete results[k]; });
 
   return results;
 }

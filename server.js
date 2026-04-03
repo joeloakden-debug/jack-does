@@ -312,21 +312,28 @@ app.post('/api/chat', resolveClient, async (req, res) => {
     const history = conversations.get(convoKey);
 
     // If QuickBooks is connected, fetch relevant financial data
-    // Include recent conversation context so follow-up questions get the right data
     let qboContext = '';
     if (qbo.isConnected()) {
       try {
-        // Build a combined query from the current message + recent conversation for better keyword matching
-        const recentMessages = history.slice(-6).map(m => m.content).join(' ');
-        const combinedQuery = `${message} ${recentMessages}`;
+        // Include recent USER messages (not assistant responses) for follow-up context
+        const recentUserMessages = history
+          .filter(m => m.role === 'user')
+          .slice(-3)
+          .map(m => m.content)
+          .join(' ');
+        const combinedQuery = `${message} ${recentUserMessages}`;
+        console.log('[QBO] Fetching data for query keywords:', message.substring(0, 100));
         const data = await qbo.fetchRelevantData(combinedQuery);
-        if (data && Object.keys(data).length > 0 && !data.error) {
+        const dataKeys = Object.keys(data).filter(k => k !== 'error');
+        console.log('[QBO] Data fetched:', dataKeys.join(', '));
+        if (data && dataKeys.length > 0 && !data.error) {
           qboContext = `\n\n--- QUICKBOOKS DATA (from the client's actual books) ---\n${JSON.stringify(data, null, 2)}\n--- END QUICKBOOKS DATA ---\n\nUse this real data to answer the client's question. Reference actual numbers and account names. When the client asks for detail on a specific line item, look through the transaction data (expenseTransactions, billTransactions) to find the individual transactions that make up that category.`;
         } else if (data.error) {
+          console.error('[QBO] Data fetch returned error:', data.error);
           qboContext = `\n\n[Note: Tried to fetch QuickBooks data but got an error: ${data.error}. Answer the question generally and let the client know there was a temporary issue accessing their books.]`;
         }
       } catch (qboError) {
-        console.error('QuickBooks data fetch error:', qboError.message);
+        console.error('[QBO] Data fetch exception:', qboError.message);
         qboContext = '\n\n[Note: QuickBooks is connected but there was an error fetching data. Answer generally.]';
       }
     }
