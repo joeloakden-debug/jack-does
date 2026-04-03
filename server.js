@@ -1028,7 +1028,7 @@ app.put('/api/admin/clients/:id', requireAdmin, (req, res) => {
 // ========================================
 // START SERVER
 // ========================================
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`jack does server running at http://localhost:${PORT}`);
   console.log(`Portal at http://localhost:${PORT}/portal/`);
   console.log(`Admin at http://localhost:${PORT}/admin`);
