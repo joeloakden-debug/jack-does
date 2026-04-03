@@ -17,25 +17,35 @@ const oauthClient = new OAuthClient({
 const tokenStore = new Map();
 const TOKEN_FILE = path.join(__dirname, '.qbo-tokens.json');
 
-// Load tokens from disk on startup
+// Load tokens on startup (env var first, then disk file)
 function loadTokensFromDisk() {
   try {
+    // Prefer QBO_TOKENS env var (survives Railway redeploys)
+    if (process.env.QBO_TOKENS) {
+      const data = JSON.parse(process.env.QBO_TOKENS);
+      Object.entries(data).forEach(([key, val]) => tokenStore.set(key, val));
+      console.log('QBO tokens loaded from env var — connection restored');
+      return;
+    }
     if (fs.existsSync(TOKEN_FILE)) {
       const data = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf-8'));
       Object.entries(data).forEach(([key, val]) => tokenStore.set(key, val));
       console.log('QBO tokens loaded from disk — connection restored');
     }
   } catch (e) {
-    console.error('Failed to load QBO tokens from disk:', e.message);
+    console.error('Failed to load QBO tokens:', e.message);
   }
 }
 
-// Save tokens to disk
+// Save tokens to disk and log for env var persistence
 function saveTokensToDisk() {
   try {
     const data = {};
     tokenStore.forEach((val, key) => { data[key] = val; });
     fs.writeFileSync(TOKEN_FILE, JSON.stringify(data, null, 2));
+    // Log tokens as JSON so they can be saved to QBO_TOKENS env var on Railway
+    console.log('[QBO_TOKENS] Copy this to Railway env var to persist across deploys:');
+    console.log('[QBO_TOKENS_VALUE]', JSON.stringify(data));
   } catch (e) {
     console.error('Failed to save QBO tokens to disk:', e.message);
   }
