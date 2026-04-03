@@ -588,6 +588,136 @@ function formatDate(dateStr) {
 }
 
 // ========================================
+// VIEW SWITCHING
+// ========================================
+let currentAdminView = 'documents';
+
+document.querySelectorAll('.nav-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentAdminView = btn.dataset.adminView;
+    document.querySelectorAll('.admin-view').forEach(v => v.style.display = 'none');
+    document.getElementById(`view-${currentAdminView}`).style.display = '';
+    if (currentAdminView === 'clients') loadClients();
+  });
+});
+
+
+// ========================================
+// CLIENT MANAGEMENT
+// ========================================
+let allClients = [];
+let editingClientId = null;
+
+async function loadClients() {
+  try {
+    const res = await fetch('/api/admin/clients', {
+      headers: { 'Authorization': getAuth() },
+    });
+    const data = await res.json();
+    allClients = data.clients || [];
+    renderClients();
+  } catch (e) {
+    console.error('Failed to load clients:', e);
+  }
+}
+
+function renderClients() {
+  const container = document.getElementById('clients-list');
+  if (allClients.length === 0) {
+    container.innerHTML = '<div class="empty-state"><p>no clients yet</p><span>click "+ add client" to create one</span></div>';
+    return;
+  }
+  container.innerHTML = allClients.map(c => `
+    <div class="client-card" data-client-id="${c.id}">
+      <div class="client-card-info">
+        <span class="client-card-name">${c.name}</span>
+        <span class="client-card-email">${c.email}</span>
+      </div>
+      <div class="client-card-meta">
+        <span class="client-billing-badge ${c.billingFrequency}">${c.billingFrequency}</span>
+        <span class="client-card-id">${c.id}</span>
+        <button class="btn-edit-client" onclick="openEditClient('${c.id}')">edit</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function openAddClient() {
+  editingClientId = null;
+  document.getElementById('client-modal-title').textContent = 'add client';
+  document.getElementById('client-name').value = '';
+  document.getElementById('client-email').value = '';
+  document.getElementById('client-billing').value = 'monthly';
+  document.getElementById('client-modal-error').style.display = 'none';
+  document.getElementById('client-modal').style.display = '';
+}
+
+function openEditClient(id) {
+  const client = allClients.find(c => c.id === id);
+  if (!client) return;
+  editingClientId = id;
+  document.getElementById('client-modal-title').textContent = 'edit client';
+  document.getElementById('client-name').value = client.name;
+  document.getElementById('client-email').value = client.email;
+  document.getElementById('client-billing').value = client.billingFrequency || 'monthly';
+  document.getElementById('client-modal-error').style.display = 'none';
+  document.getElementById('client-modal').style.display = '';
+}
+
+function closeClientModal() {
+  document.getElementById('client-modal').style.display = 'none';
+}
+
+async function saveClient() {
+  const name = document.getElementById('client-name').value.trim();
+  const email = document.getElementById('client-email').value.trim();
+  const billingFrequency = document.getElementById('client-billing').value;
+  const errorEl = document.getElementById('client-modal-error');
+
+  if (!name || !email) {
+    errorEl.textContent = 'name and email are required';
+    errorEl.style.display = '';
+    return;
+  }
+
+  const url = editingClientId
+    ? `/api/admin/clients/${editingClientId}`
+    : '/api/admin/clients';
+  const method = editingClientId ? 'PUT' : 'POST';
+
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ name, email, billingFrequency }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      errorEl.textContent = data.error;
+      errorEl.style.display = '';
+      return;
+    }
+    closeClientModal();
+    loadClients();
+  } catch (e) {
+    errorEl.textContent = 'failed to save';
+    errorEl.style.display = '';
+  }
+}
+
+document.getElementById('btn-add-client').addEventListener('click', () => openAddClient());
+document.getElementById('client-modal-cancel').addEventListener('click', () => closeClientModal());
+document.getElementById('client-modal-save').addEventListener('click', () => saveClient());
+
+// Close modal on overlay click
+document.getElementById('client-modal').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeClientModal();
+});
+
+
+// ========================================
 // INIT
 // ========================================
 async function init() {

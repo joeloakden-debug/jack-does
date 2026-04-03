@@ -3,6 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="jack does">
+  <meta name="theme-color" content="#2563eb">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="../jack-avatar-clean.png">
   <title>dashboard | jack does</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -17,10 +23,31 @@
       <span class="sidebar-brand">jack does</span>
     </div>
     <nav class="sidebar-nav">
-      <a href="#" class="sidebar-link active" data-view="dashboard">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-        dashboard
+      <!-- Ask Jack -->
+      <a href="#" class="sidebar-link active" data-view="ask-jack">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        ask jack
       </a>
+
+      <!-- Workflow section -->
+      <div class="sidebar-section-label">workflow</div>
+
+      <a href="#" class="sidebar-link" data-view="step1">
+        <span class="step-indicator">1</span>
+        <span class="step-link-text">upload statements</span>
+      </a>
+      <a href="#" class="sidebar-link locked" data-view="step2">
+        <span class="step-indicator">2</span>
+        <span class="step-link-text">invoices & receipts</span>
+      </a>
+      <a href="#" class="sidebar-link locked" data-view="step3">
+        <span class="step-indicator">3</span>
+        <span class="step-link-text">review & match</span>
+      </a>
+
+      <div class="sidebar-divider"></div>
+
+      <!-- Standard views -->
       <a href="#" class="sidebar-link" data-view="files">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
         my uploaded files
@@ -70,76 +97,128 @@
       </div>
     </div>
 
-    <!-- Dashboard View: Chat + Upload side by side -->
-    <div class="view active" id="view-dashboard">
-      <div class="split-panel">
-
-        <!-- Left: Ask Jack Chat -->
-        <div class="panel panel-chat">
-          <div class="panel-header">
-            <h2>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-              ask jack
-            </h2>
-            <p>ask anything about your finances</p>
-          </div>
-          <div class="chat-container">
-            <div class="chat-messages" id="chat-messages">
-              <div class="chat-message jack">
-                <img src="../jack-avatar-clean.png" alt="jack" class="chat-avatar">
-                <div class="chat-bubble">
-                  <p>hey there! i'm jack, your AI accountant. ask me anything about your finances — how profitable was last month? what's your cash flow forecast? any overdue receivables? i'm here 24/7.</p>
-                </div>
-              </div>
-            </div>
-            <div class="chat-input-area">
-              <div class="chat-input-wrapper">
-                <textarea id="chat-input" placeholder="ask jack something..." rows="1"></textarea>
-                <button class="chat-send-btn" id="chat-send">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                </button>
-              </div>
-              <p class="chat-disclaimer">jack is powered by AI. always verify important financial decisions with a qualified professional.</p>
+    <!-- ================================ -->
+    <!-- ASK JACK (full-width chat) -->
+    <!-- ================================ -->
+    <div class="view active" id="view-ask-jack">
+      <div class="panel-header">
+        <h2>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          ask jack
+        </h2>
+        <p>ask anything about your finances</p>
+      </div>
+      <div class="chat-container">
+        <div class="chat-messages" id="chat-messages">
+          <div class="chat-message jack">
+            <img src="../jack-avatar-clean.png" alt="jack" class="chat-avatar">
+            <div class="chat-bubble">
+              <p>hey there! i'm jack, your AI accountant. ask me anything about your finances — how profitable was last month? what's your cash flow forecast? any overdue receivables? i'm here 24/7.</p>
             </div>
           </div>
         </div>
-
-        <!-- Right: Upload Documents -->
-        <div class="panel panel-upload">
-          <div class="panel-header">
-            <h2>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-              upload documents
-            </h2>
-            <p>upload data for jack to process</p>
+        <div class="chat-input-area">
+          <div class="chat-input-wrapper">
+            <textarea id="chat-input" placeholder="ask jack something..." rows="1"></textarea>
+            <button class="chat-send-btn" id="chat-send">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            </button>
           </div>
-          <div class="upload-panel-content">
-            <div class="upload-dropzone" id="dropzone">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="upload-icon"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-              <h3>drag & drop files here</h3>
-              <p>or click to browse</p>
-              <p class="upload-formats">PDF, CSV, XLSX, JPG, PNG</p>
-              <input type="file" id="file-input" multiple accept=".pdf,.csv,.xlsx,.xls,.jpg,.jpeg,.png,.doc,.docx" hidden>
-            </div>
-            <div class="upload-categories">
-              <h3>category</h3>
-              <div class="category-tags">
-                <button class="category-tag active">general</button>
-                <button class="category-tag">invoices</button>
-                <button class="category-tag">receipts</button>
-                <button class="category-tag">bank statements</button>
-                <button class="category-tag">tax documents</button>
-                <button class="category-tag">payroll</button>
-              </div>
-            </div>
-            <div class="upload-queue" id="upload-queue"></div>
-          </div>
+          <p class="chat-disclaimer">jack is powered by AI. always verify important financial decisions with a qualified professional.</p>
         </div>
-
       </div>
     </div>
 
-    <!-- My Files View -->
+    <!-- ================================ -->
+    <!-- STEP 1: UPLOAD STATEMENTS -->
+    <!-- ================================ -->
+    <div class="view" id="view-step1">
+      <div class="view-header">
+        <div class="workflow-progress">
+          <div class="wf-step active" data-step="1">
+            <div class="wf-circle">1</div>
+            <span>upload statements</span>
+          </div>
+          <div class="wf-connector"></div>
+          <div class="wf-step locked" data-step="2">
+            <div class="wf-circle">2</div>
+            <span>invoices & receipts</span>
+          </div>
+          <div class="wf-connector"></div>
+          <div class="wf-step locked" data-step="3">
+            <div class="wf-circle">3</div>
+            <span>review & match</span>
+          </div>
+        </div>
+        <h1>step 1: upload bank & credit card statements</h1>
+        <p>upload statements for each of your linked accounts. jack needs these to reconcile your books.</p>
+      </div>
+      <div class="step-content" id="step1-accounts">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+
+    <!-- ================================ -->
+    <!-- STEP 2: INVOICES & RECEIPTS -->
+    <!-- ================================ -->
+    <div class="view" id="view-step2">
+      <div class="view-header">
+        <div class="workflow-progress">
+          <div class="wf-step complete" data-step="1">
+            <div class="wf-circle">1</div>
+            <span>upload statements</span>
+          </div>
+          <div class="wf-connector done"></div>
+          <div class="wf-step active" data-step="2">
+            <div class="wf-circle">2</div>
+            <span>invoices & receipts</span>
+          </div>
+          <div class="wf-connector"></div>
+          <div class="wf-step locked" data-step="3">
+            <div class="wf-circle">3</div>
+            <span>review & match</span>
+          </div>
+        </div>
+        <h1>step 2: upload invoices & receipts</h1>
+        <p>upload your purchase invoices, receipts, and sales invoices for each period.</p>
+      </div>
+      <div class="step-content" id="step2-periods">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+
+    <!-- ================================ -->
+    <!-- STEP 3: REVIEW & MATCH -->
+    <!-- ================================ -->
+    <div class="view" id="view-step3">
+      <div class="view-header">
+        <div class="workflow-progress">
+          <div class="wf-step complete" data-step="1">
+            <div class="wf-circle">1</div>
+            <span>upload statements</span>
+          </div>
+          <div class="wf-connector done"></div>
+          <div class="wf-step complete" data-step="2">
+            <div class="wf-circle">2</div>
+            <span>invoices & receipts</span>
+          </div>
+          <div class="wf-connector done"></div>
+          <div class="wf-step active" data-step="3">
+            <div class="wf-circle">3</div>
+            <span>review & match</span>
+          </div>
+        </div>
+        <h1>step 3: review & match</h1>
+        <p>jack matched your documents against your bank transactions. resolve any missing receipts below.</p>
+      </div>
+      <div class="step-content" id="step3-missing-receipts">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+
+    <!-- ================================ -->
+    <!-- MY UPLOADED FILES -->
+    <!-- ================================ -->
     <div class="view" id="view-files">
       <div class="view-header">
         <h1>my uploaded files</h1>
@@ -150,7 +229,9 @@
       </div>
     </div>
 
-    <!-- My Financial Statements View -->
+    <!-- ================================ -->
+    <!-- MY FINANCIAL STATEMENTS -->
+    <!-- ================================ -->
     <div class="view" id="view-financials">
       <div class="view-header">
         <h1>my financial statements</h1>
@@ -165,7 +246,9 @@
       </div>
     </div>
 
-    <!-- My Tax Returns View -->
+    <!-- ================================ -->
+    <!-- MY TAX RETURNS -->
+    <!-- ================================ -->
     <div class="view" id="view-taxreturns">
       <div class="view-header">
         <h1>my tax returns</h1>
@@ -180,7 +263,9 @@
       </div>
     </div>
 
-    <!-- Notifications View -->
+    <!-- ================================ -->
+    <!-- NOTIFICATIONS -->
+    <!-- ================================ -->
     <div class="view" id="view-notifications">
       <div class="view-header">
         <h1>notifications</h1>
@@ -193,6 +278,47 @@
 
   </main>
 
+  <!-- ================================ -->
+  <!-- MODALS -->
+  <!-- ================================ -->
+
+  <!-- CRA Warning Modal -->
+  <div class="modal-overlay" id="cra-modal">
+    <div class="modal-card">
+      <div class="modal-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      </div>
+      <h2>important: CRA compliance</h2>
+      <p>the Canada Revenue Agency (CRA) expects to see invoice or receipt back-up for business expenses. if you do not have a supporting document, the CRA will generally <strong>disallow the expense</strong> upon review, which could also <strong>trigger further audit issues</strong>.</p>
+      <p class="modal-recommend">we highly recommend that you save all receipts and invoices.</p>
+      <div class="modal-actions">
+        <button class="btn btn-modal-cancel" id="cra-modal-cancel">go back</button>
+        <button class="btn btn-modal-confirm" id="cra-modal-confirm">i understand, mark as not available</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Physical Copies Fee Modal -->
+  <div class="modal-overlay" id="physical-modal">
+    <div class="modal-card">
+      <div class="modal-icon modal-icon-blue">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+      </div>
+      <h2>physical document fee</h2>
+      <p>processing physical documents requires additional handling time. there is an additional fee of <strong>$1.00 per physical document</strong> that will be added to your invoice.</p>
+      <p>once confirmed, we'll provide mailing instructions so you can send your physical receipts and invoices to us.</p>
+      <div class="modal-actions">
+        <button class="btn btn-modal-cancel" id="physical-modal-cancel">go back</button>
+        <button class="btn btn-modal-confirm btn-modal-confirm-blue" id="physical-modal-confirm">i understand, proceed</button>
+      </div>
+    </div>
+  </div>
+
   <script src="portal.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    }
+  </script>
 </body>
 </html>

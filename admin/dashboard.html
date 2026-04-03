@@ -26,39 +26,82 @@
       </div>
     </header>
 
-    <!-- Stats bar -->
-    <div class="admin-stats" id="admin-stats">
-      <div class="stat-card stat-pending">
-        <span class="stat-number" id="stat-pending">0</span>
-        <span class="stat-label">pending review</span>
+    <!-- Admin nav tabs -->
+    <nav class="admin-nav" id="admin-nav">
+      <button class="nav-btn active" data-admin-view="documents">documents</button>
+      <button class="nav-btn" data-admin-view="clients">clients</button>
+    </nav>
+
+    <!-- Documents view (existing) -->
+    <div class="admin-view" id="view-documents">
+      <div class="admin-stats" id="admin-stats">
+        <div class="stat-card stat-pending">
+          <span class="stat-number" id="stat-pending">0</span>
+          <span class="stat-label">pending review</span>
+        </div>
+        <div class="stat-card stat-approved">
+          <span class="stat-number" id="stat-approved">0</span>
+          <span class="stat-label">approved</span>
+        </div>
+        <div class="stat-card stat-rejected">
+          <span class="stat-number" id="stat-rejected">0</span>
+          <span class="stat-label">rejected</span>
+        </div>
       </div>
-      <div class="stat-card stat-approved">
-        <span class="stat-number" id="stat-approved">0</span>
-        <span class="stat-label">approved</span>
+
+      <div class="admin-filters">
+        <button class="filter-btn active" data-filter="pending">pending</button>
+        <button class="filter-btn" data-filter="all">all</button>
+        <button class="filter-btn" data-filter="approved">approved</button>
+        <button class="filter-btn" data-filter="rejected">rejected</button>
+        <button class="btn-refresh" onclick="loadAnalyses()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          refresh
+        </button>
       </div>
-      <div class="stat-card stat-rejected">
-        <span class="stat-number" id="stat-rejected">0</span>
-        <span class="stat-label">rejected</span>
+
+      <div class="admin-content" id="admin-content">
+        <div class="empty-state">
+          <p>no documents to review yet</p>
+          <span>when clients upload documents, they'll appear here for your review</span>
+        </div>
       </div>
     </div>
 
-    <!-- Filter tabs -->
-    <div class="admin-filters">
-      <button class="filter-btn active" data-filter="pending">pending</button>
-      <button class="filter-btn" data-filter="all">all</button>
-      <button class="filter-btn" data-filter="approved">approved</button>
-      <button class="filter-btn" data-filter="rejected">rejected</button>
-      <button class="btn-refresh" onclick="loadAnalyses()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-        refresh
-      </button>
-    </div>
+    <!-- Clients view (new) -->
+    <div class="admin-view" id="view-clients" style="display:none;">
+      <div class="clients-header">
+        <h2 class="clients-title">clients</h2>
+        <button class="btn-add-client" id="btn-add-client">+ add client</button>
+      </div>
+      <div id="clients-list" class="clients-list"></div>
 
-    <!-- Analyses list -->
-    <div class="admin-content" id="admin-content">
-      <div class="empty-state">
-        <p>no documents to review yet</p>
-        <span>when clients upload documents, they'll appear here for your review</span>
+      <!-- Add/Edit client modal -->
+      <div class="modal-overlay" id="client-modal" style="display:none;">
+        <div class="modal-card">
+          <h3 id="client-modal-title">add client</h3>
+          <div class="form-group">
+            <label>name</label>
+            <input type="text" id="client-name" placeholder="Acme Corp">
+          </div>
+          <div class="form-group">
+            <label>email</label>
+            <input type="email" id="client-email" placeholder="contact@acme.com">
+          </div>
+          <div class="form-group">
+            <label>billing frequency</label>
+            <select id="client-billing">
+              <option value="monthly">monthly</option>
+              <option value="quarterly">quarterly</option>
+              <option value="annual">annual</option>
+            </select>
+          </div>
+          <div id="client-modal-error" class="login-error" style="display:none;"></div>
+          <div class="modal-actions">
+            <button class="btn-modal-save" id="client-modal-save">save</button>
+            <button class="btn-modal-cancel" id="client-modal-cancel">cancel</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>

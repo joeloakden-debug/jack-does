@@ -24,12 +24,28 @@ app.use(express.static(__dirname)); // Serve the main site
 app.use('/portal', express.static(path.join(__dirname, 'portal')));
 
 // ========================================
-// CLIENT REGISTRY (swap with DB in production)
+// CLIENT REGISTRY (file-backed persistence)
 // ========================================
-const CLIENTS = {
-  'demo-client': { name: 'Demo Client', email: 'demo@company.com' },
-  // Add more clients here as needed, or load from a database in production
-};
+const CLIENTS_FILE = path.join(__dirname, 'clients.json');
+
+function loadClients() {
+  try {
+    if (fs.existsSync(CLIENTS_FILE)) {
+      return JSON.parse(fs.readFileSync(CLIENTS_FILE, 'utf-8'));
+    }
+  } catch (e) {
+    console.error('Failed to load clients.json:', e.message);
+  }
+  return {
+    'demo-client': { name: 'Demo Client', email: 'demo@company.com', billingFrequency: 'monthly', createdAt: new Date().toISOString() }
+  };
+}
+
+function saveClients(clients) {
+  fs.writeFileSync(CLIENTS_FILE, JSON.stringify(clients, null, 2), 'utf-8');
+}
+
+let CLIENTS = loadClients();
 
 /**
  * Middleware: resolve which client is making the request.
@@ -862,9 +878,72 @@ app.get('/api/admin/stats', requireAdmin, (req, res) => {
     else if (v.status === 'approved') approved++;
     else if (v.status === 'rejected') rejected++;
   });
-  res.json({ pending, approved, rejected, total: documentAnalyses.size, qboConnected: qbo.isConnected() });
+  res.json({ pending, approved, rejected, total: documentAnalyses.size, qboConnected: qbo.isConnected(), clientCount: Object.keys(CLIENTS).length });
 });
 
+
+// ========================================
+// CLIENT CONFIG (portal fetches this)
+// ========================================
+app.get('/api/client/config', resolveClient, (req, res) => {
+  const client = CLIENTS[req.clientId];
+  if (!client) {
+    return res.json({ billingFrequency: 'monthly' });
+  }
+  res.json({
+    billingFrequency: client.billingFrequency || 'monthly',
+    name: client.name,
+  });
+});
+
+// ========================================
+// CLIENT MANAGEMENT (admin)
+// ========================================
+app.get('/api/admin/clients', requireAdmin, (req, res) => {
+  const clientList = Object.entries(CLIENTS).map(([id, data]) => ({
+    id,
+    ...data,
+  }));
+  clientList.sort((a, b) => a.name.localeCompare(b.name));
+  res.json({ clients: clientList });
+});
+
+app.post('/api/admin/clients', requireAdmin, (req, res) => {
+  const { name, email, billingFrequency } = req.body;
+  if (!name || !email) {
+    return res.status(400).json({ error: 'Name and email are required' });
+  }
+  const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+  if (CLIENTS[id]) {
+    return res.status(409).json({ error: 'A client with that ID already exists' });
+  }
+  const validFreqs = ['monthly', 'quarterly', 'annual'];
+  CLIENTS[id] = {
+    name,
+    email,
+    billingFrequency: validFreqs.includes(billingFrequency) ? billingFrequency : 'monthly',
+    createdAt: new Date().toISOString(),
+  };
+  saveClients(CLIENTS);
+  res.json({ success: true, id, client: CLIENTS[id] });
+});
+
+app.put('/api/admin/clients/:id', requireAdmin, (req, res) => {
+  const client = CLIENTS[req.params.id];
+  if (!client) {
+    return res.status(404).json({ error: 'Client not found' });
+  }
+  const { name, email, billingFrequency } = req.body;
+  if (name) client.name = name;
+  if (email) client.email = email;
+  const validFreqs = ['monthly', 'quarterly', 'annual'];
+  if (billingFrequency && validFreqs.includes(billingFrequency)) {
+    client.billingFrequency = billingFrequency;
+  }
+  CLIENTS[req.params.id] = client;
+  saveClients(CLIENTS);
+  res.json({ success: true, client });
+});
 
 // ========================================
 // START SERVER

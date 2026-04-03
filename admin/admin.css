@@ -542,10 +542,253 @@ body {
 }
 
 
-/* Responsive */
+/* ======== ADMIN NAV ======== */
+.admin-nav {
+  display: flex;
+  gap: 0;
+  padding: 16px 0 0;
+  border-bottom: 2px solid var(--gray-100);
+}
+
+.nav-btn {
+  font-size: 0.9rem;
+  font-family: inherit;
+  font-weight: 500;
+  color: var(--gray-400);
+  background: none;
+  border: none;
+  padding: 10px 24px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: all var(--transition);
+}
+
+.nav-btn:hover { color: var(--gray-600); }
+
+.nav-btn.active {
+  color: var(--blue-600);
+  border-bottom-color: var(--blue-600);
+}
+
+/* ======== CLIENTS VIEW ======== */
+.clients-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24px 0 16px;
+}
+
+.clients-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--gray-700);
+}
+
+.btn-add-client {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 20px;
+  border-radius: 50px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  background: var(--blue-600);
+  color: var(--white);
+  transition: all var(--transition);
+}
+
+.btn-add-client:hover { background: var(--blue-700); }
+
+.clients-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 40px;
+}
+
+.client-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--white);
+  border: 1px solid var(--gray-100);
+  border-radius: 12px;
+  padding: 16px 20px;
+  transition: box-shadow var(--transition);
+}
+
+.client-card:hover { box-shadow: var(--shadow); }
+
+.client-card-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.client-card-name {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--gray-800);
+}
+
+.client-card-email {
+  font-size: 0.82rem;
+  color: var(--gray-400);
+  margin-top: 2px;
+}
+
+.client-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.client-card-id {
+  font-size: 0.75rem;
+  color: var(--gray-300);
+  font-family: monospace;
+}
+
+.client-billing-badge {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 3px 10px;
+  border-radius: 20px;
+}
+
+.client-billing-badge.monthly { background: #eff6ff; color: var(--blue-600); }
+.client-billing-badge.quarterly { background: #f0fdf4; color: var(--green-600); }
+.client-billing-badge.annual { background: #fff7ed; color: var(--orange-600); }
+
+.btn-edit-client {
+  font-size: 0.82rem;
+  font-family: inherit;
+  font-weight: 500;
+  color: var(--blue-600);
+  background: none;
+  border: 1.5px solid var(--blue-200, #bfdbfe);
+  border-radius: 8px;
+  padding: 6px 16px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.btn-edit-client:hover {
+  background: #eff6ff;
+  border-color: var(--blue-400, #60a5fa);
+}
+
+/* ======== CLIENT MODAL ======== */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.3);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-card {
+  background: var(--white);
+  border-radius: 16px;
+  padding: 32px;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+}
+
+.modal-card h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-bottom: 20px;
+  color: var(--gray-800);
+}
+
+.modal-card .form-group {
+  margin-bottom: 16px;
+}
+
+.modal-card label {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--gray-500);
+  margin-bottom: 6px;
+}
+
+.modal-card input,
+.modal-card select {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1.5px solid var(--gray-200);
+  border-radius: 10px;
+  font-size: 0.95rem;
+  font-family: inherit;
+  background: var(--gray-50);
+  color: var(--gray-800);
+  box-sizing: border-box;
+}
+
+.modal-card input:focus,
+.modal-card select:focus {
+  outline: none;
+  border-color: var(--blue-400, #60a5fa);
+  background: var(--white);
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 24px;
+}
+
+.btn-modal-save {
+  flex: 1;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 10px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  background: var(--blue-600);
+  color: var(--white);
+  transition: all var(--transition);
+}
+
+.btn-modal-save:hover { background: var(--blue-700); }
+
+.btn-modal-cancel {
+  flex: 1;
+  padding: 10px 20px;
+  border: 1.5px solid var(--gray-200);
+  border-radius: 10px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  background: var(--white);
+  color: var(--gray-600);
+  transition: all var(--transition);
+}
+
+.btn-modal-cancel:hover {
+  background: var(--gray-50);
+  border-color: var(--gray-300);
+}
+
+/* ======== RESPONSIVE ======== */
 @media (max-width: 768px) {
   .admin-stats { flex-direction: column; gap: 10px; }
   .admin-filters { flex-wrap: wrap; }
   .analysis-header { flex-direction: column; gap: 10px; align-items: flex-start; }
   .analysis-header-right { align-self: flex-end; }
+  .client-card { flex-direction: column; gap: 12px; align-items: flex-start; }
+  .client-card-meta { align-self: flex-end; }
 }
