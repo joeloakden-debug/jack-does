@@ -787,6 +787,48 @@ document.getElementById('btn-change-pw').addEventListener('click', async () => {
 
 
 // ========================================
+// SETTINGS — QBO TOKENS
+// ========================================
+async function loadQboTokens() {
+  const statusEl = document.getElementById('qbo-tokens-status');
+  const valueEl = document.getElementById('qbo-tokens-value');
+  const copyBtn = document.getElementById('btn-copy-tokens');
+  try {
+    const res = await fetch('/api/admin/qbo-tokens', {
+      headers: { 'Authorization': getAuth() },
+    });
+    const data = await res.json();
+    if (data.connected && data.tokens) {
+      statusEl.textContent = 'qbo connected — tokens available';
+      statusEl.style.color = 'var(--green-600)';
+      valueEl.value = data.tokens;
+      valueEl.style.display = '';
+      copyBtn.style.display = '';
+    } else if (data.connected) {
+      statusEl.textContent = 'qbo connected but token file not found';
+      statusEl.style.color = 'var(--amber-600)';
+    } else {
+      statusEl.textContent = 'qbo not connected — connect via portal first';
+      statusEl.style.color = 'var(--gray-500)';
+      valueEl.style.display = 'none';
+      copyBtn.style.display = 'none';
+    }
+  } catch (e) {
+    statusEl.textContent = 'could not fetch token status';
+  }
+}
+
+document.getElementById('btn-copy-tokens').addEventListener('click', () => {
+  const valueEl = document.getElementById('qbo-tokens-value');
+  navigator.clipboard.writeText(valueEl.value);
+  const btn = document.getElementById('btn-copy-tokens');
+  btn.textContent = 'copied!';
+  setTimeout(() => { btn.textContent = 'copy to clipboard'; }, 2000);
+});
+
+document.getElementById('btn-refresh-tokens').addEventListener('click', loadQboTokens);
+
+// ========================================
 // INIT
 // ========================================
 async function init() {
@@ -794,6 +836,7 @@ async function init() {
   await loadAccounts();
   loadStats();
   loadAnalyses();
+  loadQboTokens();
 }
 
 init();

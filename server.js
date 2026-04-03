@@ -272,6 +272,21 @@ app.get('/api/qbo/status', (req, res) => {
   res.json({ connected: qbo.isConnected() });
 });
 
+// Admin endpoint to get current QBO tokens (for saving to Railway env var)
+app.get('/api/admin/qbo-tokens', requireAdmin, (req, res) => {
+  if (!qbo.isConnected()) {
+    return res.json({ connected: false, tokens: null });
+  }
+  // Read the token file
+  const tokenFile = require('path').join(__dirname, '.qbo-tokens.json');
+  try {
+    const data = fs.readFileSync(tokenFile, 'utf-8');
+    res.json({ connected: true, tokens: data });
+  } catch (e) {
+    res.json({ connected: true, tokens: null, error: 'Token file not found' });
+  }
+});
+
 // Disconnect QuickBooks
 app.post('/api/qbo/disconnect', (req, res) => {
   // In production, revoke tokens properly
