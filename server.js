@@ -229,6 +229,8 @@ When QuickBooks data is provided:
 - Compare periods when data is available
 - Highlight important trends, concerns, or opportunities
 - Be specific — reference actual account names, amounts, and dates from the data
+- You have access to transaction-level detail (individual purchases, bills, invoices, payments). When a client asks about a specific expense category or line item, look through expenseTransactions and billTransactions to find and list the individual transactions
+- Never say you don't have access to transaction data — you do. If the data is in the QuickBooks context, use it
 
 Important rules:
 - Never provide specific tax advice — always note that specific situations should be reviewed by a qualified tax professional
@@ -295,12 +297,16 @@ app.post('/api/chat', resolveClient, async (req, res) => {
     const history = conversations.get(convoKey);
 
     // If QuickBooks is connected, fetch relevant financial data
+    // Include recent conversation context so follow-up questions get the right data
     let qboContext = '';
     if (qbo.isConnected()) {
       try {
-        const data = await qbo.fetchRelevantData(message);
+        // Build a combined query from the current message + recent conversation for better keyword matching
+        const recentMessages = history.slice(-6).map(m => m.content).join(' ');
+        const combinedQuery = `${message} ${recentMessages}`;
+        const data = await qbo.fetchRelevantData(combinedQuery);
         if (data && Object.keys(data).length > 0 && !data.error) {
-          qboContext = `\n\n--- QUICKBOOKS DATA (from the client's actual books) ---\n${JSON.stringify(data, null, 2)}\n--- END QUICKBOOKS DATA ---\n\nUse this real data to answer the client's question. Reference actual numbers and account names.`;
+          qboContext = `\n\n--- QUICKBOOKS DATA (from the client's actual books) ---\n${JSON.stringify(data, null, 2)}\n--- END QUICKBOOKS DATA ---\n\nUse this real data to answer the client's question. Reference actual numbers and account names. When the client asks for detail on a specific line item, look through the transaction data (expenseTransactions, billTransactions) to find the individual transactions that make up that category.`;
         } else if (data.error) {
           qboContext = `\n\n[Note: Tried to fetch QuickBooks data but got an error: ${data.error}. Answer the question generally and let the client know there was a temporary issue accessing their books.]`;
         }
