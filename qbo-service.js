@@ -308,6 +308,76 @@ async function getAccounts(realmId = 'default') {
   return qbPromise(qb, 'findAccounts', { fetchAll: true });
 }
 
+/**
+ * Get all purchases/expenses in a date range
+ */
+async function getExpenseTransactions(startDate, endDate, limit = 100, realmId = 'default') {
+  return query(
+    `SELECT * FROM Purchase WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' ORDER BY TxnDate DESC MAXRESULTS ${limit}`,
+    realmId
+  );
+}
+
+/**
+ * Get all bills in a date range
+ */
+async function getBills(startDate, endDate, limit = 100, realmId = 'default') {
+  return query(
+    `SELECT * FROM Bill WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' ORDER BY TxnDate DESC MAXRESULTS ${limit}`,
+    realmId
+  );
+}
+
+/**
+ * Get invoices in a date range
+ */
+async function getInvoicesByDate(startDate, endDate, limit = 100, realmId = 'default') {
+  return query(
+    `SELECT * FROM Invoice WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' ORDER BY TxnDate DESC MAXRESULTS ${limit}`,
+    realmId
+  );
+}
+
+/**
+ * Get all journal entries in a date range
+ */
+async function getJournalEntries(startDate, endDate, limit = 100, realmId = 'default') {
+  return query(
+    `SELECT * FROM JournalEntry WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' ORDER BY TxnDate DESC MAXRESULTS ${limit}`,
+    realmId
+  );
+}
+
+/**
+ * Get payments received in a date range
+ */
+async function getPayments(startDate, endDate, limit = 100, realmId = 'default') {
+  return query(
+    `SELECT * FROM Payment WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' ORDER BY TxnDate DESC MAXRESULTS ${limit}`,
+    realmId
+  );
+}
+
+/**
+ * Get deposits in a date range
+ */
+async function getDeposits(startDate, endDate, limit = 100, realmId = 'default') {
+  return query(
+    `SELECT * FROM Deposit WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' ORDER BY TxnDate DESC MAXRESULTS ${limit}`,
+    realmId
+  );
+}
+
+/**
+ * Get transfers in a date range
+ */
+async function getTransfers(startDate, endDate, limit = 100, realmId = 'default') {
+  return query(
+    `SELECT * FROM Transfer WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' ORDER BY TxnDate DESC MAXRESULTS ${limit}`,
+    realmId
+  );
+}
+
 // ========================================
 // SMART DATA FETCHER
 // Determines what data to pull based on the user's question
@@ -338,6 +408,26 @@ async function fetchRelevantData(question, realmId = 'default') {
     // Not critical
   }
 
+  // Determine the relevant date range for transaction queries
+  let txnStart = firstOfLastMonth;
+  let txnEnd = today;
+  if (q.includes('last month') || q.includes('previous month')) {
+    txnStart = firstOfLastMonth;
+    txnEnd = lastOfLastMonth;
+  } else if (q.includes('this month')) {
+    txnStart = firstOfThisMonth;
+    txnEnd = today;
+  } else if (q.includes('this year') || q.includes('ytd') || q.includes('year to date')) {
+    txnStart = startOfYear;
+    txnEnd = today;
+  } else if (q.includes('last year') || q.includes('previous year')) {
+    txnStart = `${now.getFullYear() - 1}-01-01`;
+    txnEnd = `${now.getFullYear() - 1}-12-31`;
+  }
+
+  // Detect if user is asking about specific line items, transactions, or details
+  const wantsDetail = q.match(/detail|breakdown|transaction|what.*made up|what.*in|drill.*down|line.*item|specific|individual|tell me more|more info|what.*include|what.*consist|explain.*expense|explain.*cost|break.*down|itemize|list.*transaction|show.*transaction|what.*charge|what.*pay.*for|each|every|subscript/);
+
   try {
     // Profit / revenue / income questions
     if (q.match(/profit|revenue|income|earn|loss|p&l|p\+l|how.*doing|performance/)) {
@@ -348,7 +438,6 @@ async function fetchRelevantData(question, realmId = 'default') {
       } else if (q.includes('this year') || q.includes('ytd') || q.includes('year to date')) {
         results.profitAndLoss = await getProfitAndLoss(startOfYear, today, realmId);
       } else {
-        // Default to last month + this month for comparison
         results.profitAndLossLastMonth = await getProfitAndLoss(firstOfLastMonth, lastOfLastMonth, realmId);
         results.profitAndLossThisMonth = await getProfitAndLoss(firstOfThisMonth, today, realmId);
       }
@@ -373,18 +462,26 @@ async function fetchRelevantData(question, realmId = 'default') {
     // Payables / bills / what we owe
     if (q.match(/payable|bills|what.*we owe|what.*i owe|vendor.*balance|accounts payable/)) {
       results.agedPayables = await getAgedPayables(realmId);
+      if (wantsDetail) {
+        results.billTransactions = await getBills(txnStart, txnEnd, 100, realmId);
+      }
     }
 
     // Invoices
     if (q.match(/invoice|billed|billing/)) {
-      results.recentInvoices = await getRecentInvoices(15, realmId);
+      results.recentInvoices = await getInvoicesByDate(txnStart, txnEnd, 50, realmId);
     }
 
-    // Expenses / spending
-    if (q.match(/expense|spend|cost|purchase|bought/)) {
-      results.recentExpenses = await getRecentExpenses(15, realmId);
+    // Expenses / spending — always fetch transactions for detail
+    if (q.match(/expense|spend|cost|purchase|bought|subscript|software|rent|office|utilit|insurance|advertising|marketing|meal|travel|phone|internet/) || wantsDetail) {
+      results.expenseTransactions = await getExpenseTransactions(txnStart, txnEnd, 100, realmId);
+      results.billTransactions = results.billTransactions || await getBills(txnStart, txnEnd, 100, realmId);
       if (!results.profitAndLoss) {
-        results.profitAndLoss = await getProfitAndLoss(firstOfThisMonth, today, realmId);
+        if (q.includes('last month') || q.includes('previous month')) {
+          results.profitAndLoss = await getProfitAndLoss(firstOfLastMonth, lastOfLastMonth, realmId);
+        } else {
+          results.profitAndLoss = await getProfitAndLoss(txnStart, txnEnd, realmId);
+        }
       }
     }
 
@@ -396,6 +493,25 @@ async function fetchRelevantData(question, realmId = 'default') {
     // Vendors / suppliers
     if (q.match(/vendor|supplier|who.*pay/)) {
       results.vendors = await getVendors(realmId);
+      if (wantsDetail) {
+        results.billTransactions = results.billTransactions || await getBills(txnStart, txnEnd, 100, realmId);
+      }
+    }
+
+    // Deposits / payments received
+    if (q.match(/deposit|payment.*received|money.*in|received/)) {
+      results.deposits = await getDeposits(txnStart, txnEnd, 50, realmId);
+      results.payments = await getPayments(txnStart, txnEnd, 50, realmId);
+    }
+
+    // Transfers between accounts
+    if (q.match(/transfer|moved.*money|between.*account/)) {
+      results.transfers = await getTransfers(txnStart, txnEnd, 50, realmId);
+    }
+
+    // Journal entries
+    if (q.match(/journal entr|adjustment|accrual/)) {
+      results.journalEntries = await getJournalEntries(txnStart, txnEnd, 50, realmId);
     }
 
     // Tax related
@@ -404,6 +520,8 @@ async function fetchRelevantData(question, realmId = 'default') {
         await getProfitAndLoss(startOfYear, today, realmId);
       results.balanceSheet = results.balanceSheet ||
         await getBalanceSheet(today, realmId);
+      results.expenseTransactions = results.expenseTransactions ||
+        await getExpenseTransactions(startOfYear, today, 100, realmId);
     }
 
     // General / overview / summary
@@ -416,10 +534,11 @@ async function fetchRelevantData(question, realmId = 'default') {
         await getAgedReceivables(realmId);
     }
 
-    // If nothing matched, get a general overview
+    // If nothing matched, get P&L + transactions for a general overview
     if (Object.keys(results).length <= 1) {
-      results.profitAndLoss = await getProfitAndLoss(firstOfThisMonth, today, realmId);
+      results.profitAndLoss = await getProfitAndLoss(txnStart, txnEnd, realmId);
       results.balanceSheet = await getBalanceSheet(today, realmId);
+      results.expenseTransactions = await getExpenseTransactions(txnStart, txnEnd, 50, realmId);
     }
 
   } catch (error) {
@@ -533,6 +652,13 @@ module.exports = {
   getCompanyInfo,
   getRecentInvoices,
   getRecentExpenses,
+  getExpenseTransactions,
+  getBills,
+  getInvoicesByDate,
+  getJournalEntries,
+  getPayments,
+  getDeposits,
+  getTransfers,
   getCustomers,
   getVendors,
   getAccounts,
