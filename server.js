@@ -14,7 +14,8 @@ const fs = require('fs');
 const qbo = require('./qbo-service');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = parseInt(process.env.PORT, 10) || 3000;
+console.log(`[startup] PORT env var = "${process.env.PORT}", using port ${PORT}`);
 
 // ========================================
 // MIDDLEWARE
