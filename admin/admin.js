@@ -600,6 +600,7 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     document.querySelectorAll('.admin-view').forEach(v => v.style.display = 'none');
     document.getElementById(`view-${currentAdminView}`).style.display = '';
     if (currentAdminView === 'clients') loadClients();
+    if (currentAdminView === 'fixed-assets') loadFixedAssetsView();
   });
 });
 
@@ -728,6 +729,309 @@ document.getElementById('client-modal-save').addEventListener('click', () => sav
 // Close modal on overlay click
 document.getElementById('client-modal').addEventListener('click', (e) => {
   if (e.target === e.currentTarget) closeClientModal();
+});
+
+
+// ========================================
+// FIXED ASSETS
+// ========================================
+let allFixedAssets = [];
+let fixedAssetRuns = [];
+let editingAssetId = null;
+
+async function loadFixedAssetsView() {
+  try {
+    const res = await fetch('/api/admin/fixed-assets', {
+      headers: { 'Authorization': getAuth() },
+    });
+    const data = await res.json();
+    allFixedAssets = data.assets || [];
+    fixedAssetRuns = data.amortizationRuns || [];
+    renderFixedAssets();
+  } catch (e) {
+    console.error('Failed to load fixed assets:', e);
+  }
+}
+
+function renderFixedAssets() {
+  const list = document.getElementById('fixed-assets-list');
+  const activeAssets = allFixedAssets.filter(a => a.active);
+
+  if (activeAssets.length === 0) {
+    list.innerHTML = '<p style="color:var(--gray-400);text-align:center;padding:40px;">no fixed assets yet. click "+ add asset" to get started.</p>';
+  } else {
+    list.innerHTML = activeAssets.map(a => {
+      const monthly = ((a.originalCost - a.salvageValue) / a.usefulLifeMonths).toFixed(2);
+      const acqDate = new Date(a.acquisitionDate);
+      const now = new Date();
+      const monthsElapsed = (now.getFullYear() * 12 + now.getMonth()) - (acqDate.getFullYear() * 12 + acqDate.getMonth());
+      const remaining = Math.max(0, a.usefulLifeMonths - monthsElapsed);
+      const totalAmort = (a.originalCost - a.salvageValue);
+      const amortized = Math.min(monthsElapsed * parseFloat(monthly), totalAmort);
+
+      return `
+        <div class="client-card">
+          <div class="client-info">
+            <div class="client-name">${a.name}</div>
+            <div class="asset-card-amounts">
+              <span class="asset-card-amount">cost: <strong>$${a.originalCost.toLocaleString()}</strong></span>
+              <span class="asset-card-amount">monthly: <strong>$${monthly}</strong></span>
+              <span class="asset-card-amount">remaining: <strong>${remaining} mo</strong></span>
+            </div>
+            <div style="margin-top:4px;font-size:0.75rem;color:var(--gray-400);">
+              ${a.expenseAccountName} → ${a.accumAccountName}
+            </div>
+          </div>
+          <div class="asset-card-actions">
+            <button class="btn-edit-client" onclick="openEditAsset('${a.id}')">edit</button>
+            <button class="btn-delete-asset" onclick="deleteAsset('${a.id}')">delete</button>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  // Show last run info
+  const lastRunEl = document.getElementById('last-amortization-run');
+  if (fixedAssetRuns.length > 0) {
+    const lastRun = fixedAssetRuns[fixedAssetRuns.length - 1];
+    const runDate = new Date(lastRun.ranAt).toLocaleDateString();
+    lastRunEl.textContent = `last run: ${lastRun.month} on ${runDate} — $${lastRun.totalAmount.toFixed(2)} (${lastRun.assetCount} assets)`;
+  } else {
+    lastRunEl.textContent = 'no amortization runs yet';
+  }
+}
+
+function populateAssetDropdowns(asset) {
+  const selects = {
+    'asset-account-asset': { types: ['Fixed Asset', 'Other Asset'], selected: asset?.assetAccountId },
+    'asset-account-expense': { types: ['Expense', 'Other Expense'], selected: asset?.expenseAccountId },
+    'asset-account-accum': { types: ['Fixed Asset', 'Other Asset', 'Other Current Asset'], selected: asset?.accumAccountId },
+  };
+
+  Object.entries(selects).forEach(([id, cfg]) => {
+    const select = document.getElementById(id);
+    select.innerHTML = '<option value="">select account...</option>';
+    const filtered = qboAccounts.filter(a => cfg.types.includes(a.AccountType));
+    filtered.forEach(a => {
+      const opt = document.createElement('option');
+      opt.value = a.Id;
+      opt.textContent = `${a.Name} (${a.AccountType})`;
+      opt.dataset.name = a.Name;
+      if (a.Id === cfg.selected) opt.selected = true;
+      select.appendChild(opt);
+    });
+  });
+}
+
+function openAddAsset() {
+  editingAssetId = null;
+  document.getElementById('asset-modal-title').textContent = 'add fixed asset';
+  document.getElementById('asset-name').value = '';
+  document.getElementById('asset-cost').value = '';
+  document.getElementById('asset-useful-life').value = '';
+  document.getElementById('asset-salvage').value = '0';
+  document.getElementById('asset-acq-date').value = '';
+  document.getElementById('asset-modal-error').style.display = 'none';
+  populateAssetDropdowns(null);
+  document.getElementById('asset-modal').style.display = 'flex';
+}
+
+function openEditAsset(id) {
+  const asset = allFixedAssets.find(a => a.id === id);
+  if (!asset) return;
+  editingAssetId = id;
+  document.getElementById('asset-modal-title').textContent = 'edit fixed asset';
+  document.getElementById('asset-name').value = asset.name;
+  document.getElementById('asset-cost').value = asset.originalCost;
+  document.getElementById('asset-useful-life').value = asset.usefulLifeMonths;
+  document.getElementById('asset-salvage').value = asset.salvageValue;
+  document.getElementById('asset-acq-date').value = asset.acquisitionDate;
+  document.getElementById('asset-modal-error').style.display = 'none';
+  populateAssetDropdowns(asset);
+  document.getElementById('asset-modal').style.display = 'flex';
+}
+
+function closeAssetModal() {
+  document.getElementById('asset-modal').style.display = 'none';
+}
+
+async function saveAsset() {
+  const errorEl = document.getElementById('asset-modal-error');
+  errorEl.style.display = 'none';
+
+  const name = document.getElementById('asset-name').value.trim();
+  const originalCost = document.getElementById('asset-cost').value;
+  const usefulLifeMonths = document.getElementById('asset-useful-life').value;
+  const salvageValue = document.getElementById('asset-salvage').value || '0';
+  const acquisitionDate = document.getElementById('asset-acq-date').value;
+
+  const assetAcctEl = document.getElementById('asset-account-asset');
+  const expenseAcctEl = document.getElementById('asset-account-expense');
+  const accumAcctEl = document.getElementById('asset-account-accum');
+
+  const assetAccountId = assetAcctEl.value;
+  const assetAccountName = assetAcctEl.selectedOptions[0]?.dataset.name || '';
+  const expenseAccountId = expenseAcctEl.value;
+  const expenseAccountName = expenseAcctEl.selectedOptions[0]?.dataset.name || '';
+  const accumAccountId = accumAcctEl.value;
+  const accumAccountName = accumAcctEl.selectedOptions[0]?.dataset.name || '';
+
+  if (!name || !originalCost || !usefulLifeMonths || !acquisitionDate) {
+    errorEl.textContent = 'name, cost, useful life, and acquisition date are required';
+    errorEl.style.display = '';
+    return;
+  }
+  if (!assetAccountId || !expenseAccountId || !accumAccountId) {
+    errorEl.textContent = 'all three QBO accounts must be selected';
+    errorEl.style.display = '';
+    return;
+  }
+
+  const body = { name, originalCost, usefulLifeMonths, salvageValue, acquisitionDate,
+    assetAccountId, assetAccountName, expenseAccountId, expenseAccountName,
+    accumAccountId, accumAccountName };
+
+  try {
+    const url = editingAssetId
+      ? `/api/admin/fixed-assets/${editingAssetId}`
+      : '/api/admin/fixed-assets';
+    const method = editingAssetId ? 'PUT' : 'POST';
+
+    const res = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.error) {
+      errorEl.textContent = data.error;
+      errorEl.style.display = '';
+      return;
+    }
+    closeAssetModal();
+    loadFixedAssetsView();
+  } catch (e) {
+    errorEl.textContent = 'failed to save asset';
+    errorEl.style.display = '';
+  }
+}
+
+async function deleteAsset(id) {
+  if (!confirm('are you sure you want to delete this asset?')) return;
+  try {
+    await fetch(`/api/admin/fixed-assets/${id}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': getAuth() },
+    });
+    loadFixedAssetsView();
+  } catch (e) {
+    alert('failed to delete asset');
+  }
+}
+
+async function openRunAmortization() {
+  const errorEl = document.getElementById('amortization-modal-error');
+  errorEl.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/admin/fixed-assets/preview-amortization', {
+      headers: { 'Authorization': getAuth() },
+    });
+    const data = await res.json();
+
+    if (data.alreadyRun) {
+      const runDate = new Date(data.runDetails.ranAt).toLocaleDateString();
+      document.getElementById('amortization-month').textContent = `month: ${data.month}`;
+      document.getElementById('amortization-preview').innerHTML =
+        `<p style="color:var(--amber-600);">amortization was already run for ${data.month} on ${runDate}.<br>total: $${data.runDetails.totalAmount.toFixed(2)} (${data.runDetails.assetCount} assets)</p>`;
+      document.getElementById('amortization-confirm').style.display = 'none';
+      document.getElementById('amortization-modal').style.display = 'flex';
+      return;
+    }
+
+    if (data.eligibleCount === 0) {
+      document.getElementById('amortization-month').textContent = `month: ${data.month}`;
+      document.getElementById('amortization-preview').innerHTML =
+        '<p style="color:var(--gray-500);">no eligible assets for amortization this month.</p>';
+      document.getElementById('amortization-confirm').style.display = 'none';
+      document.getElementById('amortization-modal').style.display = 'flex';
+      return;
+    }
+
+    document.getElementById('amortization-month').textContent = `month: ${data.month}`;
+    let tableHtml = `
+      <table class="amortization-preview-table">
+        <thead><tr><th>asset</th><th>dr expense</th><th>cr accum</th><th style="text-align:right;">amount</th></tr></thead>
+        <tbody>
+          ${data.lines.map(l => `
+            <tr>
+              <td>${l.assetName}</td>
+              <td>${l.expenseAccountName}</td>
+              <td>${l.accumAccountName}</td>
+              <td style="text-align:right;">$${l.amount.toFixed(2)}</td>
+            </tr>`).join('')}
+        </tbody>
+        <tfoot><tr><td colspan="3">total</td><td style="text-align:right;">$${data.totalAmount.toFixed(2)}</td></tr></tfoot>
+      </table>`;
+    document.getElementById('amortization-preview').innerHTML = tableHtml;
+    document.getElementById('amortization-confirm').style.display = '';
+    document.getElementById('amortization-modal').style.display = 'flex';
+  } catch (e) {
+    alert('failed to preview amortization');
+  }
+}
+
+function closeAmortizationModal() {
+  document.getElementById('amortization-modal').style.display = 'none';
+}
+
+async function confirmRunAmortization() {
+  const errorEl = document.getElementById('amortization-modal-error');
+  const confirmBtn = document.getElementById('amortization-confirm');
+  errorEl.style.display = 'none';
+  confirmBtn.textContent = 'posting...';
+  confirmBtn.disabled = true;
+
+  try {
+    const res = await fetch('/api/admin/fixed-assets/run-amortization', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+    });
+    const data = await res.json();
+    if (data.error) {
+      errorEl.textContent = data.error;
+      errorEl.style.display = '';
+      confirmBtn.textContent = 'post to quickbooks';
+      confirmBtn.disabled = false;
+      return;
+    }
+
+    closeAmortizationModal();
+    const statusEl = document.getElementById('amortization-status');
+    statusEl.textContent = `amortization posted to quickbooks — $${data.run.totalAmount.toFixed(2)} for ${data.run.assetCount} assets`;
+    statusEl.style.display = '';
+    setTimeout(() => { statusEl.style.display = 'none'; }, 5000);
+    loadFixedAssetsView();
+  } catch (e) {
+    errorEl.textContent = 'failed to post amortization';
+    errorEl.style.display = '';
+  }
+  confirmBtn.textContent = 'post to quickbooks';
+  confirmBtn.disabled = false;
+}
+
+// Fixed asset event listeners
+document.getElementById('btn-add-asset').addEventListener('click', openAddAsset);
+document.getElementById('asset-modal-cancel').addEventListener('click', closeAssetModal);
+document.getElementById('asset-modal-save').addEventListener('click', saveAsset);
+document.getElementById('asset-modal').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeAssetModal();
+});
+document.getElementById('btn-run-amortization').addEventListener('click', openRunAmortization);
+document.getElementById('amortization-cancel').addEventListener('click', closeAmortizationModal);
+document.getElementById('amortization-confirm').addEventListener('click', confirmRunAmortization);
+document.getElementById('amortization-modal').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeAmortizationModal();
 });
 
 

@@ -30,6 +30,7 @@
     <nav class="admin-nav" id="admin-nav">
       <button class="nav-btn active" data-admin-view="documents">documents</button>
       <button class="nav-btn" data-admin-view="clients">clients</button>
+      <button class="nav-btn" data-admin-view="fixed-assets">fixed assets</button>
       <button class="nav-btn" data-admin-view="settings">settings</button>
     </nav>
 
@@ -110,6 +111,80 @@
       </div>
     </div>
   </div>
+
+    <!-- Fixed Assets view -->
+    <div class="admin-view" id="view-fixed-assets" style="display:none;">
+      <div class="clients-header">
+        <h2 class="clients-title">fixed assets</h2>
+        <div style="display:flex;gap:10px;">
+          <button class="btn-add-client" id="btn-run-amortization" style="background:var(--green-600);">run amortization</button>
+          <button class="btn-add-client" id="btn-add-asset">+ add asset</button>
+        </div>
+      </div>
+
+      <div id="amortization-status" class="settings-success" style="display:none;"></div>
+      <div id="last-amortization-run" style="font-size:0.82rem;color:var(--gray-400);margin-bottom:16px;"></div>
+
+      <div id="fixed-assets-list" class="clients-list"></div>
+
+      <!-- Add/Edit asset modal -->
+      <div class="modal-overlay" id="asset-modal" style="display:none;">
+        <div class="modal-card" style="max-width:520px;">
+          <h3 id="asset-modal-title">add fixed asset</h3>
+          <div class="form-group">
+            <label>asset name</label>
+            <input type="text" id="asset-name" placeholder="e.g. Office Furniture">
+          </div>
+          <div class="form-group">
+            <label>original cost ($)</label>
+            <input type="number" step="0.01" id="asset-cost" placeholder="12000.00">
+          </div>
+          <div class="form-group">
+            <label>useful life (months)</label>
+            <input type="number" id="asset-useful-life" placeholder="60">
+          </div>
+          <div class="form-group">
+            <label>salvage value ($)</label>
+            <input type="number" step="0.01" id="asset-salvage" placeholder="0.00">
+          </div>
+          <div class="form-group">
+            <label>acquisition date</label>
+            <input type="date" id="asset-acq-date">
+          </div>
+          <div class="form-group">
+            <label>QBO asset account</label>
+            <select id="asset-account-asset" class="edit-account-select"><option value="">select account...</option></select>
+          </div>
+          <div class="form-group">
+            <label>QBO amortization expense account</label>
+            <select id="asset-account-expense" class="edit-account-select"><option value="">select account...</option></select>
+          </div>
+          <div class="form-group">
+            <label>QBO accumulated amortization account</label>
+            <select id="asset-account-accum" class="edit-account-select"><option value="">select account...</option></select>
+          </div>
+          <div id="asset-modal-error" class="login-error" style="display:none;"></div>
+          <div class="modal-actions">
+            <button class="btn-modal-save" id="asset-modal-save">save</button>
+            <button class="btn-modal-cancel" id="asset-modal-cancel">cancel</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Confirm amortization modal -->
+      <div class="modal-overlay" id="amortization-modal" style="display:none;">
+        <div class="modal-card">
+          <h3>run amortization</h3>
+          <p id="amortization-month" style="font-size:0.88rem;color:var(--gray-600);margin-bottom:12px;"></p>
+          <div id="amortization-preview"></div>
+          <div id="amortization-modal-error" class="login-error" style="display:none;"></div>
+          <div class="modal-actions">
+            <button class="btn-modal-save" id="amortization-confirm" style="background:var(--green-600);">post to quickbooks</button>
+            <button class="btn-modal-cancel" id="amortization-cancel">cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- Settings view -->
     <div class="admin-view" id="view-settings" style="display:none;">
