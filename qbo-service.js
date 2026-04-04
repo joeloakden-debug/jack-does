@@ -107,26 +107,44 @@ async function refreshTokenIfNeeded(realmId = 'default') {
 
   // Check if token is expired (with 5 min buffer)
   if (Date.now() > tokenData.expiresAt - 300000) {
-    oauthClient.setToken({
-      access_token: tokenData.accessToken,
-      refresh_token: tokenData.refreshToken,
-      token_type: 'bearer',
-      realmId: tokenData.realmId,
-    });
+    try {
+      oauthClient.setToken({
+        access_token: tokenData.accessToken,
+        refresh_token: tokenData.refreshToken,
+        token_type: 'bearer',
+        realmId: tokenData.realmId,
+      });
 
-    const authResponse = await oauthClient.refresh();
-    const newToken = authResponse.getJson();
+      const authResponse = await oauthClient.refresh();
+      const newToken = authResponse.getJson();
 
-    tokenData.accessToken = newToken.access_token;
-    tokenData.refreshToken = newToken.refresh_token;
-    tokenData.expiresAt = Date.now() + (newToken.expires_in * 1000);
+      tokenData.accessToken = newToken.access_token;
+      tokenData.refreshToken = newToken.refresh_token;
+      tokenData.expiresAt = Date.now() + (newToken.expires_in * 1000);
 
-    tokenStore.set(realmId, tokenData);
-    if (realmId !== 'default') tokenStore.set('default', tokenData);
-    saveTokensToDisk();
+      tokenStore.set(realmId, tokenData);
+      if (realmId !== 'default') tokenStore.set('default', tokenData);
+      saveTokensToDisk();
+    } catch (refreshError) {
+      // If refresh fails, the tokens are invalid — clear them so user can reconnect
+      console.error('[QBO] Refresh token invalid, clearing connection. User must reconnect.');
+      disconnect();
+      throw new Error('The Refresh token is invalid, please Authorize again.');
+    }
   }
 
   return tokenData;
+}
+
+/**
+ * Disconnect QuickBooks — clear all stored tokens
+ */
+function disconnect() {
+  tokenStore.clear();
+  try {
+    if (fs.existsSync(TOKEN_FILE)) fs.unlinkSync(TOKEN_FILE);
+  } catch (e) { /* ignore */ }
+  console.log('[QBO] Disconnected — tokens cleared');
 }
 
 /**
@@ -639,6 +657,7 @@ module.exports = {
   getAuthUri,
   handleCallback,
   isConnected,
+  disconnect,
   refreshTokenIfNeeded,
   fetchRelevantData,
   getProfitAndLoss,

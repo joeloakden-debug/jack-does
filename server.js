@@ -289,7 +289,7 @@ app.get('/api/admin/qbo-tokens', requireAdmin, (req, res) => {
 
 // Disconnect QuickBooks
 app.post('/api/qbo/disconnect', (req, res) => {
-  // In production, revoke tokens properly
+  qbo.disconnect();
   res.json({ success: true, message: 'QuickBooks disconnected' });
 });
 
