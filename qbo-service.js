@@ -272,50 +272,45 @@ async function getCompanyInfo(realmId = 'default') {
 }
 
 /**
- * Query any entity (invoices, expenses, customers, etc.)
+ * Helper to build date filter criteria for find* methods
  */
-async function query(sql, realmId = 'default') {
-  const qb = await getQBClient(realmId);
-  return new Promise((resolve, reject) => {
-    qb.query(sql, (err, data) => {
-      if (err) reject(err);
-      else resolve(data);
-    });
-  });
+function dateFilter(startDate, endDate) {
+  const criteria = [];
+  if (startDate) criteria.push({ field: 'TxnDate', value: startDate, operator: '>=' });
+  if (endDate) criteria.push({ field: 'TxnDate', value: endDate, operator: '<=' });
+  return criteria;
 }
 
 /**
  * Get recent invoices
  */
 async function getRecentInvoices(limit = 10, realmId = 'default') {
-  return query(
-    `SELECT * FROM Invoice ORDER BY MetaData.CreateTime DESC MAXRESULTS ${limit}`,
-    realmId
-  );
+  const qb = await getQBClient(realmId);
+  return qbPromise(qb, 'findInvoices', { fetchAll: true });
 }
 
 /**
  * Get recent expenses/purchases
  */
 async function getRecentExpenses(limit = 10, realmId = 'default') {
-  return query(
-    `SELECT * FROM Purchase ORDER BY MetaData.CreateTime DESC MAXRESULTS ${limit}`,
-    realmId
-  );
+  const qb = await getQBClient(realmId);
+  return qbPromise(qb, 'findPurchases', { fetchAll: true });
 }
 
 /**
  * Get customer list
  */
 async function getCustomers(realmId = 'default') {
-  return query('SELECT * FROM Customer MAXRESULTS 100', realmId);
+  const qb = await getQBClient(realmId);
+  return qbPromise(qb, 'findCustomers', { fetchAll: true });
 }
 
 /**
  * Get vendor list
  */
 async function getVendors(realmId = 'default') {
-  return query('SELECT * FROM Vendor MAXRESULTS 100', realmId);
+  const qb = await getQBClient(realmId);
+  return qbPromise(qb, 'findVendors', { fetchAll: true });
 }
 
 /**
@@ -330,70 +325,56 @@ async function getAccounts(realmId = 'default') {
  * Get all purchases/expenses in a date range
  */
 async function getExpenseTransactions(startDate, endDate, limit = 100, realmId = 'default') {
-  return query(
-    `SELECT * FROM Purchase WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' ORDER BY TxnDate DESC MAXRESULTS ${limit}`,
-    realmId
-  );
+  const qb = await getQBClient(realmId);
+  return qbPromise(qb, 'findPurchases', dateFilter(startDate, endDate));
 }
 
 /**
  * Get all bills in a date range
  */
 async function getBills(startDate, endDate, limit = 100, realmId = 'default') {
-  return query(
-    `SELECT * FROM Bill WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' ORDER BY TxnDate DESC MAXRESULTS ${limit}`,
-    realmId
-  );
+  const qb = await getQBClient(realmId);
+  return qbPromise(qb, 'findBills', dateFilter(startDate, endDate));
 }
 
 /**
  * Get invoices in a date range
  */
 async function getInvoicesByDate(startDate, endDate, limit = 100, realmId = 'default') {
-  return query(
-    `SELECT * FROM Invoice WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' ORDER BY TxnDate DESC MAXRESULTS ${limit}`,
-    realmId
-  );
+  const qb = await getQBClient(realmId);
+  return qbPromise(qb, 'findInvoices', dateFilter(startDate, endDate));
 }
 
 /**
  * Get all journal entries in a date range
  */
 async function getJournalEntries(startDate, endDate, limit = 100, realmId = 'default') {
-  return query(
-    `SELECT * FROM JournalEntry WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' ORDER BY TxnDate DESC MAXRESULTS ${limit}`,
-    realmId
-  );
+  const qb = await getQBClient(realmId);
+  return qbPromise(qb, 'findJournalEntries', dateFilter(startDate, endDate));
 }
 
 /**
  * Get payments received in a date range
  */
 async function getPayments(startDate, endDate, limit = 100, realmId = 'default') {
-  return query(
-    `SELECT * FROM Payment WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' ORDER BY TxnDate DESC MAXRESULTS ${limit}`,
-    realmId
-  );
+  const qb = await getQBClient(realmId);
+  return qbPromise(qb, 'findPayments', dateFilter(startDate, endDate));
 }
 
 /**
  * Get deposits in a date range
  */
 async function getDeposits(startDate, endDate, limit = 100, realmId = 'default') {
-  return query(
-    `SELECT * FROM Deposit WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' ORDER BY TxnDate DESC MAXRESULTS ${limit}`,
-    realmId
-  );
+  const qb = await getQBClient(realmId);
+  return qbPromise(qb, 'findDeposits', dateFilter(startDate, endDate));
 }
 
 /**
  * Get transfers in a date range
  */
 async function getTransfers(startDate, endDate, limit = 100, realmId = 'default') {
-  return query(
-    `SELECT * FROM Transfer WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' ORDER BY TxnDate DESC MAXRESULTS ${limit}`,
-    realmId
-  );
+  const qb = await getQBClient(realmId);
+  return qbPromise(qb, 'findTransfers', dateFilter(startDate, endDate));
 }
 
 // ========================================
@@ -680,7 +661,6 @@ module.exports = {
   getCustomers,
   getVendors,
   getAccounts,
-  query,
   createJournalEntry,
   createBill,
   createInvoice,
