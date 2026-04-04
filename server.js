@@ -277,11 +277,13 @@ app.get('/api/admin/qbo-tokens', requireAdmin, (req, res) => {
   if (!qbo.isConnected()) {
     return res.json({ connected: false, tokens: null });
   }
-  // Read the token file
+  // Read the token file and return compact single-line JSON (only "default" key to reduce size)
   const tokenFile = require('path').join(__dirname, '.qbo-tokens.json');
   try {
-    const data = fs.readFileSync(tokenFile, 'utf-8');
-    res.json({ connected: true, tokens: data });
+    const data = JSON.parse(fs.readFileSync(tokenFile, 'utf-8'));
+    // Only keep the "default" entry to minimize env var size
+    const minimal = { default: data.default || data[Object.keys(data)[0]] };
+    res.json({ connected: true, tokens: JSON.stringify(minimal) });
   } catch (e) {
     res.json({ connected: true, tokens: null, error: 'Token file not found' });
   }
