@@ -19,10 +19,15 @@ const TOKEN_FILE = path.join(__dirname, '.qbo-tokens.json');
 
 // Load tokens on startup (env var first, then disk file)
 function loadTokensFromDisk() {
+  console.log('[QBO] Loading tokens... QBO_TOKENS env var exists:', !!process.env.QBO_TOKENS, 'length:', (process.env.QBO_TOKENS || '').length);
   try {
     // Prefer QBO_TOKENS env var (survives Railway redeploys)
     if (process.env.QBO_TOKENS) {
-      const data = JSON.parse(process.env.QBO_TOKENS);
+      const raw = process.env.QBO_TOKENS;
+      console.log('[QBO] Parsing QBO_TOKENS, first 50 chars:', raw.substring(0, 50));
+      const data = JSON.parse(raw);
+      const keys = Object.keys(data);
+      console.log('[QBO] Parsed successfully, keys:', keys.join(', '));
       Object.entries(data).forEach(([key, val]) => tokenStore.set(key, val));
       console.log('QBO tokens loaded from env var — connection restored');
       return;
