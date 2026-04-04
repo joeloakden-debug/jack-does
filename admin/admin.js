@@ -599,8 +599,10 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     currentAdminView = btn.dataset.adminView;
     document.querySelectorAll('.admin-view').forEach(v => v.style.display = 'none');
     document.getElementById(`view-${currentAdminView}`).style.display = '';
-    if (currentAdminView === 'clients') loadClients();
-    if (currentAdminView === 'fixed-assets') loadFixedAssetsView();
+    if (currentAdminView === 'clients') {
+      loadClients();
+      showClientsList();
+    }
   });
 });
 
@@ -610,18 +612,18 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
 // ========================================
 let allClients = [];
 let editingClientId = null;
+let selectedClientId = null;
+let allFixedAssets = [];
+let fixedAssetRuns = [];
+let editingAssetId = null;
 
 async function loadClients() {
   try {
-    const res = await fetch('/api/admin/clients', {
-      headers: { 'Authorization': getAuth() },
-    });
+    const res = await fetch('/api/admin/clients', { headers: { 'Authorization': getAuth() } });
     const data = await res.json();
     allClients = data.clients || [];
     renderClients();
-  } catch (e) {
-    console.error('Failed to load clients:', e);
-  }
+  } catch (e) { console.error('Failed to load clients:', e); }
 }
 
 function renderClients() {
@@ -631,19 +633,59 @@ function renderClients() {
     return;
   }
   container.innerHTML = allClients.map(c => `
-    <div class="client-card" data-client-id="${c.id}">
+    <div class="client-card client-card-clickable" data-client-id="${c.id}" onclick="openClientDetail('${c.id}')">
       <div class="client-card-info">
         <span class="client-card-name">${c.name}</span>
         <span class="client-card-email">${c.email}</span>
       </div>
       <div class="client-card-meta">
         <span class="client-billing-badge ${c.billingFrequency}">${c.billingFrequency}</span>
-        <span class="client-card-id">${c.id}</span>
-        <button class="btn-edit-client" onclick="openEditClient('${c.id}')">edit</button>
+        <button class="btn-edit-client" onclick="event.stopPropagation(); openEditClient('${c.id}')">edit</button>
       </div>
     </div>
   `).join('');
 }
+
+function showClientsList() {
+  document.getElementById('clients-list-view').style.display = '';
+  document.getElementById('client-detail-view').style.display = 'none';
+  selectedClientId = null;
+}
+
+function openClientDetail(clientId) {
+  selectedClientId = clientId;
+  const client = allClients.find(c => c.id === clientId);
+  if (!client) return;
+
+  document.getElementById('clients-list-view').style.display = 'none';
+  document.getElementById('client-detail-view').style.display = '';
+  document.getElementById('client-detail-name').textContent = client.name;
+
+  // Show info tab by default
+  switchClientTab('info');
+
+  // Render client info
+  document.getElementById('client-info-content').innerHTML = `
+    <div style="display:grid;gap:12px;max-width:400px;padding:16px 0;">
+      <div><span style="font-size:0.78rem;color:var(--gray-400);text-transform:uppercase;">email</span><br><strong>${client.email}</strong></div>
+      <div><span style="font-size:0.78rem;color:var(--gray-400);text-transform:uppercase;">billing</span><br><span class="client-billing-badge ${client.billingFrequency}">${client.billingFrequency}</span></div>
+      <div><span style="font-size:0.78rem;color:var(--gray-400);text-transform:uppercase;">client id</span><br><code style="font-size:0.82rem;">${clientId}</code></div>
+    </div>`;
+}
+
+function switchClientTab(tab) {
+  document.querySelectorAll('.sub-nav-btn').forEach(b => b.classList.remove('active'));
+  document.querySelector(`.sub-nav-btn[data-client-tab="${tab}"]`)?.classList.add('active');
+  document.querySelectorAll('.client-tab').forEach(t => t.style.display = 'none');
+  document.getElementById(`client-tab-${tab}`).style.display = '';
+  if (tab === 'fixed-assets' && selectedClientId) loadClientFixedAssets();
+}
+
+document.querySelectorAll('.sub-nav-btn').forEach(btn => {
+  btn.addEventListener('click', () => switchClientTab(btn.dataset.clientTab));
+});
+
+document.getElementById('btn-back-to-clients').addEventListener('click', showClientsList);
 
 function openAddClient() {
   editingClientId = null;
@@ -671,9 +713,7 @@ function openEditClient(id) {
   document.getElementById('client-modal').style.display = '';
 }
 
-function closeClientModal() {
-  document.getElementById('client-modal').style.display = 'none';
-}
+function closeClientModal() { document.getElementById('client-modal').style.display = 'none'; }
 
 async function saveClient() {
   const name = document.getElementById('client-name').value.trim();
@@ -682,75 +722,44 @@ async function saveClient() {
   const billingFrequency = document.getElementById('client-billing').value;
   const errorEl = document.getElementById('client-modal-error');
 
-  if (!name || !email) {
-    errorEl.textContent = 'name and email are required';
-    errorEl.style.display = '';
-    return;
-  }
-
-  if (!editingClientId && !password) {
-    errorEl.textContent = 'password is required for new clients';
-    errorEl.style.display = '';
-    return;
-  }
+  if (!name || !email) { errorEl.textContent = 'name and email are required'; errorEl.style.display = ''; return; }
+  if (!editingClientId && !password) { errorEl.textContent = 'password is required for new clients'; errorEl.style.display = ''; return; }
 
   const body = { name, email, billingFrequency };
   if (password) body.password = password;
 
-  const url = editingClientId
-    ? `/api/admin/clients/${editingClientId}`
-    : '/api/admin/clients';
-  const method = editingClientId ? 'PUT' : 'POST';
-
   try {
-    const res = await fetch(url, {
-      method,
+    const res = await fetch(editingClientId ? `/api/admin/clients/${editingClientId}` : '/api/admin/clients', {
+      method: editingClientId ? 'PUT' : 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
       body: JSON.stringify(body),
     });
     const data = await res.json();
-    if (data.error) {
-      errorEl.textContent = data.error;
-      errorEl.style.display = '';
-      return;
-    }
+    if (data.error) { errorEl.textContent = data.error; errorEl.style.display = ''; return; }
     closeClientModal();
     loadClients();
-  } catch (e) {
-    errorEl.textContent = 'failed to save';
-    errorEl.style.display = '';
-  }
+  } catch (e) { errorEl.textContent = 'failed to save'; errorEl.style.display = ''; }
 }
 
 document.getElementById('btn-add-client').addEventListener('click', () => openAddClient());
 document.getElementById('client-modal-cancel').addEventListener('click', () => closeClientModal());
 document.getElementById('client-modal-save').addEventListener('click', () => saveClient());
-
-// Close modal on overlay click
-document.getElementById('client-modal').addEventListener('click', (e) => {
-  if (e.target === e.currentTarget) closeClientModal();
-});
+document.getElementById('client-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeClientModal(); });
 
 
 // ========================================
-// FIXED ASSETS
+// FIXED ASSETS (per-client)
 // ========================================
-let allFixedAssets = [];
-let fixedAssetRuns = [];
-let editingAssetId = null;
 
-async function loadFixedAssetsView() {
+async function loadClientFixedAssets() {
+  if (!selectedClientId) return;
   try {
-    const res = await fetch('/api/admin/fixed-assets', {
-      headers: { 'Authorization': getAuth() },
-    });
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets`, { headers: { 'Authorization': getAuth() } });
     const data = await res.json();
     allFixedAssets = data.assets || [];
     fixedAssetRuns = data.amortizationRuns || [];
     renderFixedAssets();
-  } catch (e) {
-    console.error('Failed to load fixed assets:', e);
-  }
+  } catch (e) { console.error('Failed to load fixed assets:', e); }
 }
 
 function renderFixedAssets() {
@@ -758,7 +767,7 @@ function renderFixedAssets() {
   const activeAssets = allFixedAssets.filter(a => a.active);
 
   if (activeAssets.length === 0) {
-    list.innerHTML = '<p style="color:var(--gray-400);text-align:center;padding:40px;">no fixed assets yet. click "+ add asset" to get started.</p>';
+    list.innerHTML = '<p style="color:var(--gray-400);text-align:center;padding:40px;">no fixed assets yet. sync from QBO or add manually.</p>';
   } else {
     list.innerHTML = activeAssets.map(a => {
       const monthly = ((a.originalCost - a.salvageValue) / a.usefulLifeMonths).toFixed(2);
@@ -766,9 +775,6 @@ function renderFixedAssets() {
       const now = new Date();
       const monthsElapsed = (now.getFullYear() * 12 + now.getMonth()) - (acqDate.getFullYear() * 12 + acqDate.getMonth());
       const remaining = Math.max(0, a.usefulLifeMonths - monthsElapsed);
-      const totalAmort = (a.originalCost - a.salvageValue);
-      const amortized = Math.min(monthsElapsed * parseFloat(monthly), totalAmort);
-
       return `
         <div class="client-card">
           <div class="client-info">
@@ -778,9 +784,7 @@ function renderFixedAssets() {
               <span class="asset-card-amount">monthly: <strong>$${monthly}</strong></span>
               <span class="asset-card-amount">remaining: <strong>${remaining} mo</strong></span>
             </div>
-            <div style="margin-top:4px;font-size:0.75rem;color:var(--gray-400);">
-              ${a.expenseAccountName} → ${a.accumAccountName}
-            </div>
+            <div style="margin-top:4px;font-size:0.75rem;color:var(--gray-400);">${a.expenseAccountName || '—'} → ${a.accumAccountName || '—'}</div>
           </div>
           <div class="asset-card-actions">
             <button class="btn-edit-client" onclick="openEditAsset('${a.id}')">edit</button>
@@ -790,15 +794,133 @@ function renderFixedAssets() {
     }).join('');
   }
 
-  // Show last run info
   const lastRunEl = document.getElementById('last-amortization-run');
   if (fixedAssetRuns.length > 0) {
     const lastRun = fixedAssetRuns[fixedAssetRuns.length - 1];
-    const runDate = new Date(lastRun.ranAt).toLocaleDateString();
-    lastRunEl.textContent = `last run: ${lastRun.month} on ${runDate} — $${lastRun.totalAmount.toFixed(2)} (${lastRun.assetCount} assets)`;
+    lastRunEl.textContent = `last run: ${lastRun.month} on ${new Date(lastRun.ranAt).toLocaleDateString()} — $${lastRun.totalAmount.toFixed(2)} (${lastRun.assetCount} assets)`;
   } else {
     lastRunEl.textContent = 'no amortization runs yet';
   }
+}
+
+// QBO Sync
+async function syncFromQBO() {
+  if (!selectedClientId) return;
+  const loadingEl = document.getElementById('qbo-sync-loading');
+  const listEl = document.getElementById('qbo-sync-list');
+  const importBtn = document.getElementById('qbo-sync-import');
+  const errorEl = document.getElementById('qbo-sync-error');
+
+  loadingEl.style.display = '';
+  listEl.innerHTML = '';
+  importBtn.style.display = 'none';
+  errorEl.style.display = 'none';
+  document.getElementById('qbo-sync-modal').style.display = 'flex';
+
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/sync-qbo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+    });
+    const data = await res.json();
+    loadingEl.style.display = 'none';
+
+    if (data.error) { errorEl.textContent = data.error; errorEl.style.display = ''; return; }
+
+    if (!data.accounts || data.accounts.length === 0) {
+      listEl.innerHTML = '<p style="color:var(--gray-500);text-align:center;padding:20px;">no new fixed asset accounts found in QBO, or all have already been imported.</p>';
+      return;
+    }
+
+    listEl.innerHTML = data.accounts.map(a => `
+      <label class="qbo-sync-item" style="display:flex;align-items:center;gap:10px;padding:10px;border-bottom:1px solid var(--gray-100);cursor:pointer;">
+        <input type="checkbox" class="qbo-sync-check" data-account='${JSON.stringify(a).replace(/'/g, "&#39;")}' checked>
+        <div style="flex:1;">
+          <div style="font-weight:500;">${a.name}</div>
+          <div style="font-size:0.78rem;color:var(--gray-400);">${a.accountType} — balance: $${a.currentBalance.toLocaleString()}</div>
+        </div>
+      </label>
+    `).join('');
+    importBtn.style.display = '';
+  } catch (e) {
+    loadingEl.style.display = 'none';
+    errorEl.textContent = 'failed to fetch QBO data';
+    errorEl.style.display = '';
+  }
+}
+
+async function importSelectedAssets() {
+  const checkboxes = document.querySelectorAll('.qbo-sync-check:checked');
+  const errorEl = document.getElementById('qbo-sync-error');
+  errorEl.style.display = 'none';
+
+  for (const cb of checkboxes) {
+    const account = JSON.parse(cb.dataset.account);
+    // Import each as a fixed asset — user will need to set amortization details later
+    const body = {
+      name: account.name,
+      originalCost: account.currentBalance || 0,
+      usefulLifeMonths: 60, // default, user should edit
+      salvageValue: 0,
+      acquisitionDate: new Date().toISOString().split('T')[0],
+      assetAccountId: account.qboAccountId,
+      assetAccountName: account.name,
+      expenseAccountId: '',
+      expenseAccountName: '',
+      accumAccountId: '',
+      accumAccountName: '',
+      qboAccountId: account.qboAccountId,
+    };
+
+    try {
+      await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+        body: JSON.stringify(body),
+      });
+    } catch (e) { console.error('Failed to import asset:', e); }
+  }
+
+  document.getElementById('qbo-sync-modal').style.display = 'none';
+  loadClientFixedAssets();
+}
+
+// AI amortization suggestion
+async function suggestAmortization() {
+  const name = document.getElementById('asset-name').value.trim();
+  const cost = document.getElementById('asset-cost').value;
+  const suggestionEl = document.getElementById('ai-suggestion');
+  const btn = document.getElementById('btn-suggest-amort');
+
+  if (!name) { alert('enter an asset name first'); return; }
+
+  btn.textContent = 'thinking...';
+  btn.disabled = true;
+  suggestionEl.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/admin/fixed-assets/suggest-amortization', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ assetName: name, originalCost: cost }),
+    });
+    const data = await res.json();
+
+    if (data.usefulLifeMonths) {
+      document.getElementById('asset-useful-life').value = data.usefulLifeMonths;
+      document.getElementById('asset-salvage').value = data.salvageValue || 0;
+      let html = `<strong>suggested: ${data.usefulLifeMonths} months</strong>`;
+      if (data.ccaClass) html += ` (CCA Class ${data.ccaClass}, ${data.ccaRate})`;
+      html += `<br>${data.reasoning}`;
+      suggestionEl.innerHTML = html;
+      suggestionEl.style.display = '';
+    }
+  } catch (e) {
+    suggestionEl.textContent = 'failed to get suggestion';
+    suggestionEl.style.display = '';
+  }
+  btn.textContent = 'suggest';
+  btn.disabled = false;
 }
 
 function populateAssetDropdowns(asset) {
@@ -807,12 +929,10 @@ function populateAssetDropdowns(asset) {
     'asset-account-expense': { types: ['Expense', 'Other Expense'], selected: asset?.expenseAccountId },
     'asset-account-accum': { types: ['Fixed Asset', 'Other Asset', 'Other Current Asset'], selected: asset?.accumAccountId },
   };
-
   Object.entries(selects).forEach(([id, cfg]) => {
     const select = document.getElementById(id);
     select.innerHTML = '<option value="">select account...</option>';
-    const filtered = qboAccounts.filter(a => cfg.types.includes(a.AccountType));
-    filtered.forEach(a => {
+    qboAccounts.filter(a => cfg.types.includes(a.AccountType)).forEach(a => {
       const opt = document.createElement('option');
       opt.value = a.Id;
       opt.textContent = `${a.Name} (${a.AccountType})`;
@@ -832,6 +952,7 @@ function openAddAsset() {
   document.getElementById('asset-salvage').value = '0';
   document.getElementById('asset-acq-date').value = '';
   document.getElementById('asset-modal-error').style.display = 'none';
+  document.getElementById('ai-suggestion').style.display = 'none';
   populateAssetDropdowns(null);
   document.getElementById('asset-modal').style.display = 'flex';
 }
@@ -847,192 +968,140 @@ function openEditAsset(id) {
   document.getElementById('asset-salvage').value = asset.salvageValue;
   document.getElementById('asset-acq-date').value = asset.acquisitionDate;
   document.getElementById('asset-modal-error').style.display = 'none';
+  document.getElementById('ai-suggestion').style.display = 'none';
   populateAssetDropdowns(asset);
   document.getElementById('asset-modal').style.display = 'flex';
 }
 
-function closeAssetModal() {
-  document.getElementById('asset-modal').style.display = 'none';
-}
+function closeAssetModal() { document.getElementById('asset-modal').style.display = 'none'; }
 
 async function saveAsset() {
   const errorEl = document.getElementById('asset-modal-error');
   errorEl.style.display = 'none';
-
   const name = document.getElementById('asset-name').value.trim();
   const originalCost = document.getElementById('asset-cost').value;
   const usefulLifeMonths = document.getElementById('asset-useful-life').value;
   const salvageValue = document.getElementById('asset-salvage').value || '0';
   const acquisitionDate = document.getElementById('asset-acq-date').value;
-
   const assetAcctEl = document.getElementById('asset-account-asset');
   const expenseAcctEl = document.getElementById('asset-account-expense');
   const accumAcctEl = document.getElementById('asset-account-accum');
 
-  const assetAccountId = assetAcctEl.value;
-  const assetAccountName = assetAcctEl.selectedOptions[0]?.dataset.name || '';
-  const expenseAccountId = expenseAcctEl.value;
-  const expenseAccountName = expenseAcctEl.selectedOptions[0]?.dataset.name || '';
-  const accumAccountId = accumAcctEl.value;
-  const accumAccountName = accumAcctEl.selectedOptions[0]?.dataset.name || '';
-
   if (!name || !originalCost || !usefulLifeMonths || !acquisitionDate) {
     errorEl.textContent = 'name, cost, useful life, and acquisition date are required';
-    errorEl.style.display = '';
-    return;
+    errorEl.style.display = ''; return;
   }
-  if (!assetAccountId || !expenseAccountId || !accumAccountId) {
+  if (!assetAcctEl.value || !expenseAcctEl.value || !accumAcctEl.value) {
     errorEl.textContent = 'all three QBO accounts must be selected';
-    errorEl.style.display = '';
-    return;
+    errorEl.style.display = ''; return;
   }
 
   const body = { name, originalCost, usefulLifeMonths, salvageValue, acquisitionDate,
-    assetAccountId, assetAccountName, expenseAccountId, expenseAccountName,
-    accumAccountId, accumAccountName };
+    assetAccountId: assetAcctEl.value, assetAccountName: assetAcctEl.selectedOptions[0]?.dataset.name || '',
+    expenseAccountId: expenseAcctEl.value, expenseAccountName: expenseAcctEl.selectedOptions[0]?.dataset.name || '',
+    accumAccountId: accumAcctEl.value, accumAccountName: accumAcctEl.selectedOptions[0]?.dataset.name || '' };
 
   try {
     const url = editingAssetId
-      ? `/api/admin/fixed-assets/${editingAssetId}`
-      : '/api/admin/fixed-assets';
-    const method = editingAssetId ? 'PUT' : 'POST';
-
+      ? `/api/admin/clients/${selectedClientId}/fixed-assets/${editingAssetId}`
+      : `/api/admin/clients/${selectedClientId}/fixed-assets`;
     const res = await fetch(url, {
-      method,
+      method: editingAssetId ? 'PUT' : 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
       body: JSON.stringify(body),
     });
     const data = await res.json();
-    if (data.error) {
-      errorEl.textContent = data.error;
-      errorEl.style.display = '';
-      return;
-    }
+    if (data.error) { errorEl.textContent = data.error; errorEl.style.display = ''; return; }
     closeAssetModal();
-    loadFixedAssetsView();
-  } catch (e) {
-    errorEl.textContent = 'failed to save asset';
-    errorEl.style.display = '';
-  }
+    loadClientFixedAssets();
+  } catch (e) { errorEl.textContent = 'failed to save asset'; errorEl.style.display = ''; }
 }
 
 async function deleteAsset(id) {
   if (!confirm('are you sure you want to delete this asset?')) return;
   try {
-    await fetch(`/api/admin/fixed-assets/${id}`, {
-      method: 'DELETE',
-      headers: { 'Authorization': getAuth() },
+    await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/${id}`, {
+      method: 'DELETE', headers: { 'Authorization': getAuth() },
     });
-    loadFixedAssetsView();
-  } catch (e) {
-    alert('failed to delete asset');
-  }
+    loadClientFixedAssets();
+  } catch (e) { alert('failed to delete asset'); }
 }
 
 async function openRunAmortization() {
   const errorEl = document.getElementById('amortization-modal-error');
   errorEl.style.display = 'none';
-
   try {
-    const res = await fetch('/api/admin/fixed-assets/preview-amortization', {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/preview-amortization`, {
       headers: { 'Authorization': getAuth() },
     });
     const data = await res.json();
 
     if (data.alreadyRun) {
-      const runDate = new Date(data.runDetails.ranAt).toLocaleDateString();
       document.getElementById('amortization-month').textContent = `month: ${data.month}`;
       document.getElementById('amortization-preview').innerHTML =
-        `<p style="color:var(--amber-600);">amortization was already run for ${data.month} on ${runDate}.<br>total: $${data.runDetails.totalAmount.toFixed(2)} (${data.runDetails.assetCount} assets)</p>`;
+        `<p style="color:var(--amber-600);">amortization was already run for ${data.month} on ${new Date(data.runDetails.ranAt).toLocaleDateString()}.<br>total: $${data.runDetails.totalAmount.toFixed(2)} (${data.runDetails.assetCount} assets)</p>`;
       document.getElementById('amortization-confirm').style.display = 'none';
       document.getElementById('amortization-modal').style.display = 'flex';
       return;
     }
-
     if (data.eligibleCount === 0) {
       document.getElementById('amortization-month').textContent = `month: ${data.month}`;
-      document.getElementById('amortization-preview').innerHTML =
-        '<p style="color:var(--gray-500);">no eligible assets for amortization this month.</p>';
+      document.getElementById('amortization-preview').innerHTML = '<p style="color:var(--gray-500);">no eligible assets for amortization this month.</p>';
       document.getElementById('amortization-confirm').style.display = 'none';
       document.getElementById('amortization-modal').style.display = 'flex';
       return;
     }
 
     document.getElementById('amortization-month').textContent = `month: ${data.month}`;
-    let tableHtml = `
+    document.getElementById('amortization-preview').innerHTML = `
       <table class="amortization-preview-table">
         <thead><tr><th>asset</th><th>dr expense</th><th>cr accum</th><th style="text-align:right;">amount</th></tr></thead>
-        <tbody>
-          ${data.lines.map(l => `
-            <tr>
-              <td>${l.assetName}</td>
-              <td>${l.expenseAccountName}</td>
-              <td>${l.accumAccountName}</td>
-              <td style="text-align:right;">$${l.amount.toFixed(2)}</td>
-            </tr>`).join('')}
-        </tbody>
+        <tbody>${data.lines.map(l => `<tr><td>${l.assetName}</td><td>${l.expenseAccountName}</td><td>${l.accumAccountName}</td><td style="text-align:right;">$${l.amount.toFixed(2)}</td></tr>`).join('')}</tbody>
         <tfoot><tr><td colspan="3">total</td><td style="text-align:right;">$${data.totalAmount.toFixed(2)}</td></tr></tfoot>
       </table>`;
-    document.getElementById('amortization-preview').innerHTML = tableHtml;
     document.getElementById('amortization-confirm').style.display = '';
     document.getElementById('amortization-modal').style.display = 'flex';
-  } catch (e) {
-    alert('failed to preview amortization');
-  }
+  } catch (e) { alert('failed to preview amortization'); }
 }
 
-function closeAmortizationModal() {
-  document.getElementById('amortization-modal').style.display = 'none';
-}
+function closeAmortizationModal() { document.getElementById('amortization-modal').style.display = 'none'; }
 
 async function confirmRunAmortization() {
   const errorEl = document.getElementById('amortization-modal-error');
-  const confirmBtn = document.getElementById('amortization-confirm');
-  errorEl.style.display = 'none';
-  confirmBtn.textContent = 'posting...';
-  confirmBtn.disabled = true;
+  const btn = document.getElementById('amortization-confirm');
+  errorEl.style.display = 'none'; btn.textContent = 'posting...'; btn.disabled = true;
 
   try {
-    const res = await fetch('/api/admin/fixed-assets/run-amortization', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/run-amortization`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
     });
     const data = await res.json();
-    if (data.error) {
-      errorEl.textContent = data.error;
-      errorEl.style.display = '';
-      confirmBtn.textContent = 'post to quickbooks';
-      confirmBtn.disabled = false;
-      return;
-    }
+    if (data.error) { errorEl.textContent = data.error; errorEl.style.display = ''; btn.textContent = 'post to quickbooks'; btn.disabled = false; return; }
 
     closeAmortizationModal();
     const statusEl = document.getElementById('amortization-status');
     statusEl.textContent = `amortization posted to quickbooks — $${data.run.totalAmount.toFixed(2)} for ${data.run.assetCount} assets`;
     statusEl.style.display = '';
     setTimeout(() => { statusEl.style.display = 'none'; }, 5000);
-    loadFixedAssetsView();
-  } catch (e) {
-    errorEl.textContent = 'failed to post amortization';
-    errorEl.style.display = '';
-  }
-  confirmBtn.textContent = 'post to quickbooks';
-  confirmBtn.disabled = false;
+    loadClientFixedAssets();
+  } catch (e) { errorEl.textContent = 'failed to post amortization'; errorEl.style.display = ''; }
+  btn.textContent = 'post to quickbooks'; btn.disabled = false;
 }
 
 // Fixed asset event listeners
 document.getElementById('btn-add-asset').addEventListener('click', openAddAsset);
 document.getElementById('asset-modal-cancel').addEventListener('click', closeAssetModal);
 document.getElementById('asset-modal-save').addEventListener('click', saveAsset);
-document.getElementById('asset-modal').addEventListener('click', (e) => {
-  if (e.target === e.currentTarget) closeAssetModal();
-});
+document.getElementById('asset-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeAssetModal(); });
 document.getElementById('btn-run-amortization').addEventListener('click', openRunAmortization);
 document.getElementById('amortization-cancel').addEventListener('click', closeAmortizationModal);
 document.getElementById('amortization-confirm').addEventListener('click', confirmRunAmortization);
-document.getElementById('amortization-modal').addEventListener('click', (e) => {
-  if (e.target === e.currentTarget) closeAmortizationModal();
-});
+document.getElementById('amortization-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeAmortizationModal(); });
+document.getElementById('btn-sync-qbo-assets').addEventListener('click', syncFromQBO);
+document.getElementById('qbo-sync-cancel').addEventListener('click', () => { document.getElementById('qbo-sync-modal').style.display = 'none'; });
+document.getElementById('qbo-sync-import').addEventListener('click', importSelectedAssets);
+document.getElementById('qbo-sync-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) document.getElementById('qbo-sync-modal').style.display = 'none'; });
+document.getElementById('btn-suggest-amort').addEventListener('click', suggestAmortization);
 
 
 // ========================================

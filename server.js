@@ -1055,7 +1055,7 @@ app.put('/api/admin/clients/:id', requireAdmin, (req, res) => {
 });
 
 // ========================================
-// FIXED ASSETS (file-backed persistence)
+// FIXED ASSETS — per-client, file-backed
 // ========================================
 const FIXED_ASSETS_FILE = path.join(__dirname, 'fixed-assets.json');
 
@@ -1067,25 +1067,121 @@ function loadFixedAssets() {
   } catch (e) {
     console.error('Failed to load fixed-assets.json:', e.message);
   }
-  return { assets: [], amortizationRuns: [] };
+  return {};
+  // Structure: { "client-id": { assets: [...], amortizationRuns: [...] } }
 }
 
 function saveFixedAssets(data) {
   fs.writeFileSync(FIXED_ASSETS_FILE, JSON.stringify(data, null, 2), 'utf-8');
 }
 
+function getClientAssets(clientId) {
+  if (!fixedAssetsData[clientId]) {
+    fixedAssetsData[clientId] = { assets: [], amortizationRuns: [] };
+  }
+  return fixedAssetsData[clientId];
+}
+
 let fixedAssetsData = loadFixedAssets();
 
-// Get all fixed assets and run history
-app.get('/api/admin/fixed-assets', requireAdmin, (req, res) => {
-  res.json(fixedAssetsData);
+// Get fixed assets for a specific client
+app.get('/api/admin/clients/:clientId/fixed-assets', requireAdmin, (req, res) => {
+  const clientData = getClientAssets(req.params.clientId);
+  res.json(clientData);
 });
 
-// Create a new fixed asset
-app.post('/api/admin/fixed-assets', requireAdmin, (req, res) => {
+// Sync fixed assets from QBO — pulls Fixed Asset accounts and their balances
+app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, async (req, res) => {
+  try {
+    if (!qbo.isConnected()) {
+      return res.status(400).json({ error: 'QuickBooks is not connected' });
+    }
+
+    // Get all accounts of type Fixed Asset
+    const accountsResult = await qbo.getAccounts();
+    const accounts = accountsResult.QueryResponse?.Account || accountsResult || [];
+    const fixedAssetAccounts = (Array.isArray(accounts) ? accounts : [])
+      .filter(a => a.AccountType === 'Fixed Asset' && a.Active);
+
+    // Get balance sheet for current balances
+    const today = new Date().toISOString().split('T')[0];
+    let balanceSheet = null;
+    try {
+      balanceSheet = await qbo.getBalanceSheet(today);
+    } catch (e) {
+      console.error('Could not fetch balance sheet for asset balances:', e.message);
+    }
+
+    // Build balance lookup from balance sheet
+    const balanceLookup = {};
+    if (balanceSheet?.Rows?.Row) {
+      function extractBalances(rows) {
+        for (const row of rows) {
+          if (row.ColData) {
+            const name = row.ColData[0]?.value;
+            const val = parseFloat(row.ColData[1]?.value);
+            if (name && !isNaN(val)) balanceLookup[name] = val;
+          }
+          if (row.Rows?.Row) extractBalances(row.Rows.Row);
+        }
+      }
+      extractBalances(balanceSheet.Rows.Row);
+    }
+
+    // Map to importable assets — only parent/detail accounts (not sub-totals)
+    const clientData = getClientAssets(req.params.clientId);
+    const existingQboIds = new Set(clientData.assets.map(a => a.qboAccountId).filter(Boolean));
+
+    const importable = fixedAssetAccounts
+      .filter(a => !a.AccountSubType || a.AccountSubType !== 'AccumulatedDepreciation')
+      .filter(a => !existingQboIds.has(a.Id))
+      .map(a => ({
+        qboAccountId: a.Id,
+        name: a.Name || a.FullyQualifiedName,
+        accountType: a.AccountSubType || a.AccountType,
+        currentBalance: balanceLookup[a.Name] ?? a.CurrentBalance ?? 0,
+        description: a.Description || '',
+      }));
+
+    res.json({ accounts: importable, allFixedAssetAccounts: fixedAssetAccounts });
+  } catch (error) {
+    console.error('QBO sync error:', error.message);
+    res.status(500).json({ error: `Failed to fetch from QBO: ${error.message}` });
+  }
+});
+
+// AI suggest amortization period based on asset name/type
+app.post('/api/admin/fixed-assets/suggest-amortization', requireAdmin, async (req, res) => {
+  try {
+    const { assetName, assetType, originalCost } = req.body;
+
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 300,
+      system: `You are a Canadian accounting expert. Given a fixed asset, suggest the appropriate amortization period in months and salvage value based on CRA Capital Cost Allowance (CCA) classes and standard accounting practices. Respond in JSON only with this exact format: {"usefulLifeMonths": number, "salvageValue": number, "ccaClass": number or null, "ccaRate": "percentage or null", "reasoning": "brief explanation"}`,
+      messages: [{ role: 'user', content: `Asset: "${assetName}". Type: "${assetType || 'unknown'}". Original cost: $${originalCost || 'unknown'}. What amortization period and salvage value would you recommend?` }],
+    });
+
+    const text = response.content[0].text;
+    // Parse JSON from response (handle markdown code blocks)
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const suggestion = JSON.parse(jsonMatch[0]);
+      res.json(suggestion);
+    } else {
+      res.json({ error: 'Could not parse suggestion', raw: text });
+    }
+  } catch (error) {
+    console.error('AI suggestion error:', error.message);
+    res.status(500).json({ error: 'Failed to get AI suggestion' });
+  }
+});
+
+// Create a new fixed asset for a client
+app.post('/api/admin/clients/:clientId/fixed-assets', requireAdmin, (req, res) => {
   const { name, originalCost, usefulLifeMonths, salvageValue, acquisitionDate,
           assetAccountId, assetAccountName, expenseAccountId, expenseAccountName,
-          accumAccountId, accumAccountName } = req.body;
+          accumAccountId, accumAccountName, qboAccountId } = req.body;
 
   if (!name || !originalCost || !usefulLifeMonths || !acquisitionDate) {
     return res.status(400).json({ error: 'Name, cost, useful life, and acquisition date are required' });
@@ -1094,8 +1190,11 @@ app.post('/api/admin/fixed-assets', requireAdmin, (req, res) => {
     return res.status(400).json({ error: 'All three QBO accounts must be selected' });
   }
 
+  const clientData = getClientAssets(req.params.clientId);
+
   const asset = {
     id: 'asset_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+    clientId: req.params.clientId,
     name,
     originalCost: parseFloat(originalCost),
     usefulLifeMonths: parseInt(usefulLifeMonths, 10),
@@ -1104,18 +1203,20 @@ app.post('/api/admin/fixed-assets', requireAdmin, (req, res) => {
     assetAccountId, assetAccountName,
     expenseAccountId, expenseAccountName,
     accumAccountId, accumAccountName,
+    qboAccountId: qboAccountId || null,
     active: true,
     createdAt: new Date().toISOString(),
   };
 
-  fixedAssetsData.assets.push(asset);
+  clientData.assets.push(asset);
   saveFixedAssets(fixedAssetsData);
   res.json({ success: true, asset });
 });
 
 // Update a fixed asset
-app.put('/api/admin/fixed-assets/:id', requireAdmin, (req, res) => {
-  const idx = fixedAssetsData.assets.findIndex(a => a.id === req.params.id);
+app.put('/api/admin/clients/:clientId/fixed-assets/:id', requireAdmin, (req, res) => {
+  const clientData = getClientAssets(req.params.clientId);
+  const idx = clientData.assets.findIndex(a => a.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Asset not found' });
 
   const fields = ['name', 'originalCost', 'usefulLifeMonths', 'salvageValue', 'acquisitionDate',
@@ -1125,164 +1226,122 @@ app.put('/api/admin/fixed-assets/:id', requireAdmin, (req, res) => {
   fields.forEach(f => {
     if (req.body[f] !== undefined) {
       if (f === 'originalCost' || f === 'salvageValue') {
-        fixedAssetsData.assets[idx][f] = parseFloat(req.body[f]);
+        clientData.assets[idx][f] = parseFloat(req.body[f]);
       } else if (f === 'usefulLifeMonths') {
-        fixedAssetsData.assets[idx][f] = parseInt(req.body[f], 10);
+        clientData.assets[idx][f] = parseInt(req.body[f], 10);
       } else {
-        fixedAssetsData.assets[idx][f] = req.body[f];
+        clientData.assets[idx][f] = req.body[f];
       }
     }
   });
 
   saveFixedAssets(fixedAssetsData);
-  res.json({ success: true, asset: fixedAssetsData.assets[idx] });
+  res.json({ success: true, asset: clientData.assets[idx] });
 });
 
 // Delete a fixed asset (soft delete)
-app.delete('/api/admin/fixed-assets/:id', requireAdmin, (req, res) => {
-  const idx = fixedAssetsData.assets.findIndex(a => a.id === req.params.id);
+app.delete('/api/admin/clients/:clientId/fixed-assets/:id', requireAdmin, (req, res) => {
+  const clientData = getClientAssets(req.params.clientId);
+  const idx = clientData.assets.findIndex(a => a.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Asset not found' });
 
-  fixedAssetsData.assets[idx].active = false;
+  clientData.assets[idx].active = false;
   saveFixedAssets(fixedAssetsData);
   res.json({ success: true });
 });
 
-// Preview amortization for current month (without posting)
-app.get('/api/admin/fixed-assets/preview-amortization', requireAdmin, (req, res) => {
+// Preview amortization for a client
+app.get('/api/admin/clients/:clientId/fixed-assets/preview-amortization', requireAdmin, (req, res) => {
+  const clientData = getClientAssets(req.params.clientId);
   const now = new Date();
   const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 
-  // Check if already run
-  const alreadyRun = fixedAssetsData.amortizationRuns.find(r => r.month === currentMonth);
+  const alreadyRun = clientData.amortizationRuns.find(r => r.month === currentMonth);
   if (alreadyRun) {
     return res.json({ alreadyRun: true, runDetails: alreadyRun, month: currentMonth });
   }
 
-  // Calculate eligible assets
   const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-  const eligible = fixedAssetsData.assets.filter(a => {
+  const eligible = clientData.assets.filter(a => {
     if (!a.active) return false;
     const acqDate = new Date(a.acquisitionDate);
     if (acqDate > lastDayOfMonth) return false;
-    // Check remaining useful life
     const acqMonth = acqDate.getFullYear() * 12 + acqDate.getMonth();
     const curMonth = now.getFullYear() * 12 + now.getMonth();
-    const monthsElapsed = curMonth - acqMonth;
-    return monthsElapsed < a.usefulLifeMonths;
+    return (curMonth - acqMonth) < a.usefulLifeMonths;
   });
 
   const lines = [];
   let totalAmount = 0;
-
   eligible.forEach(a => {
     const monthly = Math.round(((a.originalCost - a.salvageValue) / a.usefulLifeMonths) * 100) / 100;
     totalAmount += monthly;
-    lines.push({
-      assetName: a.name,
-      amount: monthly,
-      expenseAccountName: a.expenseAccountName,
-      accumAccountName: a.accumAccountName,
-    });
+    lines.push({ assetName: a.name, amount: monthly, expenseAccountName: a.expenseAccountName, accumAccountName: a.accumAccountName });
   });
 
-  res.json({
-    alreadyRun: false,
-    month: currentMonth,
-    eligibleCount: eligible.length,
-    totalAmount: Math.round(totalAmount * 100) / 100,
-    lines,
-  });
+  res.json({ alreadyRun: false, month: currentMonth, eligibleCount: eligible.length, totalAmount: Math.round(totalAmount * 100) / 100, lines });
 });
 
-// Run amortization and post journal entry to QBO
-app.post('/api/admin/fixed-assets/run-amortization', requireAdmin, async (req, res) => {
+// Run amortization for a client and post JE to QBO
+app.post('/api/admin/clients/:clientId/fixed-assets/run-amortization', requireAdmin, async (req, res) => {
   try {
+    const clientData = getClientAssets(req.params.clientId);
     const now = new Date();
     const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 
-    // Check if already run
-    const alreadyRun = fixedAssetsData.amortizationRuns.find(r => r.month === currentMonth);
+    const alreadyRun = clientData.amortizationRuns.find(r => r.month === currentMonth);
     if (alreadyRun) {
       return res.status(400).json({ error: `Amortization already run for ${currentMonth}` });
     }
 
-    // Check QBO connection
     if (!qbo.isConnected()) {
       return res.status(400).json({ error: 'QuickBooks is not connected. Please connect QBO first.' });
     }
 
-    // Calculate eligible assets
     const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
     const lastDayStr = lastDayOfMonth.toISOString().split('T')[0];
 
-    const eligible = fixedAssetsData.assets.filter(a => {
+    const eligible = clientData.assets.filter(a => {
       if (!a.active) return false;
       const acqDate = new Date(a.acquisitionDate);
       if (acqDate > lastDayOfMonth) return false;
       const acqMonth = acqDate.getFullYear() * 12 + acqDate.getMonth();
       const curMonth = now.getFullYear() * 12 + now.getMonth();
-      const monthsElapsed = curMonth - acqMonth;
-      return monthsElapsed < a.usefulLifeMonths;
+      return (curMonth - acqMonth) < a.usefulLifeMonths;
     });
 
     if (eligible.length === 0) {
       return res.status(400).json({ error: 'No eligible assets for amortization this month' });
     }
 
-    // Build journal entry lines
     const jeLines = [];
     let totalAmount = 0;
 
     eligible.forEach(a => {
       const monthly = Math.round(((a.originalCost - a.salvageValue) / a.usefulLifeMonths) * 100) / 100;
       totalAmount += monthly;
-
-      // Debit amortization expense
-      jeLines.push({
-        accountId: a.expenseAccountId,
-        accountName: a.expenseAccountName,
-        description: `Amortization - ${a.name}`,
-        amount: monthly,
-        type: 'debit',
-      });
-
-      // Credit accumulated amortization
-      jeLines.push({
-        accountId: a.accumAccountId,
-        accountName: a.accumAccountName,
-        description: `Amortization - ${a.name}`,
-        amount: monthly,
-        type: 'credit',
-      });
+      jeLines.push({ accountId: a.expenseAccountId, accountName: a.expenseAccountName, description: `Amortization - ${a.name}`, amount: monthly, type: 'debit' });
+      jeLines.push({ accountId: a.accumAccountId, accountName: a.accumAccountName, description: `Amortization - ${a.name}`, amount: monthly, type: 'credit' });
     });
 
-    // Post to QuickBooks
-    const journalEntry = {
+    const clientName = CLIENTS[req.params.clientId]?.name || req.params.clientId;
+    const result = await qbo.createJournalEntry({
       date: lastDayStr,
-      memo: `Fixed asset amortization - ${currentMonth}`,
+      memo: `Fixed asset amortization - ${currentMonth} - ${clientName}`,
       lines: jeLines,
-    };
+    });
 
-    const result = await qbo.createJournalEntry(journalEntry);
-
-    // Record the run
     const runRecord = {
       month: currentMonth,
       ranAt: new Date().toISOString(),
       journalEntryId: result.Id || null,
       totalAmount: Math.round(totalAmount * 100) / 100,
       assetCount: eligible.length,
-      assets: eligible.map(a => ({
-        id: a.id,
-        name: a.name,
-        amount: Math.round(((a.originalCost - a.salvageValue) / a.usefulLifeMonths) * 100) / 100,
-      })),
+      assets: eligible.map(a => ({ id: a.id, name: a.name, amount: Math.round(((a.originalCost - a.salvageValue) / a.usefulLifeMonths) * 100) / 100 })),
     };
 
-    fixedAssetsData.amortizationRuns.push(runRecord);
+    clientData.amortizationRuns.push(runRecord);
     saveFixedAssets(fixedAssetsData);
-
     res.json({ success: true, run: runRecord });
   } catch (error) {
     console.error('Amortization run error:', error.message);

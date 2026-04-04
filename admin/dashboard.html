@@ -30,7 +30,6 @@
     <nav class="admin-nav" id="admin-nav">
       <button class="nav-btn active" data-admin-view="documents">documents</button>
       <button class="nav-btn" data-admin-view="clients">clients</button>
-      <button class="nav-btn" data-admin-view="fixed-assets">fixed assets</button>
       <button class="nav-btn" data-admin-view="settings">settings</button>
     </nav>
 
@@ -70,13 +69,50 @@
       </div>
     </div>
 
-    <!-- Clients view (new) -->
+    <!-- Clients view -->
     <div class="admin-view" id="view-clients" style="display:none;">
-      <div class="clients-header">
-        <h2 class="clients-title">clients</h2>
-        <button class="btn-add-client" id="btn-add-client">+ add client</button>
+      <!-- Client list (shown when no client selected) -->
+      <div id="clients-list-view">
+        <div class="clients-header">
+          <h2 class="clients-title">clients</h2>
+          <button class="btn-add-client" id="btn-add-client">+ add client</button>
+        </div>
+        <div id="clients-list" class="clients-list"></div>
       </div>
-      <div id="clients-list" class="clients-list"></div>
+
+      <!-- Client detail (shown when a client is selected) -->
+      <div id="client-detail-view" style="display:none;">
+        <div class="clients-header">
+          <button class="btn-back" id="btn-back-to-clients">&larr; back to clients</button>
+          <h2 class="clients-title" id="client-detail-name"></h2>
+        </div>
+
+        <!-- Client sub-tabs -->
+        <nav class="client-sub-nav">
+          <button class="sub-nav-btn active" data-client-tab="info">info</button>
+          <button class="sub-nav-btn" data-client-tab="fixed-assets">fixed assets</button>
+        </nav>
+
+        <!-- Info sub-tab -->
+        <div class="client-tab" id="client-tab-info">
+          <div id="client-info-content"></div>
+        </div>
+
+        <!-- Fixed Assets sub-tab -->
+        <div class="client-tab" id="client-tab-fixed-assets" style="display:none;">
+          <div class="clients-header" style="margin-bottom:12px;">
+            <div style="display:flex;gap:10px;">
+              <button class="btn-add-client" id="btn-sync-qbo-assets" style="background:var(--blue-600);">sync from QBO</button>
+              <button class="btn-add-client" id="btn-run-amortization" style="background:var(--green-600);">run amortization</button>
+              <button class="btn-add-client" id="btn-add-asset">+ add asset</button>
+            </div>
+          </div>
+
+          <div id="amortization-status" class="settings-success" style="display:none;"></div>
+          <div id="last-amortization-run" style="font-size:0.82rem;color:var(--gray-400);margin-bottom:16px;"></div>
+          <div id="fixed-assets-list" class="clients-list"></div>
+        </div>
+      </div>
 
       <!-- Add/Edit client modal -->
       <div class="modal-overlay" id="client-modal" style="display:none;">
@@ -109,23 +145,6 @@
           </div>
         </div>
       </div>
-    </div>
-  </div>
-
-    <!-- Fixed Assets view -->
-    <div class="admin-view" id="view-fixed-assets" style="display:none;">
-      <div class="clients-header">
-        <h2 class="clients-title">fixed assets</h2>
-        <div style="display:flex;gap:10px;">
-          <button class="btn-add-client" id="btn-run-amortization" style="background:var(--green-600);">run amortization</button>
-          <button class="btn-add-client" id="btn-add-asset">+ add asset</button>
-        </div>
-      </div>
-
-      <div id="amortization-status" class="settings-success" style="display:none;"></div>
-      <div id="last-amortization-run" style="font-size:0.82rem;color:var(--gray-400);margin-bottom:16px;"></div>
-
-      <div id="fixed-assets-list" class="clients-list"></div>
 
       <!-- Add/Edit asset modal -->
       <div class="modal-overlay" id="asset-modal" style="display:none;">
@@ -141,8 +160,12 @@
           </div>
           <div class="form-group">
             <label>useful life (months)</label>
-            <input type="number" id="asset-useful-life" placeholder="60">
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input type="number" id="asset-useful-life" placeholder="60" style="flex:1;">
+              <button class="btn-suggest-amort" id="btn-suggest-amort" type="button">suggest</button>
+            </div>
           </div>
+          <div id="ai-suggestion" style="display:none;font-size:0.78rem;color:var(--blue-600);background:var(--blue-50);padding:8px 12px;border-radius:6px;margin-top:-4px;margin-bottom:8px;"></div>
           <div class="form-group">
             <label>salvage value ($)</label>
             <input type="number" step="0.01" id="asset-salvage" placeholder="0.00">
@@ -167,6 +190,21 @@
           <div class="modal-actions">
             <button class="btn-modal-save" id="asset-modal-save">save</button>
             <button class="btn-modal-cancel" id="asset-modal-cancel">cancel</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- QBO sync modal -->
+      <div class="modal-overlay" id="qbo-sync-modal" style="display:none;">
+        <div class="modal-card" style="max-width:560px;">
+          <h3>sync fixed assets from QBO</h3>
+          <p style="font-size:0.85rem;color:var(--gray-500);margin-bottom:16px;">select assets to import from your QuickBooks chart of accounts.</p>
+          <div id="qbo-sync-loading" style="color:var(--gray-400);text-align:center;padding:20px;">loading QBO accounts...</div>
+          <div id="qbo-sync-list"></div>
+          <div id="qbo-sync-error" class="login-error" style="display:none;"></div>
+          <div class="modal-actions">
+            <button class="btn-modal-save" id="qbo-sync-import" style="display:none;">import selected</button>
+            <button class="btn-modal-cancel" id="qbo-sync-cancel">close</button>
           </div>
         </div>
       </div>
