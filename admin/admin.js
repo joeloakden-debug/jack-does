@@ -867,6 +867,11 @@ async function loadClientFixedAssets() {
         missingGLAccounts.set(asset.assetAccountId, {
           glAccountId: asset.assetAccountId,
           glAccountName: asset.glAccountName || asset.assetAccountName || asset.name,
+          // Grab expense/accum from the first asset that has them
+          expenseAccountId: asset.expenseAccountId || '',
+          expenseAccountName: asset.expenseAccountName || '',
+          accumAccountId: asset.accumAccountId || '',
+          accumAccountName: asset.accumAccountName || '',
         });
       }
     }
@@ -881,8 +886,12 @@ async function loadClientFixedAssets() {
               glAccountId: info.glAccountId,
               glAccountName: info.glAccountName,
               method: 'straight-line',
-              usefulLifeMonths: 60,
+              usefulLifeMonths: 36,
               salvageValue: 0,
+              expenseAccountId: info.expenseAccountId,
+              expenseAccountName: info.expenseAccountName,
+              accumAccountId: info.accumAccountId,
+              accumAccountName: info.accumAccountName,
             }),
           });
           const createData = await createRes.json();
@@ -891,6 +900,36 @@ async function loadClientFixedAssets() {
       }
       // Run AI suggestions for newly created classes
       runAISuggestionsForClasses();
+    }
+
+    // Backfill expense/accum accounts on existing classes that are missing them
+    for (const cls of assetClasses) {
+      if (cls.expenseAccountId && cls.accumAccountId) continue;
+      // Find an asset in this class that has expense/accum set
+      const donor = allFixedAssets.find(a => a.active &&
+        (a.assetAccountId === cls.glAccountId || a.glAccountName === cls.glAccountName) &&
+        (a.expenseAccountId || a.accumAccountId));
+      if (donor) {
+        const patch = {};
+        if (!cls.expenseAccountId && donor.expenseAccountId) {
+          patch.expenseAccountId = donor.expenseAccountId;
+          patch.expenseAccountName = donor.expenseAccountName || '';
+        }
+        if (!cls.accumAccountId && donor.accumAccountId) {
+          patch.accumAccountId = donor.accumAccountId;
+          patch.accumAccountName = donor.accumAccountName || '';
+        }
+        if (Object.keys(patch).length > 0) {
+          try {
+            await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/classes/${cls.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+              body: JSON.stringify(patch),
+            });
+            Object.assign(cls, patch);
+          } catch (e) { console.error('Failed to backfill class accounts:', e); }
+        }
+      }
     }
 
     renderAssetClasses();
@@ -964,7 +1003,7 @@ function renderFixedAssets() {
             </div>
             <div class="asset-card-desc">${className}${a.vendorName ? ` — ${a.vendorName}` : ''}</div>
             <div class="asset-card-amounts">
-              <span class="asset-card-amount">cost: <strong>$${(a.originalCost || 0).toLocaleString()}</strong></span>
+              <span class="asset-card-amount">cost: <strong>$${(a.originalCost || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
               <span class="asset-card-amount">acquired: <strong>${acqDate}</strong></span>
             </div>
           </div>
@@ -1195,7 +1234,7 @@ async function syncFromQBO() {
           <div class="qbo-sync-item-name">${a.name}</div>
           <div class="qbo-sync-item-meta">
             ${a.glAccountName && a.glAccountName !== a.name ? `GL: ${a.glAccountName} — ` : ''}
-            $${(a.originalCost || 0).toLocaleString()}
+            $${(a.originalCost || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             ${a.txnDate ? ` — ${a.txnDate}` : ''}
             ${a.vendorName ? ` — ${a.vendorName}` : ''}
           </div>
@@ -1253,13 +1292,17 @@ async function importSelectedAssets() {
     } catch (e) { console.error('Failed to import asset:', e); }
   }
 
-  // Auto-create asset classes for each unique GL account
+  // Auto-create asset classes for each unique GL account, carrying over expense/accum from sync
   const uniqueGLAccounts = new Map();
   for (const asset of importedAssets) {
     if (asset.assetAccountId && !uniqueGLAccounts.has(asset.assetAccountId)) {
       uniqueGLAccounts.set(asset.assetAccountId, {
         glAccountId: asset.assetAccountId,
         glAccountName: asset.glAccountName || asset.assetAccountName || asset.name,
+        expenseAccountId: asset.expenseAccountId || '',
+        expenseAccountName: asset.expenseAccountName || '',
+        accumAccountId: asset.accumAccountId || '',
+        accumAccountName: asset.accumAccountName || '',
       });
     }
   }
@@ -1276,8 +1319,12 @@ async function importSelectedAssets() {
             glAccountId: info.glAccountId,
             glAccountName: info.glAccountName,
             method: 'straight-line',
-            usefulLifeMonths: 60,
+            usefulLifeMonths: 36,
             salvageValue: 0,
+            expenseAccountId: info.expenseAccountId,
+            expenseAccountName: info.expenseAccountName,
+            accumAccountId: info.accumAccountId,
+            accumAccountName: info.accumAccountName,
           }),
         });
       } catch (e) { console.error('Failed to create asset class:', e); }
