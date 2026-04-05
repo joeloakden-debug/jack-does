@@ -1125,7 +1125,7 @@ app.get('/api/admin/clients/:clientId/fixed-assets', requireAdmin, (req, res) =>
   res.json(clientData);
 });
 
-// Sync fixed assets from QBO — pulls Fixed Asset accounts and their balances
+// Sync fixed assets from QBO — queries GL transactions for each Fixed Asset cost account
 app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, async (req, res) => {
   try {
     const syncClientId = req.params.clientId;
@@ -1133,89 +1133,159 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
       return res.status(400).json({ error: `QuickBooks is not connected for this client. Please connect QBO in the client detail view first.` });
     }
 
-    // Get all accounts of type Fixed Asset
+    // Get all accounts
     const accountsResult = await qbo.getAccounts(syncClientId);
     const accounts = accountsResult.QueryResponse?.Account || accountsResult || [];
-    const fixedAssetAccounts = (Array.isArray(accounts) ? accounts : [])
-      .filter(a => a.AccountType === 'Fixed Asset' && a.Active);
-
-    // Get balance sheet for current balances
-    const today = new Date().toISOString().split('T')[0];
-    let balanceSheet = null;
-    try {
-      balanceSheet = await qbo.getBalanceSheet(today, syncClientId);
-    } catch (e) {
-      console.error('Could not fetch balance sheet for asset balances:', e.message);
-    }
-
-    // Build balance lookup from balance sheet
-    const balanceLookup = {};
-    if (balanceSheet?.Rows?.Row) {
-      function extractBalances(rows) {
-        for (const row of rows) {
-          if (row.ColData) {
-            const name = row.ColData[0]?.value;
-            const val = parseFloat(row.ColData[1]?.value);
-            if (name && !isNaN(val)) balanceLookup[name] = val;
-          }
-          if (row.Rows?.Row) extractBalances(row.Rows.Row);
-        }
-      }
-      extractBalances(balanceSheet.Rows.Row);
-    }
-
-    // Map to importable assets — only parent/detail accounts (not sub-totals)
-    const clientData = getClientAssets(req.params.clientId);
-    const existingQboIds = new Set(clientData.assets.map(a => a.qboAccountId).filter(Boolean));
+    const allAccounts = Array.isArray(accounts) ? accounts : [];
+    const fixedAssetAccounts = allAccounts.filter(a => a.AccountType === 'Fixed Asset' && a.Active);
 
     // Separate cost accounts from accumulated amortization/depreciation accounts
     const accumSubTypes = ['AccumulatedDepreciation', 'AccumulatedAmortization'];
     const costAccounts = fixedAssetAccounts
-      .filter(a => !a.AccountSubType || !accumSubTypes.includes(a.AccountSubType))
-      .filter(a => !existingQboIds.has(a.Id));
-
+      .filter(a => !a.AccountSubType || !accumSubTypes.includes(a.AccountSubType));
     const accumAccounts = fixedAssetAccounts
       .filter(a => a.AccountSubType && accumSubTypes.includes(a.AccountSubType));
 
     // Get expense accounts for auto-suggesting amortization expense account
-    const allAccounts = Array.isArray(accounts) ? accounts : [];
     const expenseAccounts = allAccounts
       .filter(a => ['Expense', 'Other Expense'].includes(a.AccountType) && a.Active);
 
-    const importable = costAccounts.map(a => {
-      // Try to find a matching accumulated amortization account by name pattern
-      const nameBase = a.Name.toLowerCase().replace(/[-–—]/g, ' ').trim();
-      const matchedAccum = accumAccounts.find(acc => {
-        const accumName = acc.Name.toLowerCase().replace(/[-–—]/g, ' ').trim();
-        return accumName.includes(nameBase) || nameBase.includes(accumName.replace(/accumulated\s*(amortization|depreciation)\s*/i, '').trim());
-      });
+    // Check which assets are already imported
+    const clientData = getClientAssets(req.params.clientId);
+    const existingTxnKeys = new Set(clientData.assets.map(a => a.txnKey).filter(Boolean));
 
-      // Try to find a matching expense account by asset name
-      const matchedExpense = expenseAccounts.find(exp => {
-        const expName = exp.Name.toLowerCase();
-        return expName.includes('amortization') || expName.includes('depreciation');
-      }) || expenseAccounts.find(exp => {
-        // Try matching by asset category (e.g. "Computer" -> "Computer expense")
-        const words = nameBase.split(/\s+/);
-        const expName = exp.Name.toLowerCase();
-        return words.some(w => w.length > 3 && expName.includes(w));
-      });
+    // Query the General Ledger Detail for all cost accounts to find individual transactions
+    const costAccountIds = costAccounts.map(a => a.Id).join(',');
+    let glReport = null;
+    if (costAccountIds) {
+      try {
+        glReport = await qbo.getGeneralLedgerForAccount(costAccountIds, syncClientId);
+      } catch (e) {
+        console.error('Could not fetch GL detail for fixed assets:', e.message);
+      }
+    }
 
-      return {
-        qboAccountId: a.Id,
-        name: a.Name || a.FullyQualifiedName,
-        accountType: a.AccountSubType || a.AccountType,
-        currentBalance: balanceLookup[a.Name] ?? a.CurrentBalance ?? 0,
-        description: a.Description || '',
-        // Use QBO account creation date as acquisition date proxy
-        createdDate: a.MetaData?.CreateTime ? a.MetaData.CreateTime.split('T')[0] : null,
-        // Auto-matched accounts
-        suggestedAccumAccountId: matchedAccum?.Id || '',
-        suggestedAccumAccountName: matchedAccum?.Name || '',
-        suggestedExpenseAccountId: matchedExpense?.Id || '',
-        suggestedExpenseAccountName: matchedExpense?.Name || '',
-      };
-    });
+    // Parse GL report into individual asset transactions
+    const importable = [];
+
+    if (glReport?.Rows?.Row) {
+      // GL Detail report structure: rows grouped by account, then individual transactions
+      function parseGLRows(rows, parentAccountId, parentAccountName) {
+        for (const row of rows) {
+          if (row.Header?.ColData) {
+            // This is an account header — get the account name
+            const acctName = row.Header.ColData[0]?.value || '';
+            // Find the matching QBO account
+            const matchedAcct = costAccounts.find(a => a.Name === acctName || a.FullyQualifiedName === acctName);
+            const acctId = matchedAcct?.Id || parentAccountId;
+            const acctNameResolved = matchedAcct?.Name || acctName || parentAccountName;
+
+            // Parse child rows (the actual transactions)
+            if (row.Rows?.Row) {
+              for (const txnRow of row.Rows.Row) {
+                if (txnRow.ColData) {
+                  // ColData typically: [Date, TxnType, DocNum, Name, Memo, Split, Amount, Balance]
+                  const cols = txnRow.ColData;
+                  const txnDate = cols[0]?.value || '';
+                  const txnType = cols[1]?.value || '';
+                  const docNum = cols[2]?.value || '';
+                  const vendorName = cols[3]?.value || '';
+                  const memo = cols[4]?.value || '';
+                  const amount = parseFloat(cols[6]?.value) || 0;
+
+                  // Skip zero amounts and closing/total rows
+                  if (amount <= 0) continue;
+
+                  // Build a unique key for this transaction to avoid re-importing
+                  const txnKey = `${acctId}-${txnDate}-${amount}-${memo || docNum}`;
+
+                  if (!existingTxnKeys.has(txnKey)) {
+                    // Auto-match accumulated amortization account
+                    const nameBase = acctNameResolved.toLowerCase().replace(/[-–—]/g, ' ').trim();
+                    const matchedAccum = accumAccounts.find(acc => {
+                      const accumName = acc.Name.toLowerCase().replace(/[-–—]/g, ' ').trim();
+                      return accumName.includes(nameBase) || nameBase.includes(accumName.replace(/accumulated\s*(amortization|depreciation)\s*/i, '').trim());
+                    });
+
+                    // Auto-match expense account
+                    const matchedExpense = expenseAccounts.find(exp => {
+                      const expName = exp.Name.toLowerCase();
+                      return expName.includes('amortization') || expName.includes('depreciation');
+                    }) || expenseAccounts.find(exp => {
+                      const words = nameBase.split(/\s+/);
+                      const expName = exp.Name.toLowerCase();
+                      return words.some(w => w.length > 3 && expName.includes(w));
+                    });
+
+                    // Use memo/vendor as the asset description (e.g. "Asus Vivobook")
+                    const assetDescription = memo || vendorName || '';
+                    const assetName = assetDescription || acctNameResolved;
+
+                    importable.push({
+                      qboAccountId: acctId,
+                      glAccountName: acctNameResolved,
+                      name: assetName,
+                      description: assetDescription !== assetName ? assetDescription : '',
+                      accountType: 'Fixed Asset',
+                      originalCost: amount,
+                      txnDate,
+                      txnType,
+                      docNum,
+                      vendorName,
+                      memo,
+                      txnKey,
+                      suggestedAccumAccountId: matchedAccum?.Id || '',
+                      suggestedAccumAccountName: matchedAccum?.Name || '',
+                      suggestedExpenseAccountId: matchedExpense?.Id || '',
+                      suggestedExpenseAccountName: matchedExpense?.Name || '',
+                    });
+                  }
+                }
+                // Recurse into sub-rows if present
+                if (txnRow.Rows?.Row) {
+                  parseGLRows([txnRow], acctId, acctNameResolved);
+                }
+              }
+            }
+          }
+          // Also recurse for nested structures
+          if (row.Rows?.Row && !row.Header) {
+            parseGLRows(row.Rows.Row, parentAccountId, parentAccountName);
+          }
+        }
+      }
+
+      parseGLRows(glReport.Rows.Row, null, null);
+    }
+
+    // Fallback: if GL report returned nothing, fall back to account-level import
+    if (importable.length === 0 && costAccounts.length > 0) {
+      const existingQboIds = new Set(clientData.assets.map(a => a.qboAccountId).filter(Boolean));
+      for (const a of costAccounts) {
+        if (existingQboIds.has(a.Id)) continue;
+        const nameBase = a.Name.toLowerCase().replace(/[-–—]/g, ' ').trim();
+        const matchedAccum = accumAccounts.find(acc => {
+          const accumName = acc.Name.toLowerCase().replace(/[-–—]/g, ' ').trim();
+          return accumName.includes(nameBase) || nameBase.includes(accumName.replace(/accumulated\s*(amortization|depreciation)\s*/i, '').trim());
+        });
+        const matchedExpense = expenseAccounts.find(exp => exp.Name.toLowerCase().includes('amortization') || exp.Name.toLowerCase().includes('depreciation'));
+
+        importable.push({
+          qboAccountId: a.Id,
+          glAccountName: a.Name,
+          name: a.Name || a.FullyQualifiedName,
+          description: a.Description || '',
+          accountType: a.AccountSubType || a.AccountType,
+          originalCost: a.CurrentBalance ?? 0,
+          txnDate: a.MetaData?.CreateTime ? a.MetaData.CreateTime.split('T')[0] : null,
+          txnKey: null,
+          suggestedAccumAccountId: matchedAccum?.Id || '',
+          suggestedAccumAccountName: matchedAccum?.Name || '',
+          suggestedExpenseAccountId: matchedExpense?.Id || '',
+          suggestedExpenseAccountName: matchedExpense?.Name || '',
+        });
+      }
+    }
 
     res.json({ accounts: importable });
   } catch (error) {
@@ -1253,9 +1323,9 @@ app.post('/api/admin/fixed-assets/suggest-amortization', requireAdmin, async (re
 
 // Create a new fixed asset for a client
 app.post('/api/admin/clients/:clientId/fixed-assets', requireAdmin, (req, res) => {
-  const { name, description, originalCost, usefulLifeMonths, salvageValue, acquisitionDate,
+  const { name, description, glAccountName, originalCost, usefulLifeMonths, salvageValue, acquisitionDate,
           assetAccountId, assetAccountName, expenseAccountId, expenseAccountName,
-          accumAccountId, accumAccountName, qboAccountId, fromSync } = req.body;
+          accumAccountId, accumAccountName, qboAccountId, txnKey, vendorName, fromSync } = req.body;
 
   if (!name) {
     return res.status(400).json({ error: 'Name is required' });
@@ -1277,14 +1347,17 @@ app.post('/api/admin/clients/:clientId/fixed-assets', requireAdmin, (req, res) =
     clientId: req.params.clientId,
     name,
     description: description || '',
-    originalCost: parseFloat(originalCost),
-    usefulLifeMonths: parseInt(usefulLifeMonths, 10),
+    glAccountName: glAccountName || '',
+    vendorName: vendorName || '',
+    originalCost: parseFloat(originalCost) || 0,
+    usefulLifeMonths: parseInt(usefulLifeMonths, 10) || 60,
     salvageValue: parseFloat(salvageValue || 0),
-    acquisitionDate,
+    acquisitionDate: acquisitionDate || new Date().toISOString().split('T')[0],
     assetAccountId, assetAccountName,
     expenseAccountId, expenseAccountName,
     accumAccountId, accumAccountName,
     qboAccountId: qboAccountId || null,
+    txnKey: txnKey || null,
     active: true,
     createdAt: new Date().toISOString(),
   };

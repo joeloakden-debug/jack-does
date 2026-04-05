@@ -323,6 +323,19 @@ async function getGeneralLedger(startDate, endDate, clientId = 'default') {
 }
 
 /**
+ * Get General Ledger Detail for specific account(s)
+ * @param {string} accountIds - Comma-separated account IDs
+ * @param {string} clientId
+ */
+async function getGeneralLedgerForAccount(accountIds, clientId = 'default') {
+  const qb = await getQBClient(clientId);
+  return qbPromise(qb, 'reportGeneralLedgerDetail', {
+    account: accountIds,
+    date_macro: 'All',
+  });
+}
+
+/**
  * Get Company Info
  */
 async function getCompanyInfo(clientId = 'default') {
@@ -714,6 +727,7 @@ module.exports = {
   getAgedPayables,
   getTrialBalance,
   getGeneralLedger,
+  getGeneralLedgerForAccount,
   getCompanyInfo,
   getRecentInvoices,
   getRecentExpenses,

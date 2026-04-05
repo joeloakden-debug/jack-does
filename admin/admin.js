@@ -883,7 +883,7 @@ function renderFixedAssets() {
               <div class="asset-card-name">${a.name}</div>
               ${needsSetup ? '<span class="asset-setup-badge">needs setup</span>' : ''}
             </div>
-            ${a.description ? `<div class="asset-card-desc">${a.description}</div>` : ''}
+            ${a.glAccountName && a.glAccountName !== a.name ? `<div class="asset-card-desc">GL: ${a.glAccountName}${a.vendorName ? ` — ${a.vendorName}` : ''}</div>` : (a.vendorName ? `<div class="asset-card-desc">${a.vendorName}</div>` : '')}
             <div class="asset-card-amounts">
               <span class="asset-card-amount">cost: <strong>$${a.originalCost.toLocaleString()}</strong></span>
               <span class="asset-card-amount">monthly: <strong>$${monthly}</strong></span>
@@ -950,11 +950,11 @@ async function syncFromQBO() {
         <input type="checkbox" class="qbo-sync-check" data-account='${JSON.stringify(a).replace(/'/g, "&#39;")}' checked>
         <div class="qbo-sync-item-info">
           <div class="qbo-sync-item-name">${a.name}</div>
-          ${a.description ? `<div class="qbo-sync-item-desc">${a.description}</div>` : ''}
           <div class="qbo-sync-item-meta">
-            ${a.accountType} — balance: $${a.currentBalance.toLocaleString()}
-            ${a.createdDate ? ` — created: ${a.createdDate}` : ''}
-            ${a.suggestedAccumAccountName ? ` — accum: ${a.suggestedAccumAccountName}` : ''}
+            ${a.glAccountName && a.glAccountName !== a.name ? `GL: ${a.glAccountName} — ` : ''}
+            $${(a.originalCost || 0).toLocaleString()}
+            ${a.txnDate ? ` — ${a.txnDate}` : ''}
+            ${a.vendorName ? ` — ${a.vendorName}` : ''}
           </div>
         </div>
       </label>
@@ -982,17 +982,20 @@ async function importSelectedAssets() {
     const body = {
       name: account.name,
       description: account.description || '',
-      originalCost: account.currentBalance || 0,
+      glAccountName: account.glAccountName || '',
+      originalCost: account.originalCost || account.currentBalance || 0,
       usefulLifeMonths: 60, // default — will be updated by AI suggestion
       salvageValue: 0,
-      acquisitionDate: account.createdDate || new Date().toISOString().split('T')[0],
+      acquisitionDate: account.txnDate || new Date().toISOString().split('T')[0],
       assetAccountId: account.qboAccountId,
-      assetAccountName: account.name,
+      assetAccountName: account.glAccountName || account.name,
       expenseAccountId: account.suggestedExpenseAccountId || '',
       expenseAccountName: account.suggestedExpenseAccountName || '',
       accumAccountId: account.suggestedAccumAccountId || '',
       accumAccountName: account.suggestedAccumAccountName || '',
       qboAccountId: account.qboAccountId,
+      txnKey: account.txnKey || null,
+      vendorName: account.vendorName || '',
       fromSync: true, // skip strict validation
     };
 
