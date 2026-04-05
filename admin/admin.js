@@ -929,11 +929,11 @@ async function syncFromQBO() {
     }
 
     listEl.innerHTML = data.accounts.map(a => `
-      <label class="qbo-sync-item" style="display:flex;align-items:center;gap:10px;padding:10px;border-bottom:1px solid var(--gray-100);cursor:pointer;">
+      <label class="qbo-sync-item">
         <input type="checkbox" class="qbo-sync-check" data-account='${JSON.stringify(a).replace(/'/g, "&#39;")}' checked>
-        <div style="flex:1;">
-          <div style="font-weight:500;">${a.name}</div>
-          <div style="font-size:0.78rem;color:var(--gray-400);">${a.accountType} — balance: $${a.currentBalance.toLocaleString()}</div>
+        <div class="qbo-sync-item-info">
+          <div class="qbo-sync-item-name">${a.name}</div>
+          <div class="qbo-sync-item-meta">${a.accountType} — balance: $${a.currentBalance.toLocaleString()}</div>
         </div>
       </label>
     `).join('');

@@ -936,6 +936,44 @@ body {
   background: #fef2f2;
 }
 
+/* QBO Sync items */
+.qbo-sync-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--gray-100);
+  cursor: pointer;
+  transition: background var(--transition);
+}
+.qbo-sync-item:hover { background: var(--gray-50); }
+.qbo-sync-item:last-child { border-bottom: none; }
+
+.qbo-sync-item input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  accent-color: var(--blue-600);
+  cursor: pointer;
+}
+
+.qbo-sync-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.qbo-sync-item-name {
+  font-weight: 500;
+  font-size: 0.9rem;
+  color: var(--gray-800);
+}
+
+.qbo-sync-item-meta {
+  font-size: 0.78rem;
+  color: var(--gray-400);
+  margin-top: 2px;
+}
+
 .amortization-preview-table {
   width: 100%;
   border-collapse: collapse;
