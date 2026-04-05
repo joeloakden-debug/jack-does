@@ -943,7 +943,32 @@ async function loadClientFixedAssets() {
 }
 
 function getAssetClass(asset) {
-  return assetClasses.find(c => c.glAccountId === asset.assetAccountId || c.glAccountName === asset.glAccountName) || null;
+  return assetClasses.find(c =>
+    (asset.assetAccountId && c.glAccountId === asset.assetAccountId) ||
+    c.glAccountName === (asset.glAccountName || asset.assetAccountName)
+  ) || null;
+}
+
+/**
+ * Calculate the monthly amortization amount for an asset based on its class policy.
+ * Returns null if no policy is set.
+ */
+function calcMonthlyAmort(asset, cls) {
+  if (!cls || !asset.originalCost) return null;
+  const cost = parseFloat(asset.originalCost) || 0;
+  const salvage = parseFloat(cls.salvageValue) || 0;
+
+  if (cls.method === 'declining-balance') {
+    const rate = parseFloat(cls.decliningRate) || 0;
+    if (!rate) return null;
+    // First month: annual rate / 12 applied to (cost - salvage)
+    return (cost - salvage) * rate / 12;
+  } else {
+    // Straight-line
+    const months = parseInt(cls.usefulLifeMonths) || 0;
+    if (!months) return null;
+    return (cost - salvage) / months;
+  }
 }
 
 function renderAssetClasses() {
@@ -999,6 +1024,7 @@ function renderFixedAssets() {
       const cls = getAssetClass(a);
       const className = cls?.glAccountName || a.glAccountName || '—';
       const acqDate = a.acquisitionDate || '';
+      const monthlyAmort = calcMonthlyAmort(a, cls);
 
       return `
         <div class="asset-card">
@@ -1010,6 +1036,7 @@ function renderFixedAssets() {
             <div class="asset-card-amounts">
               <span class="asset-card-amount">cost: <strong>$${(a.originalCost || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
               <span class="asset-card-amount">acquired: <strong>${acqDate}</strong></span>
+              <span class="asset-card-amount">monthly amort: <strong>${monthlyAmort !== null ? '$' + monthlyAmort.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'}</strong></span>
             </div>
           </div>
           <div class="asset-card-actions">
