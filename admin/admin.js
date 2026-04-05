@@ -1272,7 +1272,6 @@ async function confirmRunAmortization() {
 }
 
 // Fixed asset event listeners
-document.getElementById('btn-add-asset').addEventListener('click', openAddAsset);
 document.getElementById('asset-modal-cancel').addEventListener('click', closeAssetModal);
 document.getElementById('asset-modal-save').addEventListener('click', saveAsset);
 document.getElementById('asset-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeAssetModal(); });

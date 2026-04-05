@@ -1169,7 +1169,7 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
     const existingQboIds = new Set(clientData.assets.map(a => a.qboAccountId).filter(Boolean));
 
     const importable = fixedAssetAccounts
-      .filter(a => !a.AccountSubType || a.AccountSubType !== 'AccumulatedDepreciation')
+      .filter(a => !a.AccountSubType || !['AccumulatedDepreciation', 'AccumulatedAmortization'].includes(a.AccountSubType))
       .filter(a => !existingQboIds.has(a.Id))
       .map(a => ({
         qboAccountId: a.Id,
