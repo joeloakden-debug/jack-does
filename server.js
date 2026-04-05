@@ -1217,13 +1217,19 @@ app.post('/api/admin/fixed-assets/suggest-amortization', requireAdmin, async (re
 app.post('/api/admin/clients/:clientId/fixed-assets', requireAdmin, (req, res) => {
   const { name, originalCost, usefulLifeMonths, salvageValue, acquisitionDate,
           assetAccountId, assetAccountName, expenseAccountId, expenseAccountName,
-          accumAccountId, accumAccountName, qboAccountId } = req.body;
+          accumAccountId, accumAccountName, qboAccountId, fromSync } = req.body;
 
-  if (!name || !originalCost || !usefulLifeMonths || !acquisitionDate) {
-    return res.status(400).json({ error: 'Name, cost, useful life, and acquisition date are required' });
+  if (!name) {
+    return res.status(400).json({ error: 'Name is required' });
   }
-  if (!assetAccountId || !expenseAccountId || !accumAccountId) {
-    return res.status(400).json({ error: 'All three QBO accounts must be selected' });
+  // Strict validation only for manual adds (not syncs from QBO)
+  if (!fromSync) {
+    if (!originalCost || !usefulLifeMonths || !acquisitionDate) {
+      return res.status(400).json({ error: 'Name, cost, useful life, and acquisition date are required' });
+    }
+    if (!assetAccountId || !expenseAccountId || !accumAccountId) {
+      return res.status(400).json({ error: 'All three QBO accounts must be selected' });
+    }
   }
 
   const clientData = getClientAssets(req.params.clientId);
@@ -1257,7 +1263,7 @@ app.put('/api/admin/clients/:clientId/fixed-assets/:id', requireAdmin, (req, res
 
   const fields = ['name', 'originalCost', 'usefulLifeMonths', 'salvageValue', 'acquisitionDate',
     'assetAccountId', 'assetAccountName', 'expenseAccountId', 'expenseAccountName',
-    'accumAccountId', 'accumAccountName', 'active'];
+    'accumAccountId', 'accumAccountName', 'active', 'aiSuggestion'];
 
   fields.forEach(f => {
     if (req.body[f] !== undefined) {

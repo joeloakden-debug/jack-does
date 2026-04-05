@@ -894,6 +894,48 @@ body {
 .btn-suggest-amort:disabled { opacity: 0.5; cursor: wait; }
 
 /* ======== FIXED ASSETS ======== */
+.asset-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  background: var(--white);
+  border: 1px solid var(--gray-200);
+  border-radius: 10px;
+  margin-bottom: 10px;
+  transition: border-color var(--transition);
+}
+.asset-card:hover { border-color: var(--gray-300); }
+
+.asset-card.asset-needs-setup {
+  border-left: 3px solid var(--orange-500);
+}
+
+.asset-card-main { flex: 1; min-width: 0; }
+
+.asset-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.asset-card-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--gray-800);
+}
+
+.asset-setup-badge {
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--orange-600);
+  background: var(--orange-50);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
 .asset-card-amounts {
   display: flex;
   gap: 20px;
@@ -911,10 +953,43 @@ body {
   font-weight: 600;
 }
 
+.asset-card-accounts {
+  margin-top: 6px;
+  font-size: 0.75rem;
+  color: var(--gray-400);
+}
+
+.asset-ai-suggestion {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: var(--blue-50);
+  border-radius: 6px;
+  font-size: 0.78rem;
+}
+
+.asset-ai-label {
+  font-weight: 600;
+  color: var(--blue-600);
+}
+
+.asset-ai-detail {
+  color: var(--blue-700);
+  margin-left: 4px;
+}
+
+.asset-ai-reasoning {
+  color: var(--gray-500);
+  margin-top: 4px;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
 .asset-card-actions {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .btn-delete-asset {

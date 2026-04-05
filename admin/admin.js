@@ -866,21 +866,37 @@ function renderFixedAssets() {
     list.innerHTML = '<p style="color:var(--gray-400);text-align:center;padding:40px;">no fixed assets yet. sync from QBO or add manually.</p>';
   } else {
     list.innerHTML = activeAssets.map(a => {
-      const monthly = ((a.originalCost - a.salvageValue) / a.usefulLifeMonths).toFixed(2);
-      const acqDate = new Date(a.acquisitionDate);
+      const monthly = a.usefulLifeMonths ? ((a.originalCost - a.salvageValue) / a.usefulLifeMonths).toFixed(2) : '—';
+      const acqDate = a.acquisitionDate ? new Date(a.acquisitionDate) : null;
       const now = new Date();
-      const monthsElapsed = (now.getFullYear() * 12 + now.getMonth()) - (acqDate.getFullYear() * 12 + acqDate.getMonth());
-      const remaining = Math.max(0, a.usefulLifeMonths - monthsElapsed);
+      const monthsElapsed = acqDate ? (now.getFullYear() * 12 + now.getMonth()) - (acqDate.getFullYear() * 12 + acqDate.getMonth()) : 0;
+      const remaining = a.usefulLifeMonths ? Math.max(0, a.usefulLifeMonths - monthsElapsed) : '—';
+      const ai = a.aiSuggestion;
+
+      // Status badges
+      const needsSetup = !a.expenseAccountId || !a.accumAccountId;
+
       return `
-        <div class="client-card">
-          <div class="client-info">
-            <div class="client-name">${a.name}</div>
+        <div class="asset-card ${needsSetup ? 'asset-needs-setup' : ''}">
+          <div class="asset-card-main">
+            <div class="asset-card-header">
+              <div class="asset-card-name">${a.name}</div>
+              ${needsSetup ? '<span class="asset-setup-badge">needs setup</span>' : ''}
+            </div>
             <div class="asset-card-amounts">
               <span class="asset-card-amount">cost: <strong>$${a.originalCost.toLocaleString()}</strong></span>
               <span class="asset-card-amount">monthly: <strong>$${monthly}</strong></span>
+              <span class="asset-card-amount">period: <strong>${a.usefulLifeMonths || '—'} mo</strong></span>
               <span class="asset-card-amount">remaining: <strong>${remaining} mo</strong></span>
             </div>
-            <div style="margin-top:4px;font-size:0.75rem;color:var(--gray-400);">${a.expenseAccountName || '—'} → ${a.accumAccountName || '—'}</div>
+            ${ai ? `
+              <div class="asset-ai-suggestion">
+                <span class="asset-ai-label">AI suggestion:</span>
+                <span class="asset-ai-detail">straight-line, ${ai.ccaClass ? `CCA Class ${ai.ccaClass}` : ''} ${ai.ccaRate ? `(${ai.ccaRate})` : ''} — ${a.usefulLifeMonths} months</span>
+                ${ai.reasoning ? `<div class="asset-ai-reasoning">${ai.reasoning}</div>` : ''}
+              </div>
+            ` : ''}
+            <div class="asset-card-accounts">${a.expenseAccountName || '—'} → ${a.accumAccountName || '—'}</div>
           </div>
           <div class="asset-card-actions">
             <button class="btn-edit-client" onclick="openEditAsset('${a.id}')">edit</button>
@@ -948,15 +964,19 @@ async function syncFromQBO() {
 async function importSelectedAssets() {
   const checkboxes = document.querySelectorAll('.qbo-sync-check:checked');
   const errorEl = document.getElementById('qbo-sync-error');
+  const importBtn = document.getElementById('qbo-sync-import');
   errorEl.style.display = 'none';
+  importBtn.textContent = 'importing...';
+  importBtn.disabled = true;
+
+  const importedAssets = [];
 
   for (const cb of checkboxes) {
     const account = JSON.parse(cb.dataset.account);
-    // Import each as a fixed asset — user will need to set amortization details later
     const body = {
       name: account.name,
       originalCost: account.currentBalance || 0,
-      usefulLifeMonths: 60, // default, user should edit
+      usefulLifeMonths: 60, // default — will be updated by AI suggestion
       salvageValue: 0,
       acquisitionDate: new Date().toISOString().split('T')[0],
       assetAccountId: account.qboAccountId,
@@ -966,19 +986,85 @@ async function importSelectedAssets() {
       accumAccountId: '',
       accumAccountName: '',
       qboAccountId: account.qboAccountId,
+      fromSync: true, // skip strict validation
     };
 
     try {
-      await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets`, {
+      const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
         body: JSON.stringify(body),
       });
+      const data = await res.json();
+      if (data.asset) importedAssets.push(data.asset);
     } catch (e) { console.error('Failed to import asset:', e); }
   }
 
+  // Close modal and show assets immediately
   document.getElementById('qbo-sync-modal').style.display = 'none';
-  loadClientFixedAssets();
+  importBtn.textContent = 'import selected';
+  importBtn.disabled = false;
+  await loadClientFixedAssets();
+
+  // Now run AI suggestions for each imported asset in the background
+  if (importedAssets.length > 0) {
+    runAISuggestionsForAssets(importedAssets);
+  }
+}
+
+/**
+ * Run AI amortization suggestions for a list of assets, update each, and re-render
+ */
+async function runAISuggestionsForAssets(assets) {
+  const statusEl = document.getElementById('amortization-status');
+  statusEl.textContent = `getting AI amortization suggestions for ${assets.length} asset${assets.length !== 1 ? 's' : ''}...`;
+  statusEl.style.display = '';
+
+  let updated = 0;
+  for (const asset of assets) {
+    try {
+      // Get AI suggestion
+      const sugRes = await fetch('/api/admin/fixed-assets/suggest-amortization', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+        body: JSON.stringify({ assetName: asset.name, originalCost: asset.originalCost }),
+      });
+      const suggestion = await sugRes.json();
+
+      if (suggestion.usefulLifeMonths) {
+        // Update the asset with AI-suggested values
+        const updateBody = {
+          usefulLifeMonths: suggestion.usefulLifeMonths,
+          salvageValue: suggestion.salvageValue || 0,
+          aiSuggestion: {
+            ccaClass: suggestion.ccaClass || null,
+            ccaRate: suggestion.ccaRate || null,
+            reasoning: suggestion.reasoning || '',
+            method: 'straight-line',
+            suggestedAt: new Date().toISOString(),
+          },
+        };
+
+        await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/${asset.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+          body: JSON.stringify(updateBody),
+        });
+        updated++;
+      }
+    } catch (e) {
+      console.error(`AI suggestion failed for "${asset.name}":`, e);
+    }
+
+    // Update status as we go
+    statusEl.textContent = `AI suggestions: ${updated} of ${assets.length} updated...`;
+  }
+
+  statusEl.textContent = `AI suggestions complete — ${updated} asset${updated !== 1 ? 's' : ''} updated`;
+  setTimeout(() => { statusEl.style.display = 'none'; }, 5000);
+
+  // Reload to show updated values
+  await loadClientFixedAssets();
 }
 
 // AI amortization suggestion
