@@ -247,9 +247,13 @@ const conversations = new Map();
 // QUICKBOOKS OAUTH ENDPOINTS
 // ========================================
 
-// Start QuickBooks connection
+// Start QuickBooks connection (from client portal)
 app.get('/api/qbo/connect', (req, res) => {
   const authUri = qbo.getAuthUri();
+  // Store where to redirect after OAuth (admin or portal)
+  const from = req.query.from || 'portal';
+  // Use a cookie to remember the source during OAuth redirect
+  res.cookie('qbo_connect_from', from, { maxAge: 300000, httpOnly: true });
   res.redirect(authUri);
 });
 
@@ -259,11 +263,24 @@ app.get('/api/qbo/callback', async (req, res) => {
     const tokenData = await qbo.handleCallback(req.url);
     console.log('QuickBooks connected! Realm ID:', tokenData.realmId);
 
-    // Redirect back to portal with success
-    res.redirect('/portal/dashboard.html?qbo=connected');
+    // Redirect back to the originating page
+    const fromCookie = req.headers.cookie?.split(';').find(c => c.trim().startsWith('qbo_connect_from='));
+    const from = fromCookie?.split('=')[1]?.trim() || 'portal';
+
+    if (from === 'admin') {
+      res.redirect('/admin/dashboard.html?qbo=connected');
+    } else {
+      res.redirect('/portal/dashboard.html?qbo=connected');
+    }
   } catch (error) {
     console.error('QuickBooks OAuth error:', error.message);
-    res.redirect('/portal/dashboard.html?qbo=error');
+    const fromCookie = req.headers.cookie?.split(';').find(c => c.trim().startsWith('qbo_connect_from='));
+    const from = fromCookie?.split('=')[1]?.trim() || 'portal';
+    if (from === 'admin') {
+      res.redirect('/admin/dashboard.html?qbo=error');
+    } else {
+      res.redirect('/portal/dashboard.html?qbo=error');
+    }
   }
 });
 

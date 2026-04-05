@@ -19,9 +19,9 @@
         <span class="admin-badge">admin</span>
       </div>
       <div class="admin-topbar-right">
-        <span class="qbo-status" id="qbo-status">
-          <span class="status-dot disconnected"></span> quickbooks
-        </span>
+        <a href="/api/qbo/connect?from=admin" class="qbo-status" id="qbo-status" style="text-decoration:none;cursor:pointer;">
+          <span class="status-dot disconnected"></span> <span id="qbo-status-text">quickbooks</span>
+        </a>
         <button class="btn-logout" onclick="logout()">sign out</button>
       </div>
     </header>

@@ -123,10 +123,19 @@ async function loadStats() {
 
     const qboEl = document.getElementById('qbo-status');
     const dot = qboEl.querySelector('.status-dot');
+    const statusText = document.getElementById('qbo-status-text');
     if (data.qboConnected) {
       dot.classList.remove('disconnected');
       dot.classList.add('connected');
-      qboEl.lastChild.textContent = ' qbo connected';
+      statusText.textContent = 'qbo connected';
+      qboEl.removeAttribute('href'); // no need to click when connected
+      qboEl.style.cursor = 'default';
+    } else {
+      dot.classList.remove('connected');
+      dot.classList.add('disconnected');
+      statusText.textContent = 'connect quickbooks';
+      qboEl.href = '/api/qbo/connect?from=admin';
+      qboEl.style.cursor = 'pointer';
     }
   } catch (e) {
     console.error('Failed to load stats:', e);
@@ -1181,7 +1190,7 @@ async function loadQboTokens() {
       statusEl.textContent = 'qbo connected but token file not found';
       statusEl.style.color = 'var(--amber-600)';
     } else {
-      statusEl.textContent = 'qbo not connected — connect via portal first';
+      statusEl.textContent = 'qbo not connected — click "connect quickbooks" in the top bar';
       statusEl.style.color = 'var(--gray-500)';
       valueEl.style.display = 'none';
       copyBtn.style.display = 'none';
@@ -1205,6 +1214,15 @@ document.getElementById('btn-refresh-tokens').addEventListener('click', loadQboT
 // INIT
 // ========================================
 async function init() {
+  // Check for QBO callback
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('qbo') === 'connected') {
+    window.history.replaceState({}, '', window.location.pathname);
+  } else if (params.get('qbo') === 'error') {
+    alert('Failed to connect QuickBooks. Please try again.');
+    window.history.replaceState({}, '', window.location.pathname);
+  }
+
   // Load accounts first so dropdowns are ready before rendering analyses
   await loadAccounts();
   loadStats();
