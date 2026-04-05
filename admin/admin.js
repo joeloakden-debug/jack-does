@@ -857,6 +857,42 @@ async function loadClientFixedAssets() {
     allFixedAssets = data.assets || [];
     fixedAssetRuns = data.amortizationRuns || [];
     assetClasses = data.assetClasses || [];
+
+    // Auto-create missing GL account policies for any assets that don't have one
+    const missingGLAccounts = new Map();
+    for (const asset of allFixedAssets) {
+      if (!asset.active || !asset.assetAccountId) continue;
+      const hasClass = assetClasses.some(c => c.glAccountId === asset.assetAccountId || c.glAccountName === asset.glAccountName);
+      if (!hasClass && !missingGLAccounts.has(asset.assetAccountId)) {
+        missingGLAccounts.set(asset.assetAccountId, {
+          glAccountId: asset.assetAccountId,
+          glAccountName: asset.glAccountName || asset.assetAccountName || asset.name,
+        });
+      }
+    }
+
+    if (missingGLAccounts.size > 0) {
+      for (const [glId, info] of missingGLAccounts) {
+        try {
+          const createRes = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/classes`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+            body: JSON.stringify({
+              glAccountId: info.glAccountId,
+              glAccountName: info.glAccountName,
+              method: 'straight-line',
+              usefulLifeMonths: 60,
+              salvageValue: 0,
+            }),
+          });
+          const createData = await createRes.json();
+          if (createData.assetClass) assetClasses.push(createData.assetClass);
+        } catch (e) { console.error('Failed to auto-create class:', e); }
+      }
+      // Run AI suggestions for newly created classes
+      runAISuggestionsForClasses();
+    }
+
     renderAssetClasses();
     renderFixedAssets();
   } catch (e) { console.error('Failed to load fixed assets:', e); }
