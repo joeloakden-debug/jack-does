@@ -805,6 +805,52 @@ body {
 }
 .btn-back:hover { text-decoration: underline; }
 
+/* Per-client QBO connection bar */
+.client-qbo-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  margin-bottom: 16px;
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+}
+.client-qbo-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  color: var(--gray-600);
+  flex: 1;
+}
+.btn-qbo-connect {
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--white);
+  background: var(--blue-600);
+  border: none;
+  border-radius: 6px;
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+.btn-qbo-connect:hover { background: var(--blue-700); }
+.btn-qbo-disconnect {
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--red-500);
+  background: var(--red-50);
+  border: 1px solid var(--red-500);
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.btn-qbo-disconnect:hover { background: var(--red-500); color: var(--white); }
+
 .client-sub-nav {
   display: flex;
   gap: 4px;

@@ -158,16 +158,23 @@ async function checkQBOStatus() {
   const banner = document.getElementById('qbo-banner');
   if (!banner) return;
 
+  // Update the connect link to include this client's ID
+  const connectBtn = banner.querySelector('.btn-qbo');
+  if (connectBtn && CLIENT_ID) {
+    connectBtn.href = `/api/qbo/connect?clientId=${CLIENT_ID}`;
+  }
+
   try {
-    const res = await fetch('/api/qbo/status');
+    const res = await fetch(`/api/qbo/status?clientId=${CLIENT_ID}`);
     const data = await res.json();
     if (data.connected) {
       banner.classList.add('connected');
       banner.querySelector('.qbo-banner-text').innerHTML =
         '<strong>quickbooks connected</strong> — jack has access to your financial data';
-      const btn = banner.querySelector('.btn-qbo');
-      btn.textContent = 'connected';
-      btn.classList.add('connected');
+      if (connectBtn) {
+        connectBtn.textContent = 'connected';
+        connectBtn.classList.add('connected');
+      }
     }
   } catch (e) { /* server not running */ }
 
@@ -176,9 +183,10 @@ async function checkQBOStatus() {
     banner.classList.add('connected');
     banner.querySelector('.qbo-banner-text').innerHTML =
       '<strong>quickbooks connected</strong> — jack has access to your financial data';
-    const btn = banner.querySelector('.btn-qbo');
-    btn.textContent = 'connected';
-    btn.classList.add('connected');
+    if (connectBtn) {
+      connectBtn.textContent = 'connected';
+      connectBtn.classList.add('connected');
+    }
     window.history.replaceState({}, '', window.location.pathname);
   }
 }

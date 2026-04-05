@@ -13,7 +13,7 @@ const oauthClient = new OAuthClient({
   redirectUri: process.env.QBO_REDIRECT_URI,
 });
 
-// Token store with file persistence (survives server restarts)
+// Token store keyed by clientId (e.g. "demo-client", "acme-corp")
 const tokenStore = new Map();
 const TOKEN_FILE = path.join(__dirname, '.qbo-tokens.json');
 
@@ -28,6 +28,9 @@ function loadTokensFromDisk() {
       const data = JSON.parse(raw);
       const keys = Object.keys(data);
       console.log('[QBO] Parsed successfully, keys:', keys.join(', '));
+
+      // Migration: if the old format has a "default" key, keep it as-is
+      // New format is keyed by clientId
       Object.entries(data).forEach(([key, val]) => tokenStore.set(key, val));
       console.log('QBO tokens loaded from env var — connection restored');
       return;
@@ -60,23 +63,28 @@ function saveTokensToDisk() {
 loadTokensFromDisk();
 
 // ========================================
-// OAUTH FLOW
+// OAUTH FLOW (per-client)
 // ========================================
 
 /**
  * Generate the QuickBooks OAuth authorization URL
+ * @param {string} clientId - The client ID to associate this QBO connection with
  */
-function getAuthUri() {
+function getAuthUri(clientId) {
+  // Encode clientId in the state parameter so we can associate it after callback
+  const state = clientId ? `jackdoes-qbo:${clientId}` : 'jackdoes-qbo:default';
   return oauthClient.authorizeUri({
     scope: [OAuthClient.scopes.Accounting, OAuthClient.scopes.OpenId],
-    state: 'jackdoes-qbo',
+    state,
   });
 }
 
 /**
- * Handle the OAuth callback and store tokens
+ * Handle the OAuth callback and store tokens keyed by clientId
+ * @param {string} url - The callback URL
+ * @param {string} clientId - The client ID to store tokens under
  */
-async function handleCallback(url) {
+async function handleCallback(url, clientId) {
   const authResponse = await oauthClient.createToken(url);
   const token = authResponse.getJson();
 
@@ -87,13 +95,12 @@ async function handleCallback(url) {
     expiresAt: Date.now() + (token.expires_in * 1000),
     refreshExpiresAt: Date.now() + (token.x_refresh_token_expires_in * 1000),
     createdAt: new Date().toISOString(),
+    clientId: clientId || 'default',
   };
 
-  // Store by realmId (company ID)
-  tokenStore.set(tokenData.realmId, tokenData);
-
-  // Also store as "default" for easy access
-  tokenStore.set('default', tokenData);
+  // Store by the clientId
+  const storeKey = clientId || 'default';
+  tokenStore.set(storeKey, tokenData);
 
   // Persist to disk so tokens survive server restarts
   saveTokensToDisk();
@@ -103,11 +110,12 @@ async function handleCallback(url) {
 
 /**
  * Refresh the access token if expired
+ * @param {string} clientId - The client whose token to refresh
  */
-async function refreshTokenIfNeeded(realmId = 'default') {
-  const tokenData = tokenStore.get(realmId);
+async function refreshTokenIfNeeded(clientId = 'default') {
+  const tokenData = tokenStore.get(clientId);
   if (!tokenData) {
-    throw new Error('No QuickBooks connection found. Please connect QuickBooks first.');
+    throw new Error('No QuickBooks connection found for this client. Please connect QuickBooks first.');
   }
 
   // Check if token is expired (with 5 min buffer)
@@ -127,13 +135,12 @@ async function refreshTokenIfNeeded(realmId = 'default') {
       tokenData.refreshToken = newToken.refresh_token;
       tokenData.expiresAt = Date.now() + (newToken.expires_in * 1000);
 
-      tokenStore.set(realmId, tokenData);
-      if (realmId !== 'default') tokenStore.set('default', tokenData);
+      tokenStore.set(clientId, tokenData);
       saveTokensToDisk();
     } catch (refreshError) {
       // If refresh fails, the tokens are invalid — clear them so user can reconnect
-      console.error('[QBO] Refresh token invalid, clearing connection. User must reconnect.');
-      disconnect();
+      console.error(`[QBO] Refresh token invalid for client "${clientId}", clearing connection. User must reconnect.`);
+      disconnect(clientId);
       throw new Error('The Refresh token is invalid, please Authorize again.');
     }
   }
@@ -142,21 +149,68 @@ async function refreshTokenIfNeeded(realmId = 'default') {
 }
 
 /**
- * Disconnect QuickBooks — clear all stored tokens
+ * Disconnect QuickBooks for a specific client
+ * @param {string} clientId - The client to disconnect (or 'all' to clear everything)
  */
-function disconnect() {
-  tokenStore.clear();
+function disconnect(clientId) {
+  if (clientId === 'all') {
+    tokenStore.clear();
+  } else if (clientId) {
+    tokenStore.delete(clientId);
+  } else {
+    // Legacy: clear everything
+    tokenStore.clear();
+  }
   try {
-    if (fs.existsSync(TOKEN_FILE)) fs.unlinkSync(TOKEN_FILE);
+    // Rewrite token file with remaining connections
+    const data = {};
+    tokenStore.forEach((val, key) => { data[key] = val; });
+    if (Object.keys(data).length > 0) {
+      fs.writeFileSync(TOKEN_FILE, JSON.stringify(data, null, 2));
+    } else {
+      if (fs.existsSync(TOKEN_FILE)) fs.unlinkSync(TOKEN_FILE);
+    }
   } catch (e) { /* ignore */ }
-  console.log('[QBO] Disconnected — tokens cleared');
+  console.log(`[QBO] Disconnected client "${clientId}" — tokens cleared`);
 }
 
 /**
- * Check if QuickBooks is connected
+ * Check if QuickBooks is connected for a specific client
+ * @param {string} clientId
  */
-function isConnected(realmId = 'default') {
-  return tokenStore.has(realmId);
+function isConnected(clientId = 'default') {
+  return tokenStore.has(clientId);
+}
+
+/**
+ * Check if ANY client has a QBO connection (useful for global status)
+ */
+function isAnyConnected() {
+  return tokenStore.size > 0;
+}
+
+/**
+ * Get all connected client IDs
+ */
+function getAllConnections() {
+  const connections = {};
+  tokenStore.forEach((val, key) => {
+    connections[key] = {
+      realmId: val.realmId,
+      createdAt: val.createdAt,
+      clientId: val.clientId || key,
+    };
+  });
+  return connections;
+}
+
+/**
+ * Get the full token store as a JSON string (for env var export)
+ */
+function getTokensJson() {
+  const data = {};
+  tokenStore.forEach((val, key) => { data[key] = val; });
+  return JSON.stringify(data);
 }
 
 // ========================================
@@ -165,9 +219,10 @@ function isConnected(realmId = 'default') {
 
 /**
  * Get a configured QuickBooks client
+ * @param {string} clientId - The client whose QBO connection to use
  */
-async function getQBClient(realmId = 'default') {
-  const tokenData = await refreshTokenIfNeeded(realmId);
+async function getQBClient(clientId = 'default') {
+  const tokenData = await refreshTokenIfNeeded(clientId);
 
   const useSandbox = (process.env.QBO_ENVIRONMENT || 'sandbox') === 'sandbox';
 
@@ -200,8 +255,8 @@ function qbPromise(qb, method, ...args) {
 /**
  * Get Profit & Loss report
  */
-async function getProfitAndLoss(startDate, endDate, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getProfitAndLoss(startDate, endDate, clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'reportProfitAndLoss', {
     start_date: startDate,
     end_date: endDate,
@@ -211,8 +266,8 @@ async function getProfitAndLoss(startDate, endDate, realmId = 'default') {
 /**
  * Get Balance Sheet report
  */
-async function getBalanceSheet(asOfDate, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getBalanceSheet(asOfDate, clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'reportBalanceSheet', {
     date: asOfDate,
   });
@@ -221,8 +276,8 @@ async function getBalanceSheet(asOfDate, realmId = 'default') {
 /**
  * Get Cash Flow report
  */
-async function getCashFlow(startDate, endDate, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getCashFlow(startDate, endDate, clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'reportCashFlow', {
     start_date: startDate,
     end_date: endDate,
@@ -232,24 +287,24 @@ async function getCashFlow(startDate, endDate, realmId = 'default') {
 /**
  * Get Aged Receivables report
  */
-async function getAgedReceivables(realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getAgedReceivables(clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'reportAgedReceivables', {});
 }
 
 /**
  * Get Aged Payables report
  */
-async function getAgedPayables(realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getAgedPayables(clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'reportAgedPayables', {});
 }
 
 /**
  * Get Trial Balance
  */
-async function getTrialBalance(startDate, endDate, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getTrialBalance(startDate, endDate, clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'reportTrialBalance', {
     start_date: startDate,
     end_date: endDate,
@@ -259,8 +314,8 @@ async function getTrialBalance(startDate, endDate, realmId = 'default') {
 /**
  * Get General Ledger
  */
-async function getGeneralLedger(startDate, endDate, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getGeneralLedger(startDate, endDate, clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'reportGeneralLedgerDetail', {
     start_date: startDate,
     end_date: endDate,
@@ -270,9 +325,9 @@ async function getGeneralLedger(startDate, endDate, realmId = 'default') {
 /**
  * Get Company Info
  */
-async function getCompanyInfo(realmId = 'default') {
-  const qb = await getQBClient(realmId);
-  const tokenData = tokenStore.get(realmId);
+async function getCompanyInfo(clientId = 'default') {
+  const qb = await getQBClient(clientId);
+  const tokenData = tokenStore.get(clientId);
   return qbPromise(qb, 'getCompanyInfo', tokenData.realmId);
 }
 
@@ -289,96 +344,96 @@ function dateFilter(startDate, endDate) {
 /**
  * Get recent invoices
  */
-async function getRecentInvoices(limit = 10, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getRecentInvoices(limit = 10, clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'findInvoices', { fetchAll: true });
 }
 
 /**
  * Get recent expenses/purchases
  */
-async function getRecentExpenses(limit = 10, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getRecentExpenses(limit = 10, clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'findPurchases', { fetchAll: true });
 }
 
 /**
  * Get customer list
  */
-async function getCustomers(realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getCustomers(clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'findCustomers', { fetchAll: true });
 }
 
 /**
  * Get vendor list
  */
-async function getVendors(realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getVendors(clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'findVendors', { fetchAll: true });
 }
 
 /**
  * Get account list
  */
-async function getAccounts(realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getAccounts(clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'findAccounts', { fetchAll: true });
 }
 
 /**
  * Get all purchases/expenses in a date range
  */
-async function getExpenseTransactions(startDate, endDate, limit = 100, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getExpenseTransactions(startDate, endDate, limit = 100, clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'findPurchases', dateFilter(startDate, endDate));
 }
 
 /**
  * Get all bills in a date range
  */
-async function getBills(startDate, endDate, limit = 100, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getBills(startDate, endDate, limit = 100, clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'findBills', dateFilter(startDate, endDate));
 }
 
 /**
  * Get invoices in a date range
  */
-async function getInvoicesByDate(startDate, endDate, limit = 100, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getInvoicesByDate(startDate, endDate, limit = 100, clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'findInvoices', dateFilter(startDate, endDate));
 }
 
 /**
  * Get all journal entries in a date range
  */
-async function getJournalEntries(startDate, endDate, limit = 100, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getJournalEntries(startDate, endDate, limit = 100, clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'findJournalEntries', dateFilter(startDate, endDate));
 }
 
 /**
  * Get payments received in a date range
  */
-async function getPayments(startDate, endDate, limit = 100, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getPayments(startDate, endDate, limit = 100, clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'findPayments', dateFilter(startDate, endDate));
 }
 
 /**
  * Get deposits in a date range
  */
-async function getDeposits(startDate, endDate, limit = 100, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getDeposits(startDate, endDate, limit = 100, clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'findDeposits', dateFilter(startDate, endDate));
 }
 
 /**
  * Get transfers in a date range
  */
-async function getTransfers(startDate, endDate, limit = 100, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function getTransfers(startDate, endDate, limit = 100, clientId = 'default') {
+  const qb = await getQBClient(clientId);
   return qbPromise(qb, 'findTransfers', dateFilter(startDate, endDate));
 }
 
@@ -389,8 +444,10 @@ async function getTransfers(startDate, endDate, limit = 100, realmId = 'default'
 
 /**
  * Analyze the question and fetch relevant QuickBooks data
+ * @param {string} question - The user's question
+ * @param {string} clientId - The client whose QBO data to fetch
  */
-async function fetchRelevantData(question, realmId = 'default') {
+async function fetchRelevantData(question, clientId = 'default') {
   const q = question.toLowerCase();
   const now = new Date();
   const results = {};
@@ -436,113 +493,113 @@ async function fetchRelevantData(question, realmId = 'default') {
   }
 
   // Always try to get company info for context
-  results.companyInfo = await safeFetch('companyInfo', () => getCompanyInfo(realmId));
+  results.companyInfo = await safeFetch('companyInfo', () => getCompanyInfo(clientId));
 
   // Profit / revenue / income questions
   if (q.match(/profit|revenue|income|earn|loss|p&l|p\+l|how.*doing|performance/)) {
     if (q.includes('last month') || q.includes('previous month')) {
-      results.profitAndLoss = await safeFetch('P&L last month', () => getProfitAndLoss(firstOfLastMonth, lastOfLastMonth, realmId));
+      results.profitAndLoss = await safeFetch('P&L last month', () => getProfitAndLoss(firstOfLastMonth, lastOfLastMonth, clientId));
     } else if (q.includes('this month')) {
-      results.profitAndLoss = await safeFetch('P&L this month', () => getProfitAndLoss(firstOfThisMonth, today, realmId));
+      results.profitAndLoss = await safeFetch('P&L this month', () => getProfitAndLoss(firstOfThisMonth, today, clientId));
     } else if (q.includes('this year') || q.includes('ytd') || q.includes('year to date')) {
-      results.profitAndLoss = await safeFetch('P&L YTD', () => getProfitAndLoss(startOfYear, today, realmId));
+      results.profitAndLoss = await safeFetch('P&L YTD', () => getProfitAndLoss(startOfYear, today, clientId));
     } else {
-      results.profitAndLossLastMonth = await safeFetch('P&L last month', () => getProfitAndLoss(firstOfLastMonth, lastOfLastMonth, realmId));
-      results.profitAndLossThisMonth = await safeFetch('P&L this month', () => getProfitAndLoss(firstOfThisMonth, today, realmId));
+      results.profitAndLossLastMonth = await safeFetch('P&L last month', () => getProfitAndLoss(firstOfLastMonth, lastOfLastMonth, clientId));
+      results.profitAndLossThisMonth = await safeFetch('P&L this month', () => getProfitAndLoss(firstOfThisMonth, today, clientId));
     }
   }
 
   // Balance sheet / assets / liabilities / equity
   if (q.match(/balance sheet|assets|liabilities|equity|net worth|what.*own|what.*owe/)) {
-    results.balanceSheet = await safeFetch('balance sheet', () => getBalanceSheet(today, realmId));
+    results.balanceSheet = await safeFetch('balance sheet', () => getBalanceSheet(today, clientId));
   }
 
   // Cash flow
   if (q.match(/cash flow|cash.*forecast|liquidity|cash.*position|cash.*need/)) {
-    results.cashFlow = await safeFetch('cash flow', () => getCashFlow(firstOfLastMonth, today, realmId));
-    if (!results.balanceSheet) results.balanceSheet = await safeFetch('balance sheet', () => getBalanceSheet(today, realmId));
+    results.cashFlow = await safeFetch('cash flow', () => getCashFlow(firstOfLastMonth, today, clientId));
+    if (!results.balanceSheet) results.balanceSheet = await safeFetch('balance sheet', () => getBalanceSheet(today, clientId));
   }
 
   // Receivables / who owes / overdue / outstanding
   if (q.match(/receivable|owed|overdue|outstanding|unpaid|collect|aging|past due/)) {
-    results.agedReceivables = await safeFetch('aged receivables', () => getAgedReceivables(realmId));
+    results.agedReceivables = await safeFetch('aged receivables', () => getAgedReceivables(clientId));
   }
 
   // Payables / bills / what we owe
   if (q.match(/payable|bills|what.*we owe|what.*i owe|vendor.*balance|accounts payable/)) {
-    results.agedPayables = await safeFetch('aged payables', () => getAgedPayables(realmId));
+    results.agedPayables = await safeFetch('aged payables', () => getAgedPayables(clientId));
     if (wantsDetail) {
-      results.billTransactions = await safeFetch('bills', () => getBills(txnStart, txnEnd, 100, realmId));
+      results.billTransactions = await safeFetch('bills', () => getBills(txnStart, txnEnd, 100, clientId));
     }
   }
 
   // Invoices
   if (q.match(/invoice|billed|billing/)) {
-    results.recentInvoices = await safeFetch('invoices', () => getInvoicesByDate(txnStart, txnEnd, 50, realmId));
+    results.recentInvoices = await safeFetch('invoices', () => getInvoicesByDate(txnStart, txnEnd, 50, clientId));
   }
 
   // Expenses / spending — always fetch transactions for detail
   if (q.match(/expense|spend|cost|purchase|bought|subscript|software|rent|office|utilit|insurance|advertising|marketing|meal|travel|phone|internet|licen/) || wantsDetail) {
-    results.expenseTransactions = await safeFetch('expense transactions', () => getExpenseTransactions(txnStart, txnEnd, 100, realmId));
-    if (!results.billTransactions) results.billTransactions = await safeFetch('bills', () => getBills(txnStart, txnEnd, 100, realmId));
+    results.expenseTransactions = await safeFetch('expense transactions', () => getExpenseTransactions(txnStart, txnEnd, 100, clientId));
+    if (!results.billTransactions) results.billTransactions = await safeFetch('bills', () => getBills(txnStart, txnEnd, 100, clientId));
     if (!results.profitAndLoss) {
       if (q.includes('last month') || q.includes('previous month')) {
-        results.profitAndLoss = await safeFetch('P&L', () => getProfitAndLoss(firstOfLastMonth, lastOfLastMonth, realmId));
+        results.profitAndLoss = await safeFetch('P&L', () => getProfitAndLoss(firstOfLastMonth, lastOfLastMonth, clientId));
       } else {
-        results.profitAndLoss = await safeFetch('P&L', () => getProfitAndLoss(txnStart, txnEnd, realmId));
+        results.profitAndLoss = await safeFetch('P&L', () => getProfitAndLoss(txnStart, txnEnd, clientId));
       }
     }
   }
 
   // Customers
   if (q.match(/customer|client list|who.*buy/)) {
-    results.customers = await safeFetch('customers', () => getCustomers(realmId));
+    results.customers = await safeFetch('customers', () => getCustomers(clientId));
   }
 
   // Vendors / suppliers
   if (q.match(/vendor|supplier|who.*pay/)) {
-    results.vendors = await safeFetch('vendors', () => getVendors(realmId));
+    results.vendors = await safeFetch('vendors', () => getVendors(clientId));
     if (wantsDetail && !results.billTransactions) {
-      results.billTransactions = await safeFetch('bills', () => getBills(txnStart, txnEnd, 100, realmId));
+      results.billTransactions = await safeFetch('bills', () => getBills(txnStart, txnEnd, 100, clientId));
     }
   }
 
   // Deposits / payments received
   if (q.match(/deposit|payment.*received|money.*in|received/)) {
-    results.deposits = await safeFetch('deposits', () => getDeposits(txnStart, txnEnd, 50, realmId));
-    results.payments = await safeFetch('payments', () => getPayments(txnStart, txnEnd, 50, realmId));
+    results.deposits = await safeFetch('deposits', () => getDeposits(txnStart, txnEnd, 50, clientId));
+    results.payments = await safeFetch('payments', () => getPayments(txnStart, txnEnd, 50, clientId));
   }
 
   // Transfers between accounts
   if (q.match(/transfer|moved.*money|between.*account/)) {
-    results.transfers = await safeFetch('transfers', () => getTransfers(txnStart, txnEnd, 50, realmId));
+    results.transfers = await safeFetch('transfers', () => getTransfers(txnStart, txnEnd, 50, clientId));
   }
 
   // Journal entries
   if (q.match(/journal entr|adjustment|accrual/)) {
-    results.journalEntries = await safeFetch('journal entries', () => getJournalEntries(txnStart, txnEnd, 50, realmId));
+    results.journalEntries = await safeFetch('journal entries', () => getJournalEntries(txnStart, txnEnd, 50, clientId));
   }
 
   // Tax related
   if (q.match(/tax|deduct|write.*off|1099|w-2/)) {
-    if (!results.profitAndLoss) results.profitAndLoss = await safeFetch('P&L YTD', () => getProfitAndLoss(startOfYear, today, realmId));
-    if (!results.balanceSheet) results.balanceSheet = await safeFetch('balance sheet', () => getBalanceSheet(today, realmId));
-    if (!results.expenseTransactions) results.expenseTransactions = await safeFetch('expenses YTD', () => getExpenseTransactions(startOfYear, today, 100, realmId));
+    if (!results.profitAndLoss) results.profitAndLoss = await safeFetch('P&L YTD', () => getProfitAndLoss(startOfYear, today, clientId));
+    if (!results.balanceSheet) results.balanceSheet = await safeFetch('balance sheet', () => getBalanceSheet(today, clientId));
+    if (!results.expenseTransactions) results.expenseTransactions = await safeFetch('expenses YTD', () => getExpenseTransactions(startOfYear, today, 100, clientId));
   }
 
   // General / overview / summary
   if (q.match(/overview|summary|how.*business|status|snapshot|dashboard/)) {
-    if (!results.profitAndLoss) results.profitAndLoss = await safeFetch('P&L', () => getProfitAndLoss(firstOfThisMonth, today, realmId));
-    if (!results.balanceSheet) results.balanceSheet = await safeFetch('balance sheet', () => getBalanceSheet(today, realmId));
-    if (!results.agedReceivables) results.agedReceivables = await safeFetch('aged receivables', () => getAgedReceivables(realmId));
+    if (!results.profitAndLoss) results.profitAndLoss = await safeFetch('P&L', () => getProfitAndLoss(firstOfThisMonth, today, clientId));
+    if (!results.balanceSheet) results.balanceSheet = await safeFetch('balance sheet', () => getBalanceSheet(today, clientId));
+    if (!results.agedReceivables) results.agedReceivables = await safeFetch('aged receivables', () => getAgedReceivables(clientId));
   }
 
   // If nothing matched, get P&L + transactions for a general overview
   const dataKeys = Object.keys(results).filter(k => results[k] != null);
   if (dataKeys.length <= 1) {
-    results.profitAndLoss = await safeFetch('P&L default', () => getProfitAndLoss(txnStart, txnEnd, realmId));
-    results.balanceSheet = await safeFetch('balance sheet default', () => getBalanceSheet(today, realmId));
-    results.expenseTransactions = await safeFetch('expenses default', () => getExpenseTransactions(txnStart, txnEnd, 50, realmId));
+    results.profitAndLoss = await safeFetch('P&L default', () => getProfitAndLoss(txnStart, txnEnd, clientId));
+    results.balanceSheet = await safeFetch('balance sheet default', () => getBalanceSheet(today, clientId));
+    results.expenseTransactions = await safeFetch('expenses default', () => getExpenseTransactions(txnStart, txnEnd, 50, clientId));
   }
 
   // Clean out null results from failed fetches
@@ -558,9 +615,10 @@ async function fetchRelevantData(question, realmId = 'default') {
 /**
  * Create a journal entry in QuickBooks
  * @param {Object} entry - { date, memo, lines: [{ accountId, accountName, description, amount, type: 'debit'|'credit' }] }
+ * @param {string} clientId - The client whose QBO to post to
  */
-async function createJournalEntry(entry, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function createJournalEntry(entry, clientId = 'default') {
+  const qb = await getQBClient(clientId);
 
   const lines = entry.lines.map(line => ({
     JournalEntryLineDetail: {
@@ -587,8 +645,8 @@ async function createJournalEntry(entry, realmId = 'default') {
 /**
  * Create a bill (vendor expense) in QuickBooks
  */
-async function createBill(bill, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function createBill(bill, clientId = 'default') {
+  const qb = await getQBClient(clientId);
 
   const lines = bill.lines.map(line => ({
     DetailType: 'AccountBasedExpenseLineDetail',
@@ -616,8 +674,8 @@ async function createBill(bill, realmId = 'default') {
 /**
  * Create an invoice in QuickBooks
  */
-async function createInvoice(invoice, realmId = 'default') {
-  const qb = await getQBClient(realmId);
+async function createInvoice(invoice, clientId = 'default') {
+  const qb = await getQBClient(clientId);
 
   const lines = invoice.lines.map(line => ({
     DetailType: 'SalesItemLineDetail',
@@ -643,7 +701,10 @@ module.exports = {
   getAuthUri,
   handleCallback,
   isConnected,
+  isAnyConnected,
   disconnect,
+  getAllConnections,
+  getTokensJson,
   refreshTokenIfNeeded,
   fetchRelevantData,
   getProfitAndLoss,

@@ -25,14 +25,18 @@ let qboAccounts = []; // Chart of accounts from QuickBooks
 /**
  * Fetch the QBO chart of accounts for dropdown menus
  */
-async function loadAccounts() {
+/**
+ * Load QBO chart of accounts. If a clientId is provided, fetches accounts for that client's QBO connection.
+ */
+async function loadAccounts(clientId) {
   try {
-    const res = await fetch('/api/admin/accounts', {
+    const url = clientId ? `/api/admin/accounts?clientId=${clientId}` : '/api/admin/accounts';
+    const res = await fetch(url, {
       headers: { 'Authorization': getAuth() },
     });
     const data = await res.json();
     qboAccounts = data.accounts || [];
-    console.log(`Loaded ${qboAccounts.length} QBO accounts`);
+    console.log(`Loaded ${qboAccounts.length} QBO accounts${clientId ? ` for client ${clientId}` : ''}`);
   } catch (e) {
     console.error('Failed to load QBO accounts:', e);
     qboAccounts = [];
@@ -121,21 +125,21 @@ async function loadStats() {
     document.getElementById('stat-approved').textContent = data.approved;
     document.getElementById('stat-rejected').textContent = data.rejected;
 
+    // Top bar QBO status — show count of connected clients
     const qboEl = document.getElementById('qbo-status');
     const dot = qboEl.querySelector('.status-dot');
     const statusText = document.getElementById('qbo-status-text');
-    if (data.qboConnected) {
+    const connections = data.qboConnections || {};
+    const connCount = Object.keys(connections).length;
+
+    if (connCount > 0) {
       dot.classList.remove('disconnected');
       dot.classList.add('connected');
-      statusText.textContent = 'qbo connected';
-      qboEl.removeAttribute('href'); // no need to click when connected
-      qboEl.style.cursor = 'default';
+      statusText.textContent = `qbo: ${connCount} client${connCount !== 1 ? 's' : ''} connected`;
     } else {
       dot.classList.remove('connected');
       dot.classList.add('disconnected');
-      statusText.textContent = 'connect quickbooks';
-      qboEl.href = '/api/qbo/connect?from=admin';
-      qboEl.style.cursor = 'pointer';
+      statusText.textContent = 'qbo: no clients connected';
     }
   } catch (e) {
     console.error('Failed to load stats:', e);
@@ -635,24 +639,36 @@ async function loadClients() {
   } catch (e) { console.error('Failed to load clients:', e); }
 }
 
-function renderClients() {
+async function renderClients() {
   const container = document.getElementById('clients-list');
   if (allClients.length === 0) {
     container.innerHTML = '<div class="empty-state"><p>no clients yet</p><span>click "+ add client" to create one</span></div>';
     return;
   }
-  container.innerHTML = allClients.map(c => `
+
+  // Fetch QBO connection status for all clients
+  let qboConnections = {};
+  try {
+    const res = await fetch('/api/qbo/status', { headers: { 'Authorization': getAuth() } });
+    const data = await res.json();
+    qboConnections = data.connections || {};
+  } catch (e) { /* ignore */ }
+
+  container.innerHTML = allClients.map(c => {
+    const qboConnected = !!qboConnections[c.id];
+    return `
     <div class="client-card client-card-clickable" data-client-id="${c.id}" onclick="openClientDetail('${c.id}')">
       <div class="client-card-info">
         <span class="client-card-name">${c.name}</span>
         <span class="client-card-email">${c.email}</span>
       </div>
       <div class="client-card-meta">
+        <span class="status-dot ${qboConnected ? 'connected' : 'disconnected'}" title="QBO ${qboConnected ? 'connected' : 'not connected'}" style="width:8px;height:8px;"></span>
         <span class="client-billing-badge ${c.billingFrequency}">${c.billingFrequency}</span>
         <button class="btn-edit-client" onclick="event.stopPropagation(); openEditClient('${c.id}')">edit</button>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 function showClientsList() {
@@ -673,6 +689,12 @@ function openClientDetail(clientId) {
   // Show info tab by default
   switchClientTab('info');
 
+  // Load QBO status for this client
+  loadClientQboStatus(clientId);
+
+  // Load accounts for this client's QBO connection
+  loadAccounts(clientId);
+
   // Render client info
   document.getElementById('client-info-content').innerHTML = `
     <div style="display:grid;gap:12px;max-width:400px;padding:16px 0;">
@@ -681,6 +703,71 @@ function openClientDetail(clientId) {
       <div><span style="font-size:0.78rem;color:var(--gray-400);text-transform:uppercase;">client id</span><br><code style="font-size:0.82rem;">${clientId}</code></div>
     </div>`;
 }
+
+// ========================================
+// PER-CLIENT QBO CONNECTION
+// ========================================
+async function loadClientQboStatus(clientId) {
+  const dot = document.getElementById('client-qbo-dot');
+  const text = document.getElementById('client-qbo-text');
+  const connectBtn = document.getElementById('btn-client-qbo-connect');
+  const disconnectBtn = document.getElementById('btn-client-qbo-disconnect');
+
+  text.textContent = 'checking quickbooks...';
+  connectBtn.style.display = 'none';
+  disconnectBtn.style.display = 'none';
+
+  try {
+    const res = await fetch(`/api/admin/clients/${clientId}/qbo-status`, {
+      headers: { 'Authorization': getAuth() },
+    });
+    const data = await res.json();
+
+    if (data.connected) {
+      dot.classList.remove('disconnected');
+      dot.classList.add('connected');
+      text.textContent = 'quickbooks connected';
+      disconnectBtn.style.display = '';
+      connectBtn.style.display = 'none';
+    } else {
+      dot.classList.remove('connected');
+      dot.classList.add('disconnected');
+      text.textContent = 'quickbooks not connected';
+      connectBtn.style.display = '';
+      disconnectBtn.style.display = 'none';
+    }
+  } catch (e) {
+    text.textContent = 'could not check qbo status';
+    connectBtn.style.display = '';
+  }
+}
+
+function connectClientQbo() {
+  if (!selectedClientId) return;
+  // Redirect to QBO OAuth with this client's ID
+  window.location.href = `/api/qbo/connect?from=admin&clientId=${selectedClientId}`;
+}
+
+async function disconnectClientQbo() {
+  if (!selectedClientId) return;
+  if (!confirm('Disconnect QuickBooks for this client?')) return;
+
+  try {
+    await fetch('/api/qbo/disconnect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ clientId: selectedClientId }),
+    });
+    loadClientQboStatus(selectedClientId);
+    loadStats();
+  } catch (e) {
+    alert('Failed to disconnect QuickBooks');
+  }
+}
+
+// Wire up QBO connect/disconnect buttons
+document.getElementById('btn-client-qbo-connect').addEventListener('click', connectClientQbo);
+document.getElementById('btn-client-qbo-disconnect').addEventListener('click', disconnectClientQbo);
 
 function switchClientTab(tab) {
   document.querySelectorAll('.sub-nav-btn').forEach(b => b.classList.remove('active'));
@@ -941,12 +1028,13 @@ function populateAssetDropdowns(asset) {
   Object.entries(selects).forEach(([id, cfg]) => {
     const select = document.getElementById(id);
     select.innerHTML = '<option value="">select account...</option>';
-    qboAccounts.filter(a => cfg.types.includes(a.AccountType)).forEach(a => {
+    // qboAccounts uses normalized format: { id, name, type } from the server
+    qboAccounts.filter(a => cfg.types.includes(a.type)).forEach(a => {
       const opt = document.createElement('option');
-      opt.value = a.Id;
-      opt.textContent = `${a.Name} (${a.AccountType})`;
-      opt.dataset.name = a.Name;
-      if (a.Id === cfg.selected) opt.selected = true;
+      opt.value = a.id;
+      opt.textContent = `${a.name} (${a.type})`;
+      opt.dataset.name = a.name;
+      if (a.id === cfg.selected) opt.selected = true;
       select.appendChild(opt);
     });
   });
@@ -1217,13 +1305,26 @@ async function init() {
   // Check for QBO callback
   const params = new URLSearchParams(window.location.search);
   if (params.get('qbo') === 'connected') {
+    const connectedClientId = params.get('clientId');
+    // If we came back from QBO OAuth for a specific client, navigate to that client
+    if (connectedClientId) {
+      // Switch to clients view and open the client detail after clients load
+      setTimeout(async () => {
+        document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+        document.querySelector('[data-admin-view="clients"]')?.classList.add('active');
+        document.querySelectorAll('.admin-view').forEach(v => v.style.display = 'none');
+        document.getElementById('view-clients').style.display = '';
+        await loadClients();
+        openClientDetail(connectedClientId);
+      }, 100);
+    }
     window.history.replaceState({}, '', window.location.pathname);
   } else if (params.get('qbo') === 'error') {
     alert('Failed to connect QuickBooks. Please try again.');
     window.history.replaceState({}, '', window.location.pathname);
   }
 
-  // Load accounts first so dropdowns are ready before rendering analyses
+  // Load accounts (global, for document approval dropdowns)
   await loadAccounts();
   loadStats();
   loadAnalyses();

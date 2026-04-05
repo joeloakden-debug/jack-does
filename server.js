@@ -247,28 +247,33 @@ const conversations = new Map();
 // QUICKBOOKS OAUTH ENDPOINTS
 // ========================================
 
-// Start QuickBooks connection (from client portal)
+// Start QuickBooks connection — requires clientId to associate the QBO connection
 app.get('/api/qbo/connect', (req, res) => {
-  const authUri = qbo.getAuthUri();
-  // Store where to redirect after OAuth (admin or portal)
+  const clientId = req.query.clientId || 'default';
+  const authUri = qbo.getAuthUri(clientId);
+  // Store where to redirect after OAuth (admin or portal) and which client
   const from = req.query.from || 'portal';
-  // Use a cookie to remember the source during OAuth redirect
   res.cookie('qbo_connect_from', from, { maxAge: 300000, httpOnly: true });
+  res.cookie('qbo_connect_client', clientId, { maxAge: 300000, httpOnly: true });
   res.redirect(authUri);
 });
 
 // OAuth callback
 app.get('/api/qbo/callback', async (req, res) => {
   try {
-    const tokenData = await qbo.handleCallback(req.url);
-    console.log('QuickBooks connected! Realm ID:', tokenData.realmId);
+    // Extract clientId from cookie (set during connect) or from OAuth state param
+    const clientCookie = req.headers.cookie?.split(';').find(c => c.trim().startsWith('qbo_connect_client='));
+    const clientId = clientCookie?.split('=')[1]?.trim() || 'default';
+
+    const tokenData = await qbo.handleCallback(req.url, clientId);
+    console.log(`QuickBooks connected for client "${clientId}"! Realm ID:`, tokenData.realmId);
 
     // Redirect back to the originating page
     const fromCookie = req.headers.cookie?.split(';').find(c => c.trim().startsWith('qbo_connect_from='));
     const from = fromCookie?.split('=')[1]?.trim() || 'portal';
 
     if (from === 'admin') {
-      res.redirect('/admin/dashboard.html?qbo=connected');
+      res.redirect(`/admin/dashboard.html?qbo=connected&clientId=${clientId}`);
     } else {
       res.redirect('/portal/dashboard.html?qbo=connected');
     }
@@ -284,32 +289,31 @@ app.get('/api/qbo/callback', async (req, res) => {
   }
 });
 
-// Check connection status
+// Check connection status (per-client or global)
 app.get('/api/qbo/status', (req, res) => {
-  res.json({ connected: qbo.isConnected() });
+  const clientId = req.query.clientId;
+  if (clientId) {
+    res.json({ connected: qbo.isConnected(clientId), clientId });
+  } else {
+    res.json({ connected: qbo.isAnyConnected(), connections: qbo.getAllConnections() });
+  }
 });
 
 // Admin endpoint to get current QBO tokens (for saving to Railway env var)
 app.get('/api/admin/qbo-tokens', requireAdmin, (req, res) => {
-  if (!qbo.isConnected()) {
+  if (!qbo.isAnyConnected()) {
     return res.json({ connected: false, tokens: null });
   }
-  // Read the token file and return compact single-line JSON (only "default" key to reduce size)
-  const tokenFile = require('path').join(__dirname, '.qbo-tokens.json');
-  try {
-    const data = JSON.parse(fs.readFileSync(tokenFile, 'utf-8'));
-    // Only keep the "default" entry to minimize env var size
-    const minimal = { default: data.default || data[Object.keys(data)[0]] };
-    res.json({ connected: true, tokens: JSON.stringify(minimal) });
-  } catch (e) {
-    res.json({ connected: true, tokens: null, error: 'Token file not found' });
-  }
+  // Read tokens from memory (works even when loaded from env var with no disk file)
+  const tokens = qbo.getTokensJson();
+  res.json({ connected: true, tokens });
 });
 
-// Disconnect QuickBooks
+// Disconnect QuickBooks for a specific client
 app.post('/api/qbo/disconnect', (req, res) => {
-  qbo.disconnect();
-  res.json({ success: true, message: 'QuickBooks disconnected' });
+  const clientId = req.body.clientId || 'default';
+  qbo.disconnect(clientId);
+  res.json({ success: true, message: `QuickBooks disconnected for client "${clientId}"` });
 });
 
 // ========================================
@@ -330,9 +334,9 @@ app.post('/api/chat', resolveClient, async (req, res) => {
     }
     const history = conversations.get(convoKey);
 
-    // If QuickBooks is connected, fetch relevant financial data
+    // If QuickBooks is connected for this client, fetch relevant financial data
     let qboContext = '';
-    if (qbo.isConnected()) {
+    if (qbo.isConnected(req.clientId)) {
       try {
         // Include recent USER messages (not assistant responses) for follow-up context
         const recentUserMessages = history
@@ -341,8 +345,8 @@ app.post('/api/chat', resolveClient, async (req, res) => {
           .map(m => m.content)
           .join(' ');
         const combinedQuery = `${message} ${recentUserMessages}`;
-        console.log('[QBO] Fetching data for query keywords:', message.substring(0, 100));
-        const data = await qbo.fetchRelevantData(combinedQuery);
+        console.log(`[QBO] Fetching data for client "${req.clientId}", query:`, message.substring(0, 100));
+        const data = await qbo.fetchRelevantData(combinedQuery, req.clientId);
         const dataKeys = Object.keys(data).filter(k => k !== 'error');
         console.log('[QBO] Data fetched:', dataKeys.join(', '));
         if (data && dataKeys.length > 0 && !data.error) {
@@ -370,7 +374,7 @@ app.post('/api/chat', resolveClient, async (req, res) => {
 
     // Build system prompt with connection status
     let systemPrompt = JACK_SYSTEM_PROMPT;
-    if (!qbo.isConnected()) {
+    if (!qbo.isConnected(req.clientId)) {
       systemPrompt += '\n\n[QuickBooks is NOT connected. When the client asks financial questions that need real data, let them know they can connect QuickBooks by clicking the "connect quickbooks" button in the portal for real-time insights from their actual books.]';
     }
 
@@ -396,7 +400,7 @@ app.post('/api/chat', resolveClient, async (req, res) => {
 
     res.json({
       response: htmlMessage,
-      qboConnected: qbo.isConnected(),
+      qboConnected: qbo.isConnected(req.clientId),
     });
 
   } catch (error) {
@@ -638,11 +642,11 @@ app.post('/api/process-document', resolveClient, async (req, res) => {
       ];
     }
 
-    // If QuickBooks is connected, fetch account list so Claude can map to real accounts
+    // If QuickBooks is connected for this client, fetch account list so Claude can map to real accounts
     let accountContext = '';
-    if (qbo.isConnected()) {
+    if (qbo.isConnected(req.clientId)) {
       try {
-        const accountsData = await qbo.getAccounts();
+        const accountsData = await qbo.getAccounts(req.clientId);
         const accountsList = accountsData?.QueryResponse?.Account || accountsData || [];
         const accounts = Array.isArray(accountsList) ? accountsList : [];
         if (accounts.length > 0) {
@@ -725,8 +729,9 @@ app.post('/api/approve-entries', async (req, res) => {
       return res.status(404).json({ error: 'Analysis not found' });
     }
 
-    if (!qbo.isConnected()) {
-      return res.status(400).json({ error: 'QuickBooks is not connected. Please connect QuickBooks first.' });
+    const postClientId = stored.clientId || 'default';
+    if (!qbo.isConnected(postClientId)) {
+      return res.status(400).json({ error: `QuickBooks is not connected for client "${postClientId}". Please connect QuickBooks first.` });
     }
 
     // Use provided entries (may have been edited by user) or fall back to original
@@ -742,7 +747,7 @@ app.post('/api/approve-entries', async (req, res) => {
             date: entry.date,
             memo: entry.memo,
             lines: entry.lines,
-          });
+          }, postClientId);
         } else if (entry.type === 'bill') {
           result = await qbo.createBill({
             date: entry.date,
@@ -750,7 +755,7 @@ app.post('/api/approve-entries', async (req, res) => {
             vendorId: entry.vendorId,
             dueDate: entry.dueDate,
             lines: entry.lines,
-          });
+          }, postClientId);
         } else if (entry.type === 'invoice') {
           result = await qbo.createInvoice({
             date: entry.date,
@@ -758,14 +763,14 @@ app.post('/api/approve-entries', async (req, res) => {
             customerId: entry.customerId,
             dueDate: entry.dueDate,
             lines: entry.lines,
-          });
+          }, postClientId);
         } else {
           // Default to journal entry
           result = await qbo.createJournalEntry({
             date: entry.date,
             memo: entry.memo,
             lines: entry.lines,
-          });
+          }, postClientId);
         }
 
         results.push({ success: true, entry: entry.memo, result });
@@ -834,8 +839,9 @@ app.post('/api/admin/approve', requireAdmin, async (req, res) => {
       return res.status(404).json({ error: 'Analysis not found' });
     }
 
-    if (!qbo.isConnected()) {
-      return res.status(400).json({ error: 'QuickBooks is not connected.' });
+    const approveClientId = stored.clientId || 'default';
+    if (!qbo.isConnected(approveClientId)) {
+      return res.status(400).json({ error: `QuickBooks is not connected for client "${approveClientId}".` });
     }
 
     const entriesToPost = entries || stored.analysis.entries;
@@ -855,11 +861,11 @@ app.post('/api/admin/approve', requireAdmin, async (req, res) => {
         console.log('Posting entry to QBO:', JSON.stringify(entry, null, 2));
 
         if (entry.type === 'bill') {
-          result = await qbo.createBill({ date: entry.date, memo: entry.memo, vendorId: entry.vendorId, dueDate: entry.dueDate, lines: entry.lines });
+          result = await qbo.createBill({ date: entry.date, memo: entry.memo, vendorId: entry.vendorId, dueDate: entry.dueDate, lines: entry.lines }, approveClientId);
         } else if (entry.type === 'invoice') {
-          result = await qbo.createInvoice({ date: entry.date, memo: entry.memo, customerId: entry.customerId, dueDate: entry.dueDate, lines: entry.lines });
+          result = await qbo.createInvoice({ date: entry.date, memo: entry.memo, customerId: entry.customerId, dueDate: entry.dueDate, lines: entry.lines }, approveClientId);
         } else {
-          result = await qbo.createJournalEntry({ date: entry.date, memo: entry.memo, lines: entry.lines });
+          result = await qbo.createJournalEntry({ date: entry.date, memo: entry.memo, lines: entry.lines }, approveClientId);
         }
         results.push({ success: true, entry: entry.memo, result });
       } catch (entryError) {
@@ -962,12 +968,13 @@ app.put('/api/admin/analysis/:id', requireAdmin, (req, res) => {
  * Admin: Get QuickBooks chart of accounts
  */
 app.get('/api/admin/accounts', requireAdmin, async (req, res) => {
-  if (!qbo.isConnected()) {
-    return res.json({ accounts: [] });
+  const acctClientId = req.query.clientId || 'default';
+  if (!qbo.isConnected(acctClientId)) {
+    return res.json({ accounts: [], clientId: acctClientId });
   }
 
   try {
-    const data = await qbo.getAccounts();
+    const data = await qbo.getAccounts(acctClientId);
     const rawAccounts = data?.QueryResponse?.Account || data || [];
     const accountsArray = Array.isArray(rawAccounts) ? rawAccounts : [];
     if (accountsArray.length > 0) {
@@ -1000,9 +1007,18 @@ app.get('/api/admin/stats', requireAdmin, (req, res) => {
     else if (v.status === 'approved') approved++;
     else if (v.status === 'rejected') rejected++;
   });
-  res.json({ pending, approved, rejected, total: documentAnalyses.size, qboConnected: qbo.isConnected(), clientCount: Object.keys(CLIENTS).length });
+  res.json({ pending, approved, rejected, total: documentAnalyses.size, qboConnected: qbo.isAnyConnected(), qboConnections: qbo.getAllConnections(), clientCount: Object.keys(CLIENTS).length });
 });
 
+
+// Admin: Check QBO connection for a specific client
+app.get('/api/admin/clients/:clientId/qbo-status', requireAdmin, (req, res) => {
+  const clientId = req.params.clientId;
+  const connected = qbo.isConnected(clientId);
+  const connections = qbo.getAllConnections();
+  const clientConnection = connections[clientId] || null;
+  res.json({ connected, clientId, connection: clientConnection });
+});
 
 // ========================================
 // CLIENT CONFIG (portal fetches this)
@@ -1112,12 +1128,13 @@ app.get('/api/admin/clients/:clientId/fixed-assets', requireAdmin, (req, res) =>
 // Sync fixed assets from QBO — pulls Fixed Asset accounts and their balances
 app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, async (req, res) => {
   try {
-    if (!qbo.isConnected()) {
-      return res.status(400).json({ error: 'QuickBooks is not connected' });
+    const syncClientId = req.params.clientId;
+    if (!qbo.isConnected(syncClientId)) {
+      return res.status(400).json({ error: `QuickBooks is not connected for this client. Please connect QBO in the client detail view first.` });
     }
 
     // Get all accounts of type Fixed Asset
-    const accountsResult = await qbo.getAccounts();
+    const accountsResult = await qbo.getAccounts(syncClientId);
     const accounts = accountsResult.QueryResponse?.Account || accountsResult || [];
     const fixedAssetAccounts = (Array.isArray(accounts) ? accounts : [])
       .filter(a => a.AccountType === 'Fixed Asset' && a.Active);
@@ -1126,7 +1143,7 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
     const today = new Date().toISOString().split('T')[0];
     let balanceSheet = null;
     try {
-      balanceSheet = await qbo.getBalanceSheet(today);
+      balanceSheet = await qbo.getBalanceSheet(today, syncClientId);
     } catch (e) {
       console.error('Could not fetch balance sheet for asset balances:', e.message);
     }
@@ -1313,8 +1330,9 @@ app.post('/api/admin/clients/:clientId/fixed-assets/run-amortization', requireAd
       return res.status(400).json({ error: `Amortization already run for ${currentMonth}` });
     }
 
-    if (!qbo.isConnected()) {
-      return res.status(400).json({ error: 'QuickBooks is not connected. Please connect QBO first.' });
+    const amortClientId = req.params.clientId;
+    if (!qbo.isConnected(amortClientId)) {
+      return res.status(400).json({ error: 'QuickBooks is not connected for this client. Please connect QBO in the client detail view first.' });
     }
 
     const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
@@ -1348,7 +1366,7 @@ app.post('/api/admin/clients/:clientId/fixed-assets/run-amortization', requireAd
       date: lastDayStr,
       memo: `Fixed asset amortization - ${currentMonth} - ${clientName}`,
       lines: jeLines,
-    });
+    }, amortClientId);
 
     const runRecord = {
       month: currentMonth,

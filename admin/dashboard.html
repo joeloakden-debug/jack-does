@@ -19,9 +19,9 @@
         <span class="admin-badge">admin</span>
       </div>
       <div class="admin-topbar-right">
-        <a href="/api/qbo/connect?from=admin" class="qbo-status" id="qbo-status" style="text-decoration:none;cursor:pointer;">
+        <span class="qbo-status" id="qbo-status">
           <span class="status-dot disconnected"></span> <span id="qbo-status-text">quickbooks</span>
-        </a>
+        </span>
         <button class="btn-logout" onclick="logout()">sign out</button>
       </div>
     </header>
@@ -85,6 +85,16 @@
         <div class="clients-header">
           <button class="btn-back" id="btn-back-to-clients">&larr; back to clients</button>
           <h2 class="clients-title" id="client-detail-name"></h2>
+        </div>
+
+        <!-- QBO connection status for this client -->
+        <div class="client-qbo-bar" id="client-qbo-bar">
+          <div class="client-qbo-status" id="client-qbo-status">
+            <span class="status-dot disconnected" id="client-qbo-dot"></span>
+            <span id="client-qbo-text">checking quickbooks...</span>
+          </div>
+          <button class="btn-qbo-connect" id="btn-client-qbo-connect" style="display:none;">connect quickbooks</button>
+          <button class="btn-qbo-disconnect" id="btn-client-qbo-disconnect" style="display:none;">disconnect</button>
         </div>
 
         <!-- Client sub-tabs -->
