@@ -119,6 +119,15 @@
 
           <div id="amortization-status" class="settings-success" style="display:none;"></div>
           <div id="last-amortization-run" style="font-size:0.82rem;color:var(--gray-400);margin-bottom:16px;"></div>
+
+          <!-- Asset Classes section -->
+          <div id="asset-classes-section" style="margin-bottom:24px;">
+            <h3 style="font-size:0.9rem;font-weight:600;color:var(--gray-500);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px;">asset classes</h3>
+            <div id="asset-classes-list"></div>
+          </div>
+
+          <!-- Individual Assets -->
+          <h3 style="font-size:0.9rem;font-weight:600;color:var(--gray-500);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px;">individual assets</h3>
           <div id="fixed-assets-list" class="clients-list"></div>
         </div>
       </div>
@@ -151,6 +160,53 @@
           <div class="modal-actions">
             <button class="btn-modal-save" id="client-modal-save">save</button>
             <button class="btn-modal-cancel" id="client-modal-cancel">cancel</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Asset Class modal -->
+      <div class="modal-overlay" id="asset-class-modal" style="display:none;">
+        <div class="modal-card" style="max-width:520px;">
+          <h3 id="asset-class-modal-title">edit asset class</h3>
+          <div class="form-group">
+            <label>GL account</label>
+            <input type="text" id="class-gl-name" readonly style="background:var(--gray-50);color:var(--gray-500);">
+          </div>
+          <div class="form-group">
+            <label>amortization method</label>
+            <select id="class-method">
+              <option value="straight-line">straight-line</option>
+              <option value="declining-balance">declining balance</option>
+            </select>
+          </div>
+          <div class="form-group" id="class-sl-group">
+            <label>useful life (months)</label>
+            <input type="number" id="class-useful-life" placeholder="60">
+          </div>
+          <div class="form-group" id="class-db-group" style="display:none;">
+            <label>declining rate (% per year)</label>
+            <input type="number" step="0.01" id="class-declining-rate" placeholder="30">
+          </div>
+          <div class="form-group">
+            <label>salvage value ($)</label>
+            <input type="number" step="0.01" id="class-salvage" placeholder="0.00">
+          </div>
+          <div class="form-group">
+            <label>QBO amortization expense account</label>
+            <select id="class-account-expense" class="edit-account-select"><option value="">select account...</option></select>
+          </div>
+          <div class="form-group">
+            <label>QBO accumulated amortization account</label>
+            <select id="class-account-accum" class="edit-account-select"><option value="">select account...</option></select>
+          </div>
+          <div id="class-ai-suggestion" style="display:none;font-size:0.78rem;color:var(--blue-600);background:var(--blue-50);padding:8px 12px;border-radius:6px;margin-bottom:8px;"></div>
+          <div style="margin-bottom:12px;">
+            <button class="btn-suggest-amort" id="btn-suggest-class-amort" type="button">AI suggest policy</button>
+          </div>
+          <div id="class-modal-error" class="login-error" style="display:none;"></div>
+          <div class="modal-actions">
+            <button class="btn-modal-save" id="class-modal-save">save</button>
+            <button class="btn-modal-cancel" id="class-modal-cancel">cancel</button>
           </div>
         </div>
       </div>

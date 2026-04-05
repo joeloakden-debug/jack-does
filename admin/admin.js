@@ -628,7 +628,9 @@ let editingClientId = null;
 let selectedClientId = null;
 let allFixedAssets = [];
 let fixedAssetRuns = [];
+let assetClasses = [];
 let editingAssetId = null;
+let editingClassId = null;
 
 async function loadClients() {
   try {
@@ -854,8 +856,56 @@ async function loadClientFixedAssets() {
     const data = await res.json();
     allFixedAssets = data.assets || [];
     fixedAssetRuns = data.amortizationRuns || [];
+    assetClasses = data.assetClasses || [];
+    renderAssetClasses();
     renderFixedAssets();
   } catch (e) { console.error('Failed to load fixed assets:', e); }
+}
+
+function getAssetClass(asset) {
+  return assetClasses.find(c => c.glAccountId === asset.assetAccountId || c.glAccountName === asset.glAccountName) || null;
+}
+
+function renderAssetClasses() {
+  const list = document.getElementById('asset-classes-list');
+  if (!list) return;
+
+  if (assetClasses.length === 0) {
+    list.innerHTML = '<p style="color:var(--gray-400);text-align:center;padding:20px;font-size:0.85rem;">no asset classes yet — sync from QBO to auto-create classes</p>';
+    return;
+  }
+
+  list.innerHTML = assetClasses.map(c => {
+    const assetCount = allFixedAssets.filter(a => a.active && (a.assetAccountId === c.glAccountId || a.glAccountName === c.glAccountName)).length;
+    const methodLabel = c.method === 'declining-balance'
+      ? `declining balance @ ${((c.decliningRate || 0) * 100).toFixed(0)}%/yr`
+      : `straight-line, ${c.usefulLifeMonths || '—'} months`;
+    const ai = c.aiSuggestion;
+    const needsAccounts = !c.expenseAccountId || !c.accumAccountId;
+
+    return `
+      <div class="asset-class-card ${needsAccounts ? 'asset-needs-setup' : ''}">
+        <div class="asset-class-main">
+          <div class="asset-class-header">
+            <span class="asset-class-name">${c.glAccountName}</span>
+            <span class="asset-class-method-badge ${c.method}">${c.method === 'declining-balance' ? 'DB' : 'SL'}</span>
+            <span class="asset-class-count">${assetCount} asset${assetCount !== 1 ? 's' : ''}</span>
+            ${needsAccounts ? '<span class="asset-setup-badge">needs accounts</span>' : ''}
+          </div>
+          <div class="asset-class-params">
+            <span>${methodLabel}</span>
+            <span>salvage: $${(c.salvageValue || 0).toLocaleString()}</span>
+            ${c.expenseAccountName ? `<span>expense: ${c.expenseAccountName}</span>` : ''}
+            ${c.accumAccountName ? `<span>accum: ${c.accumAccountName}</span>` : ''}
+          </div>
+          ${ai ? `<div class="asset-class-ai">${ai.ccaClass ? `CCA Class ${ai.ccaClass} (${ai.ccaRate})` : ''} ${ai.reasoning ? `— ${ai.reasoning}` : ''}</div>` : ''}
+        </div>
+        <div class="asset-card-actions">
+          <button class="btn-edit-client" onclick="openEditClass('${c.id}')">edit</button>
+          <button class="btn-delete-asset" onclick="deleteClass('${c.id}')">delete</button>
+        </div>
+      </div>`;
+  }).join('');
 }
 
 function renderFixedAssets() {
@@ -863,41 +913,24 @@ function renderFixedAssets() {
   const activeAssets = allFixedAssets.filter(a => a.active);
 
   if (activeAssets.length === 0) {
-    list.innerHTML = '<p style="color:var(--gray-400);text-align:center;padding:40px;">no fixed assets yet. sync from QBO or add manually.</p>';
+    list.innerHTML = '<p style="color:var(--gray-400);text-align:center;padding:40px;">no fixed assets yet. sync from QBO to import.</p>';
   } else {
     list.innerHTML = activeAssets.map(a => {
-      const monthly = a.usefulLifeMonths ? ((a.originalCost - a.salvageValue) / a.usefulLifeMonths).toFixed(2) : '—';
-      const acqDate = a.acquisitionDate ? new Date(a.acquisitionDate) : null;
-      const now = new Date();
-      const monthsElapsed = acqDate ? (now.getFullYear() * 12 + now.getMonth()) - (acqDate.getFullYear() * 12 + acqDate.getMonth()) : 0;
-      const remaining = a.usefulLifeMonths ? Math.max(0, a.usefulLifeMonths - monthsElapsed) : '—';
-      const ai = a.aiSuggestion;
-
-      // Status badges
-      const needsSetup = !a.expenseAccountId || !a.accumAccountId;
+      const cls = getAssetClass(a);
+      const className = cls?.glAccountName || a.glAccountName || '—';
+      const acqDate = a.acquisitionDate || '';
 
       return `
-        <div class="asset-card ${needsSetup ? 'asset-needs-setup' : ''}">
+        <div class="asset-card">
           <div class="asset-card-main">
             <div class="asset-card-header">
               <div class="asset-card-name">${a.name}</div>
-              ${needsSetup ? '<span class="asset-setup-badge">needs setup</span>' : ''}
             </div>
-            ${a.glAccountName && a.glAccountName !== a.name ? `<div class="asset-card-desc">GL: ${a.glAccountName}${a.vendorName ? ` — ${a.vendorName}` : ''}</div>` : (a.vendorName ? `<div class="asset-card-desc">${a.vendorName}</div>` : '')}
+            <div class="asset-card-desc">${className}${a.vendorName ? ` — ${a.vendorName}` : ''}</div>
             <div class="asset-card-amounts">
-              <span class="asset-card-amount">cost: <strong>$${a.originalCost.toLocaleString()}</strong></span>
-              <span class="asset-card-amount">monthly: <strong>$${monthly}</strong></span>
-              <span class="asset-card-amount">period: <strong>${a.usefulLifeMonths || '—'} mo</strong></span>
-              <span class="asset-card-amount">remaining: <strong>${remaining} mo</strong></span>
+              <span class="asset-card-amount">cost: <strong>$${(a.originalCost || 0).toLocaleString()}</strong></span>
+              <span class="asset-card-amount">acquired: <strong>${acqDate}</strong></span>
             </div>
-            ${ai ? `
-              <div class="asset-ai-suggestion">
-                <span class="asset-ai-label">AI suggestion:</span>
-                <span class="asset-ai-detail">straight-line, ${ai.ccaClass ? `CCA Class ${ai.ccaClass}` : ''} ${ai.ccaRate ? `(${ai.ccaRate})` : ''} — ${a.usefulLifeMonths} months</span>
-                ${ai.reasoning ? `<div class="asset-ai-reasoning">${ai.reasoning}</div>` : ''}
-              </div>
-            ` : ''}
-            <div class="asset-card-accounts">${a.expenseAccountName || '—'} → ${a.accumAccountName || '—'}</div>
           </div>
           <div class="asset-card-actions">
             <button class="btn-edit-client" onclick="openEditAsset('${a.id}')">edit</button>
@@ -915,6 +948,180 @@ function renderFixedAssets() {
     lastRunEl.textContent = 'no amortization runs yet';
   }
 }
+
+// ========================================
+// ASSET CLASS MODAL FUNCTIONS
+// ========================================
+
+function populateClassDropdowns(cls) {
+  const selects = {
+    'class-account-expense': { types: ['Expense', 'Other Expense'], selected: cls?.expenseAccountId },
+    'class-account-accum': { types: ['Fixed Asset', 'Other Asset', 'Other Current Asset'], selected: cls?.accumAccountId },
+  };
+  Object.entries(selects).forEach(([id, cfg]) => {
+    const select = document.getElementById(id);
+    select.innerHTML = '<option value="">select account...</option>';
+    qboAccounts.filter(a => cfg.types.includes(a.type)).forEach(a => {
+      const opt = document.createElement('option');
+      opt.value = a.id;
+      opt.textContent = `${a.name} (${a.type})`;
+      opt.dataset.name = a.name;
+      if (a.id === cfg.selected) opt.selected = true;
+      select.appendChild(opt);
+    });
+  });
+}
+
+function toggleClassMethod() {
+  const method = document.getElementById('class-method').value;
+  document.getElementById('class-sl-group').style.display = method === 'straight-line' ? '' : 'none';
+  document.getElementById('class-db-group').style.display = method === 'declining-balance' ? '' : 'none';
+}
+
+function openEditClass(id) {
+  const cls = assetClasses.find(c => c.id === id);
+  if (!cls) return;
+  editingClassId = id;
+  document.getElementById('asset-class-modal-title').textContent = `edit class: ${cls.glAccountName}`;
+  document.getElementById('class-gl-name').value = cls.glAccountName || '';
+  document.getElementById('class-method').value = cls.method || 'straight-line';
+  document.getElementById('class-useful-life').value = cls.usefulLifeMonths || '';
+  document.getElementById('class-declining-rate').value = cls.decliningRate ? (cls.decliningRate * 100) : '';
+  document.getElementById('class-salvage').value = cls.salvageValue || 0;
+  document.getElementById('class-modal-error').style.display = 'none';
+
+  // Show AI suggestion if available
+  const aiEl = document.getElementById('class-ai-suggestion');
+  if (cls.aiSuggestion) {
+    const ai = cls.aiSuggestion;
+    let html = `<strong>AI: ${ai.method === 'declining-balance' ? 'declining balance' : 'straight-line'}</strong>`;
+    if (ai.ccaClass) html += ` — CCA Class ${ai.ccaClass} (${ai.ccaRate})`;
+    if (ai.reasoning) html += `<br>${ai.reasoning}`;
+    aiEl.innerHTML = html;
+    aiEl.style.display = '';
+  } else {
+    aiEl.style.display = 'none';
+  }
+
+  populateClassDropdowns(cls);
+  toggleClassMethod();
+  document.getElementById('asset-class-modal').style.display = 'flex';
+}
+
+function closeClassModal() {
+  document.getElementById('asset-class-modal').style.display = 'none';
+  editingClassId = null;
+}
+
+async function saveClass() {
+  const errorEl = document.getElementById('class-modal-error');
+  errorEl.style.display = 'none';
+
+  const method = document.getElementById('class-method').value;
+  const usefulLifeMonths = document.getElementById('class-useful-life').value;
+  const decliningRatePercent = document.getElementById('class-declining-rate').value;
+  const salvageValue = document.getElementById('class-salvage').value || '0';
+  const expenseEl = document.getElementById('class-account-expense');
+  const accumEl = document.getElementById('class-account-accum');
+
+  if (method === 'straight-line' && !usefulLifeMonths) {
+    errorEl.textContent = 'useful life is required for straight-line method';
+    errorEl.style.display = ''; return;
+  }
+  if (method === 'declining-balance' && !decliningRatePercent) {
+    errorEl.textContent = 'declining rate is required for declining balance method';
+    errorEl.style.display = ''; return;
+  }
+
+  const body = {
+    method,
+    usefulLifeMonths: parseInt(usefulLifeMonths) || null,
+    decliningRate: decliningRatePercent ? parseFloat(decliningRatePercent) / 100 : null,
+    salvageValue: parseFloat(salvageValue) || 0,
+    expenseAccountId: expenseEl.value || '',
+    expenseAccountName: expenseEl.selectedOptions[0]?.dataset.name || '',
+    accumAccountId: accumEl.value || '',
+    accumAccountName: accumEl.selectedOptions[0]?.dataset.name || '',
+  };
+
+  try {
+    const url = `/api/admin/clients/${selectedClientId}/fixed-assets/classes/${editingClassId}`;
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.error) { errorEl.textContent = data.error; errorEl.style.display = ''; return; }
+    closeClassModal();
+    loadClientFixedAssets();
+  } catch (e) { errorEl.textContent = 'failed to save class'; errorEl.style.display = ''; }
+}
+
+async function deleteClass(id) {
+  const cls = assetClasses.find(c => c.id === id);
+  const assetCount = allFixedAssets.filter(a => a.active && (a.assetAccountId === cls?.glAccountId || a.glAccountName === cls?.glAccountName)).length;
+  if (!confirm(`delete asset class "${cls?.glAccountName}"? ${assetCount} asset${assetCount !== 1 ? 's' : ''} will lose their class policy.`)) return;
+  try {
+    await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/classes/${id}`, {
+      method: 'DELETE', headers: { 'Authorization': getAuth() },
+    });
+    loadClientFixedAssets();
+  } catch (e) { alert('failed to delete class'); }
+}
+
+async function suggestClassAmortization() {
+  const glName = document.getElementById('class-gl-name').value.trim();
+  const btn = document.getElementById('btn-suggest-class-amort');
+  const aiEl = document.getElementById('class-ai-suggestion');
+
+  if (!glName) { alert('no GL account name to suggest for'); return; }
+
+  btn.textContent = 'thinking...';
+  btn.disabled = true;
+  aiEl.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/admin/fixed-assets/suggest-amortization', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ assetName: glName, originalCost: 10000 }),
+    });
+    const data = await res.json();
+
+    if (data.usefulLifeMonths) {
+      // Apply suggestion to form fields
+      const suggestedMethod = data.method || 'straight-line';
+      document.getElementById('class-method').value = suggestedMethod;
+      toggleClassMethod();
+
+      if (suggestedMethod === 'declining-balance' && data.decliningRate) {
+        document.getElementById('class-declining-rate').value = (data.decliningRate * 100).toFixed(0);
+      } else {
+        document.getElementById('class-useful-life').value = data.usefulLifeMonths;
+      }
+      document.getElementById('class-salvage').value = data.salvageValue || 0;
+
+      let html = `<strong>AI: ${suggestedMethod === 'declining-balance' ? 'declining balance' : 'straight-line'}</strong>`;
+      if (data.ccaClass) html += ` — CCA Class ${data.ccaClass} (${data.ccaRate})`;
+      if (data.reasoning) html += `<br>${data.reasoning}`;
+      aiEl.innerHTML = html;
+      aiEl.style.display = '';
+    }
+  } catch (e) {
+    aiEl.textContent = 'failed to get suggestion';
+    aiEl.style.display = '';
+  }
+  btn.textContent = 'AI suggest policy';
+  btn.disabled = false;
+}
+
+// Class modal event listeners
+document.getElementById('class-method').addEventListener('change', toggleClassMethod);
+document.getElementById('class-modal-save').addEventListener('click', saveClass);
+document.getElementById('class-modal-cancel').addEventListener('click', closeClassModal);
+document.getElementById('asset-class-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeClassModal(); });
+document.getElementById('btn-suggest-class-amort').addEventListener('click', suggestClassAmortization);
 
 // QBO Sync
 async function syncFromQBO() {
@@ -1010,52 +1217,87 @@ async function importSelectedAssets() {
     } catch (e) { console.error('Failed to import asset:', e); }
   }
 
+  // Auto-create asset classes for each unique GL account
+  const uniqueGLAccounts = new Map();
+  for (const asset of importedAssets) {
+    if (asset.assetAccountId && !uniqueGLAccounts.has(asset.assetAccountId)) {
+      uniqueGLAccounts.set(asset.assetAccountId, {
+        glAccountId: asset.assetAccountId,
+        glAccountName: asset.glAccountName || asset.assetAccountName || asset.name,
+      });
+    }
+  }
+
+  // Create classes for any GL accounts that don't already have one
+  for (const [glId, info] of uniqueGLAccounts) {
+    const exists = assetClasses.some(c => c.glAccountId === glId);
+    if (!exists) {
+      try {
+        await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/classes`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+          body: JSON.stringify({
+            glAccountId: info.glAccountId,
+            glAccountName: info.glAccountName,
+            method: 'straight-line',
+            usefulLifeMonths: 60,
+            salvageValue: 0,
+          }),
+        });
+      } catch (e) { console.error('Failed to create asset class:', e); }
+    }
+  }
+
   // Close modal and show assets immediately
   document.getElementById('qbo-sync-modal').style.display = 'none';
   importBtn.textContent = 'import selected';
   importBtn.disabled = false;
   await loadClientFixedAssets();
 
-  // Now run AI suggestions for each imported asset in the background
-  if (importedAssets.length > 0) {
-    runAISuggestionsForAssets(importedAssets);
+  // Now run AI suggestions for each new class in the background
+  if (uniqueGLAccounts.size > 0) {
+    runAISuggestionsForClasses();
   }
 }
 
 /**
- * Run AI amortization suggestions for a list of assets, update each, and re-render
+ * Run AI amortization suggestions for all asset classes that don't have one yet
  */
-async function runAISuggestionsForAssets(assets) {
+async function runAISuggestionsForClasses() {
   const statusEl = document.getElementById('amortization-status');
-  statusEl.textContent = `getting AI amortization suggestions for ${assets.length} asset${assets.length !== 1 ? 's' : ''}...`;
+  const classesNeedingSuggestion = assetClasses.filter(c => !c.aiSuggestion);
+  if (classesNeedingSuggestion.length === 0) return;
+
+  statusEl.textContent = `getting AI amortization suggestions for ${classesNeedingSuggestion.length} class${classesNeedingSuggestion.length !== 1 ? 'es' : ''}...`;
   statusEl.style.display = '';
 
   let updated = 0;
-  for (const asset of assets) {
+  for (const cls of classesNeedingSuggestion) {
     try {
-      // Get AI suggestion
       const sugRes = await fetch('/api/admin/fixed-assets/suggest-amortization', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
-        body: JSON.stringify({ assetName: asset.name, originalCost: asset.originalCost }),
+        body: JSON.stringify({ assetName: cls.glAccountName, originalCost: 10000 }),
       });
       const suggestion = await sugRes.json();
 
       if (suggestion.usefulLifeMonths) {
-        // Update the asset with AI-suggested values
+        const suggestedMethod = suggestion.method || 'straight-line';
         const updateBody = {
+          method: suggestedMethod,
           usefulLifeMonths: suggestion.usefulLifeMonths,
+          decliningRate: suggestion.decliningRate || null,
           salvageValue: suggestion.salvageValue || 0,
           aiSuggestion: {
             ccaClass: suggestion.ccaClass || null,
             ccaRate: suggestion.ccaRate || null,
             reasoning: suggestion.reasoning || '',
-            method: 'straight-line',
+            method: suggestedMethod,
             suggestedAt: new Date().toISOString(),
           },
         };
 
-        await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/${asset.id}`, {
+        await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/classes/${cls.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
           body: JSON.stringify(updateBody),
@@ -1063,17 +1305,14 @@ async function runAISuggestionsForAssets(assets) {
         updated++;
       }
     } catch (e) {
-      console.error(`AI suggestion failed for "${asset.name}":`, e);
+      console.error(`AI suggestion failed for class "${cls.glAccountName}":`, e);
     }
-
-    // Update status as we go
-    statusEl.textContent = `AI suggestions: ${updated} of ${assets.length} updated...`;
+    statusEl.textContent = `AI suggestions: ${updated} of ${classesNeedingSuggestion.length} classes updated...`;
   }
 
-  statusEl.textContent = `AI suggestions complete — ${updated} asset${updated !== 1 ? 's' : ''} updated`;
+  statusEl.textContent = `AI suggestions complete — ${updated} class${updated !== 1 ? 'es' : ''} updated`;
   setTimeout(() => { statusEl.style.display = 'none'; }, 5000);
 
-  // Reload to show updated values
   await loadClientFixedAssets();
 }
 
@@ -1173,13 +1412,15 @@ function openEditAsset(id) {
     }
   }
 
-  // Show AI suggestion if available
+  // Show class policy info
+  const cls = getAssetClass(asset);
   const suggestionEl = document.getElementById('ai-suggestion');
-  if (asset.aiSuggestion) {
-    const ai = asset.aiSuggestion;
-    let html = `<strong>AI suggestion: ${asset.usefulLifeMonths} months, straight-line</strong>`;
-    if (ai.ccaClass) html += ` (CCA Class ${ai.ccaClass}, ${ai.ccaRate})`;
-    if (ai.reasoning) html += `<br>${ai.reasoning}`;
+  if (cls) {
+    const methodLabel = cls.method === 'declining-balance'
+      ? `declining balance @ ${((cls.decliningRate || 0) * 100).toFixed(0)}%/yr`
+      : `straight-line, ${cls.usefulLifeMonths || '—'} months`;
+    let html = `<strong>class policy (${cls.glAccountName}):</strong> ${methodLabel}`;
+    if (cls.aiSuggestion?.ccaClass) html += ` — CCA Class ${cls.aiSuggestion.ccaClass} (${cls.aiSuggestion.ccaRate})`;
     suggestionEl.innerHTML = html;
     suggestionEl.style.display = '';
   } else {

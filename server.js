@@ -1112,7 +1112,11 @@ function saveFixedAssets(data) {
 
 function getClientAssets(clientId) {
   if (!fixedAssetsData[clientId]) {
-    fixedAssetsData[clientId] = { assets: [], amortizationRuns: [] };
+    fixedAssetsData[clientId] = { assetClasses: [], assets: [], amortizationRuns: [] };
+  }
+  // Migration: ensure assetClasses exists for older data
+  if (!fixedAssetsData[clientId].assetClasses) {
+    fixedAssetsData[clientId].assetClasses = [];
   }
   return fixedAssetsData[clientId];
 }
@@ -1123,6 +1127,81 @@ let fixedAssetsData = loadFixedAssets();
 app.get('/api/admin/clients/:clientId/fixed-assets', requireAdmin, (req, res) => {
   const clientData = getClientAssets(req.params.clientId);
   res.json(clientData);
+});
+
+// ---- Asset Class CRUD ----
+
+// Create asset class
+app.post('/api/admin/clients/:clientId/fixed-assets/classes', requireAdmin, (req, res) => {
+  const { glAccountId, glAccountName, method, usefulLifeMonths, decliningRate,
+          salvageValue, expenseAccountId, expenseAccountName,
+          accumAccountId, accumAccountName, aiSuggestion } = req.body;
+
+  if (!glAccountName) return res.status(400).json({ error: 'GL account name is required' });
+
+  const clientData = getClientAssets(req.params.clientId);
+
+  // Prevent duplicate classes for same GL account
+  const exists = clientData.assetClasses.find(c => c.glAccountId === glAccountId || c.glAccountName === glAccountName);
+  if (exists) return res.status(409).json({ error: 'A class for this GL account already exists', existingClass: exists });
+
+  const assetClass = {
+    id: 'class_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+    glAccountId: glAccountId || '',
+    glAccountName,
+    method: method || 'straight-line',
+    usefulLifeMonths: parseInt(usefulLifeMonths, 10) || 60,
+    decliningRate: decliningRate ? parseFloat(decliningRate) : null,
+    salvageValue: parseFloat(salvageValue || 0),
+    expenseAccountId: expenseAccountId || '',
+    expenseAccountName: expenseAccountName || '',
+    accumAccountId: accumAccountId || '',
+    accumAccountName: accumAccountName || '',
+    aiSuggestion: aiSuggestion || null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  clientData.assetClasses.push(assetClass);
+  saveFixedAssets(fixedAssetsData);
+  res.json({ success: true, assetClass });
+});
+
+// Update asset class
+app.put('/api/admin/clients/:clientId/fixed-assets/classes/:classId', requireAdmin, (req, res) => {
+  const clientData = getClientAssets(req.params.clientId);
+  const idx = clientData.assetClasses.findIndex(c => c.id === req.params.classId);
+  if (idx === -1) return res.status(404).json({ error: 'Asset class not found' });
+
+  const fields = ['glAccountName', 'method', 'usefulLifeMonths', 'decliningRate',
+    'salvageValue', 'expenseAccountId', 'expenseAccountName',
+    'accumAccountId', 'accumAccountName', 'aiSuggestion'];
+
+  fields.forEach(f => {
+    if (req.body[f] !== undefined) {
+      if (f === 'usefulLifeMonths') {
+        clientData.assetClasses[idx][f] = parseInt(req.body[f], 10);
+      } else if (f === 'salvageValue' || f === 'decliningRate') {
+        clientData.assetClasses[idx][f] = req.body[f] !== null ? parseFloat(req.body[f]) : null;
+      } else {
+        clientData.assetClasses[idx][f] = req.body[f];
+      }
+    }
+  });
+  clientData.assetClasses[idx].updatedAt = new Date().toISOString();
+
+  saveFixedAssets(fixedAssetsData);
+  res.json({ success: true, assetClass: clientData.assetClasses[idx] });
+});
+
+// Delete asset class
+app.delete('/api/admin/clients/:clientId/fixed-assets/classes/:classId', requireAdmin, (req, res) => {
+  const clientData = getClientAssets(req.params.clientId);
+  const idx = clientData.assetClasses.findIndex(c => c.id === req.params.classId);
+  if (idx === -1) return res.status(404).json({ error: 'Asset class not found' });
+  clientData.assetClasses.splice(idx, 1);
+  saveFixedAssets(fixedAssetsData);
+  res.json({ success: true });
 });
 
 // Sync fixed assets from QBO — queries GL transactions for each Fixed Asset cost account
@@ -1294,16 +1373,24 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
   }
 });
 
-// AI suggest amortization period based on asset name/type
+// AI suggest amortization policy for an asset class
 app.post('/api/admin/fixed-assets/suggest-amortization', requireAdmin, async (req, res) => {
   try {
     const { assetName, assetType, originalCost } = req.body;
 
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 300,
-      system: `You are a Canadian accounting expert. Given a fixed asset, suggest the appropriate amortization period in months and salvage value based on CRA Capital Cost Allowance (CCA) classes and standard accounting practices. Respond in JSON only with this exact format: {"usefulLifeMonths": number, "salvageValue": number, "ccaClass": number or null, "ccaRate": "percentage or null", "reasoning": "brief explanation"}`,
-      messages: [{ role: 'user', content: `Asset: "${assetName}". Type: "${assetType || 'unknown'}". Original cost: $${originalCost || 'unknown'}. What amortization period and salvage value would you recommend?` }],
+      max_tokens: 400,
+      system: `You are a Canadian accounting expert. Given a fixed asset class/category, suggest the appropriate amortization method and parameters based on CRA Capital Cost Allowance (CCA) classes and standard accounting practices.
+
+Respond in JSON only with this exact format:
+{"method": "straight-line" or "declining-balance", "usefulLifeMonths": number or null, "decliningRate": number (annual rate as decimal e.g. 0.30 for 30%) or null, "salvageValue": number, "ccaClass": number or null, "ccaRate": "percentage string or null", "reasoning": "brief explanation"}
+
+Rules:
+- CCA uses declining balance method. If the asset clearly falls under a CCA class, recommend declining-balance with the CCA rate.
+- If no CCA class applies or the asset is better suited for accounting purposes with straight-line, recommend straight-line with a useful life in months.
+- For declining-balance, set usefulLifeMonths to null. For straight-line, set decliningRate to null.`,
+      messages: [{ role: 'user', content: `Asset class: "${assetName}". Type: "${assetType || 'unknown'}". Typical cost: $${originalCost || 'unknown'}. What amortization method and parameters would you recommend?` }],
     });
 
     const text = response.content[0].text;
@@ -1404,6 +1491,80 @@ app.delete('/api/admin/clients/:clientId/fixed-assets/:id', requireAdmin, (req, 
   res.json({ success: true });
 });
 
+// Helper: resolve amortization policy for an asset (class-level takes precedence)
+function getAssetPolicy(asset, assetClasses) {
+  const cls = assetClasses.find(c => c.glAccountId === asset.assetAccountId || c.glAccountName === asset.glAccountName);
+  if (cls) {
+    return {
+      method: cls.method || 'straight-line',
+      usefulLifeMonths: cls.usefulLifeMonths,
+      decliningRate: cls.decliningRate,
+      salvageValue: cls.salvageValue || 0,
+      expenseAccountId: cls.expenseAccountId,
+      expenseAccountName: cls.expenseAccountName,
+      accumAccountId: cls.accumAccountId,
+      accumAccountName: cls.accumAccountName,
+      className: cls.glAccountName,
+    };
+  }
+  // Fallback to asset-level fields
+  return {
+    method: 'straight-line',
+    usefulLifeMonths: asset.usefulLifeMonths || 60,
+    decliningRate: null,
+    salvageValue: asset.salvageValue || 0,
+    expenseAccountId: asset.expenseAccountId,
+    expenseAccountName: asset.expenseAccountName,
+    accumAccountId: asset.accumAccountId,
+    accumAccountName: asset.accumAccountName,
+    className: null,
+  };
+}
+
+// Helper: calculate monthly amortization amount
+function calcMonthlyAmort(asset, policy, monthsElapsed, priorAmortTotal) {
+  if (policy.method === 'declining-balance' && policy.decliningRate) {
+    const bookValue = asset.originalCost - priorAmortTotal;
+    if (bookValue <= policy.salvageValue) return 0;
+    const monthlyRate = policy.decliningRate / 12;
+    const monthlyAmount = bookValue * monthlyRate;
+    const maxAmort = Math.max(0, bookValue - policy.salvageValue);
+    return Math.round(Math.min(monthlyAmount, maxAmort) * 100) / 100;
+  }
+  // Straight-line
+  const usefulLife = policy.usefulLifeMonths || 60;
+  if (monthsElapsed >= usefulLife) return 0;
+  return Math.round(((asset.originalCost - policy.salvageValue) / usefulLife) * 100) / 100;
+}
+
+// Helper: check if asset is eligible for amortization
+function isEligibleForAmort(asset, policy, now, priorAmortTotal) {
+  if (!asset.active) return false;
+  const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  const acqDate = new Date(asset.acquisitionDate);
+  if (acqDate > lastDayOfMonth) return false;
+  if (!policy.expenseAccountId || !policy.accumAccountId) return false;
+
+  if (policy.method === 'declining-balance') {
+    const bookValue = asset.originalCost - priorAmortTotal;
+    return bookValue > (policy.salvageValue || 0) + 0.01;
+  }
+  // Straight-line: check months remaining
+  const acqMonth = acqDate.getFullYear() * 12 + acqDate.getMonth();
+  const curMonth = now.getFullYear() * 12 + now.getMonth();
+  return (curMonth - acqMonth) < (policy.usefulLifeMonths || 60);
+}
+
+// Helper: get total prior amortization for an asset from run history
+function getPriorAmortTotal(assetId, amortizationRuns) {
+  let total = 0;
+  amortizationRuns.forEach(run => {
+    const assetEntry = run.assets?.find(a => a.id === assetId);
+    if (assetEntry) total += assetEntry.amount;
+  });
+  return total;
+}
+
 // Preview amortization for a client
 app.get('/api/admin/clients/:clientId/fixed-assets/preview-amortization', requireAdmin, (req, res) => {
   const clientData = getClientAssets(req.params.clientId);
@@ -1415,25 +1576,32 @@ app.get('/api/admin/clients/:clientId/fixed-assets/preview-amortization', requir
     return res.json({ alreadyRun: true, runDetails: alreadyRun, month: currentMonth });
   }
 
-  const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-  const eligible = clientData.assets.filter(a => {
-    if (!a.active) return false;
-    const acqDate = new Date(a.acquisitionDate);
-    if (acqDate > lastDayOfMonth) return false;
-    const acqMonth = acqDate.getFullYear() * 12 + acqDate.getMonth();
-    const curMonth = now.getFullYear() * 12 + now.getMonth();
-    return (curMonth - acqMonth) < a.usefulLifeMonths;
-  });
-
   const lines = [];
   let totalAmount = 0;
-  eligible.forEach(a => {
-    const monthly = Math.round(((a.originalCost - a.salvageValue) / a.usefulLifeMonths) * 100) / 100;
+
+  clientData.assets.forEach(a => {
+    const policy = getAssetPolicy(a, clientData.assetClasses);
+    const priorAmort = getPriorAmortTotal(a.id, clientData.amortizationRuns);
+    const acqDate = new Date(a.acquisitionDate);
+    const monthsElapsed = (now.getFullYear() * 12 + now.getMonth()) - (acqDate.getFullYear() * 12 + acqDate.getMonth());
+
+    if (!isEligibleForAmort(a, policy, now, priorAmort)) return;
+
+    const monthly = calcMonthlyAmort(a, policy, monthsElapsed, priorAmort);
+    if (monthly <= 0) return;
+
     totalAmount += monthly;
-    lines.push({ assetName: a.name, amount: monthly, expenseAccountName: a.expenseAccountName, accumAccountName: a.accumAccountName });
+    lines.push({
+      assetName: a.name,
+      amount: monthly,
+      method: policy.method,
+      className: policy.className || a.glAccountName || '',
+      expenseAccountName: policy.expenseAccountName,
+      accumAccountName: policy.accumAccountName,
+    });
   });
 
-  res.json({ alreadyRun: false, month: currentMonth, eligibleCount: eligible.length, totalAmount: Math.round(totalAmount * 100) / 100, lines });
+  res.json({ alreadyRun: false, month: currentMonth, eligibleCount: lines.length, totalAmount: Math.round(totalAmount * 100) / 100, lines });
 });
 
 // Run amortization for a client and post JE to QBO
@@ -1456,28 +1624,30 @@ app.post('/api/admin/clients/:clientId/fixed-assets/run-amortization', requireAd
     const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
     const lastDayStr = lastDayOfMonth.toISOString().split('T')[0];
 
-    const eligible = clientData.assets.filter(a => {
-      if (!a.active) return false;
-      const acqDate = new Date(a.acquisitionDate);
-      if (acqDate > lastDayOfMonth) return false;
-      const acqMonth = acqDate.getFullYear() * 12 + acqDate.getMonth();
-      const curMonth = now.getFullYear() * 12 + now.getMonth();
-      return (curMonth - acqMonth) < a.usefulLifeMonths;
-    });
-
-    if (eligible.length === 0) {
-      return res.status(400).json({ error: 'No eligible assets for amortization this month' });
-    }
-
     const jeLines = [];
     let totalAmount = 0;
+    const assetAmounts = [];
 
-    eligible.forEach(a => {
-      const monthly = Math.round(((a.originalCost - a.salvageValue) / a.usefulLifeMonths) * 100) / 100;
+    clientData.assets.forEach(a => {
+      const policy = getAssetPolicy(a, clientData.assetClasses);
+      const priorAmort = getPriorAmortTotal(a.id, clientData.amortizationRuns);
+      const acqDate = new Date(a.acquisitionDate);
+      const monthsElapsed = (now.getFullYear() * 12 + now.getMonth()) - (acqDate.getFullYear() * 12 + acqDate.getMonth());
+
+      if (!isEligibleForAmort(a, policy, now, priorAmort)) return;
+
+      const monthly = calcMonthlyAmort(a, policy, monthsElapsed, priorAmort);
+      if (monthly <= 0) return;
+
       totalAmount += monthly;
-      jeLines.push({ accountId: a.expenseAccountId, accountName: a.expenseAccountName, description: `Amortization - ${a.name}`, amount: monthly, type: 'debit' });
-      jeLines.push({ accountId: a.accumAccountId, accountName: a.accumAccountName, description: `Amortization - ${a.name}`, amount: monthly, type: 'credit' });
+      assetAmounts.push({ id: a.id, name: a.name, amount: monthly });
+      jeLines.push({ accountId: policy.expenseAccountId, accountName: policy.expenseAccountName, description: `Amortization - ${a.name}`, amount: monthly, type: 'debit' });
+      jeLines.push({ accountId: policy.accumAccountId, accountName: policy.accumAccountName, description: `Amortization - ${a.name}`, amount: monthly, type: 'credit' });
     });
+
+    if (assetAmounts.length === 0) {
+      return res.status(400).json({ error: 'No eligible assets for amortization this month' });
+    }
 
     const clientName = CLIENTS[req.params.clientId]?.name || req.params.clientId;
     const result = await qbo.createJournalEntry({
@@ -1491,8 +1661,8 @@ app.post('/api/admin/clients/:clientId/fixed-assets/run-amortization', requireAd
       ranAt: new Date().toISOString(),
       journalEntryId: result.Id || null,
       totalAmount: Math.round(totalAmount * 100) / 100,
-      assetCount: eligible.length,
-      assets: eligible.map(a => ({ id: a.id, name: a.name, amount: Math.round(((a.originalCost - a.salvageValue) / a.usefulLifeMonths) * 100) / 100 })),
+      assetCount: assetAmounts.length,
+      assets: assetAmounts,
     };
 
     clientData.amortizationRuns.push(runRecord);

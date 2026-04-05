@@ -1089,6 +1089,84 @@ body {
   border-top: 2px solid var(--gray-200);
 }
 
+/* ======== ASSET CLASS CARDS ======== */
+.asset-class-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  background: var(--white);
+  border: 1px solid var(--gray-200);
+  border-radius: 10px;
+  margin-bottom: 8px;
+  transition: border-color var(--transition);
+}
+.asset-class-card:hover { border-color: var(--gray-300); }
+
+.asset-class-card.asset-needs-setup {
+  border-left: 3px solid var(--orange-500);
+}
+
+.asset-class-main { flex: 1; min-width: 0; }
+
+.asset-class-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.asset-class-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--gray-800);
+}
+
+.asset-class-method-badge {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.asset-class-method-badge.straight-line {
+  background: var(--blue-50);
+  color: var(--blue-600);
+}
+
+.asset-class-method-badge.declining-balance {
+  background: var(--orange-50);
+  color: var(--orange-600);
+}
+
+.asset-class-count {
+  font-size: 0.75rem;
+  color: var(--gray-400);
+}
+
+.asset-class-params {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+  color: var(--gray-400);
+}
+
+.asset-class-params span {
+  white-space: nowrap;
+}
+
+.asset-class-ai {
+  margin-top: 4px;
+  font-size: 0.75rem;
+  color: var(--blue-500);
+  line-height: 1.4;
+}
+
 /* ======== SETTINGS ======== */
 .settings-section {
   max-width: 480px;
