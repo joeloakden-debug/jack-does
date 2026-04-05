@@ -927,6 +927,12 @@ body {
   color: var(--gray-800);
 }
 
+.asset-card-desc {
+  font-size: 0.8rem;
+  color: var(--gray-500);
+  margin-bottom: 4px;
+}
+
 .asset-setup-badge {
   font-size: 0.7rem;
   font-weight: 500;
@@ -1041,6 +1047,12 @@ body {
   font-weight: 500;
   font-size: 0.9rem;
   color: var(--gray-800);
+}
+
+.qbo-sync-item-desc {
+  font-size: 0.8rem;
+  color: var(--gray-500);
+  margin-top: 2px;
 }
 
 .qbo-sync-item-meta {

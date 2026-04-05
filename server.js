@@ -1168,18 +1168,56 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
     const clientData = getClientAssets(req.params.clientId);
     const existingQboIds = new Set(clientData.assets.map(a => a.qboAccountId).filter(Boolean));
 
-    const importable = fixedAssetAccounts
-      .filter(a => !a.AccountSubType || !['AccumulatedDepreciation', 'AccumulatedAmortization'].includes(a.AccountSubType))
-      .filter(a => !existingQboIds.has(a.Id))
-      .map(a => ({
+    // Separate cost accounts from accumulated amortization/depreciation accounts
+    const accumSubTypes = ['AccumulatedDepreciation', 'AccumulatedAmortization'];
+    const costAccounts = fixedAssetAccounts
+      .filter(a => !a.AccountSubType || !accumSubTypes.includes(a.AccountSubType))
+      .filter(a => !existingQboIds.has(a.Id));
+
+    const accumAccounts = fixedAssetAccounts
+      .filter(a => a.AccountSubType && accumSubTypes.includes(a.AccountSubType));
+
+    // Get expense accounts for auto-suggesting amortization expense account
+    const allAccounts = Array.isArray(accounts) ? accounts : [];
+    const expenseAccounts = allAccounts
+      .filter(a => ['Expense', 'Other Expense'].includes(a.AccountType) && a.Active);
+
+    const importable = costAccounts.map(a => {
+      // Try to find a matching accumulated amortization account by name pattern
+      const nameBase = a.Name.toLowerCase().replace(/[-–—]/g, ' ').trim();
+      const matchedAccum = accumAccounts.find(acc => {
+        const accumName = acc.Name.toLowerCase().replace(/[-–—]/g, ' ').trim();
+        return accumName.includes(nameBase) || nameBase.includes(accumName.replace(/accumulated\s*(amortization|depreciation)\s*/i, '').trim());
+      });
+
+      // Try to find a matching expense account by asset name
+      const matchedExpense = expenseAccounts.find(exp => {
+        const expName = exp.Name.toLowerCase();
+        return expName.includes('amortization') || expName.includes('depreciation');
+      }) || expenseAccounts.find(exp => {
+        // Try matching by asset category (e.g. "Computer" -> "Computer expense")
+        const words = nameBase.split(/\s+/);
+        const expName = exp.Name.toLowerCase();
+        return words.some(w => w.length > 3 && expName.includes(w));
+      });
+
+      return {
         qboAccountId: a.Id,
         name: a.Name || a.FullyQualifiedName,
         accountType: a.AccountSubType || a.AccountType,
         currentBalance: balanceLookup[a.Name] ?? a.CurrentBalance ?? 0,
         description: a.Description || '',
-      }));
+        // Use QBO account creation date as acquisition date proxy
+        createdDate: a.MetaData?.CreateTime ? a.MetaData.CreateTime.split('T')[0] : null,
+        // Auto-matched accounts
+        suggestedAccumAccountId: matchedAccum?.Id || '',
+        suggestedAccumAccountName: matchedAccum?.Name || '',
+        suggestedExpenseAccountId: matchedExpense?.Id || '',
+        suggestedExpenseAccountName: matchedExpense?.Name || '',
+      };
+    });
 
-    res.json({ accounts: importable, allFixedAssetAccounts: fixedAssetAccounts });
+    res.json({ accounts: importable });
   } catch (error) {
     console.error('QBO sync error:', error.message);
     res.status(500).json({ error: `Failed to fetch from QBO: ${error.message}` });
@@ -1215,7 +1253,7 @@ app.post('/api/admin/fixed-assets/suggest-amortization', requireAdmin, async (re
 
 // Create a new fixed asset for a client
 app.post('/api/admin/clients/:clientId/fixed-assets', requireAdmin, (req, res) => {
-  const { name, originalCost, usefulLifeMonths, salvageValue, acquisitionDate,
+  const { name, description, originalCost, usefulLifeMonths, salvageValue, acquisitionDate,
           assetAccountId, assetAccountName, expenseAccountId, expenseAccountName,
           accumAccountId, accumAccountName, qboAccountId, fromSync } = req.body;
 
@@ -1238,6 +1276,7 @@ app.post('/api/admin/clients/:clientId/fixed-assets', requireAdmin, (req, res) =
     id: 'asset_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
     clientId: req.params.clientId,
     name,
+    description: description || '',
     originalCost: parseFloat(originalCost),
     usefulLifeMonths: parseInt(usefulLifeMonths, 10),
     salvageValue: parseFloat(salvageValue || 0),
@@ -1261,7 +1300,7 @@ app.put('/api/admin/clients/:clientId/fixed-assets/:id', requireAdmin, (req, res
   const idx = clientData.assets.findIndex(a => a.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Asset not found' });
 
-  const fields = ['name', 'originalCost', 'usefulLifeMonths', 'salvageValue', 'acquisitionDate',
+  const fields = ['name', 'description', 'originalCost', 'usefulLifeMonths', 'salvageValue', 'acquisitionDate',
     'assetAccountId', 'assetAccountName', 'expenseAccountId', 'expenseAccountName',
     'accumAccountId', 'accumAccountName', 'active', 'aiSuggestion'];
 

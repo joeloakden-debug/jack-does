@@ -883,6 +883,7 @@ function renderFixedAssets() {
               <div class="asset-card-name">${a.name}</div>
               ${needsSetup ? '<span class="asset-setup-badge">needs setup</span>' : ''}
             </div>
+            ${a.description ? `<div class="asset-card-desc">${a.description}</div>` : ''}
             <div class="asset-card-amounts">
               <span class="asset-card-amount">cost: <strong>$${a.originalCost.toLocaleString()}</strong></span>
               <span class="asset-card-amount">monthly: <strong>$${monthly}</strong></span>
@@ -949,7 +950,12 @@ async function syncFromQBO() {
         <input type="checkbox" class="qbo-sync-check" data-account='${JSON.stringify(a).replace(/'/g, "&#39;")}' checked>
         <div class="qbo-sync-item-info">
           <div class="qbo-sync-item-name">${a.name}</div>
-          <div class="qbo-sync-item-meta">${a.accountType} — balance: $${a.currentBalance.toLocaleString()}</div>
+          ${a.description ? `<div class="qbo-sync-item-desc">${a.description}</div>` : ''}
+          <div class="qbo-sync-item-meta">
+            ${a.accountType} — balance: $${a.currentBalance.toLocaleString()}
+            ${a.createdDate ? ` — created: ${a.createdDate}` : ''}
+            ${a.suggestedAccumAccountName ? ` — accum: ${a.suggestedAccumAccountName}` : ''}
+          </div>
         </div>
       </label>
     `).join('');
@@ -975,16 +981,17 @@ async function importSelectedAssets() {
     const account = JSON.parse(cb.dataset.account);
     const body = {
       name: account.name,
+      description: account.description || '',
       originalCost: account.currentBalance || 0,
       usefulLifeMonths: 60, // default — will be updated by AI suggestion
       salvageValue: 0,
-      acquisitionDate: new Date().toISOString().split('T')[0],
+      acquisitionDate: account.createdDate || new Date().toISOString().split('T')[0],
       assetAccountId: account.qboAccountId,
       assetAccountName: account.name,
-      expenseAccountId: '',
-      expenseAccountName: '',
-      accumAccountId: '',
-      accumAccountName: '',
+      expenseAccountId: account.suggestedExpenseAccountId || '',
+      expenseAccountName: account.suggestedExpenseAccountName || '',
+      accumAccountId: account.suggestedAccumAccountId || '',
+      accumAccountName: account.suggestedAccumAccountName || '',
       qboAccountId: account.qboAccountId,
       fromSync: true, // skip strict validation
     };
@@ -1144,14 +1151,38 @@ function openEditAsset(id) {
   const asset = allFixedAssets.find(a => a.id === id);
   if (!asset) return;
   editingAssetId = id;
-  document.getElementById('asset-modal-title').textContent = 'edit fixed asset';
+  document.getElementById('asset-modal-title').textContent = asset.name;
   document.getElementById('asset-name').value = asset.name;
   document.getElementById('asset-cost').value = asset.originalCost;
   document.getElementById('asset-useful-life').value = asset.usefulLifeMonths;
   document.getElementById('asset-salvage').value = asset.salvageValue;
   document.getElementById('asset-acq-date').value = asset.acquisitionDate;
   document.getElementById('asset-modal-error').style.display = 'none';
-  document.getElementById('ai-suggestion').style.display = 'none';
+
+  // Show description if available
+  const descEl = document.getElementById('asset-description-display');
+  if (descEl) {
+    if (asset.description) {
+      descEl.textContent = asset.description;
+      descEl.style.display = '';
+    } else {
+      descEl.style.display = 'none';
+    }
+  }
+
+  // Show AI suggestion if available
+  const suggestionEl = document.getElementById('ai-suggestion');
+  if (asset.aiSuggestion) {
+    const ai = asset.aiSuggestion;
+    let html = `<strong>AI suggestion: ${asset.usefulLifeMonths} months, straight-line</strong>`;
+    if (ai.ccaClass) html += ` (CCA Class ${ai.ccaClass}, ${ai.ccaRate})`;
+    if (ai.reasoning) html += `<br>${ai.reasoning}`;
+    suggestionEl.innerHTML = html;
+    suggestionEl.style.display = '';
+  } else {
+    suggestionEl.style.display = 'none';
+  }
+
   populateAssetDropdowns(asset);
   document.getElementById('asset-modal').style.display = 'flex';
 }
