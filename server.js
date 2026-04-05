@@ -12,6 +12,7 @@ marked.setOptions({
 const path = require('path');
 const fs = require('fs');
 const qbo = require('./qbo-service');
+const excelService = require('./excel-service');
 
 const app = express();
 const PORT = parseInt(process.env.PORT, 10) || 3000;
@@ -1204,6 +1205,67 @@ app.delete('/api/admin/clients/:clientId/fixed-assets/classes/:classId', require
   clientData.assetClasses.splice(idx, 1);
   saveFixedAssets(fixedAssetsData);
   res.json({ success: true });
+});
+
+// ========================================
+// EXCEL EXPORT / IMPORT
+// ========================================
+const excelUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+// Export fixed assets to Excel workbook
+app.get('/api/admin/clients/:clientId/fixed-assets/export-excel', requireAdmin, async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    const client = CLIENTS[clientId];
+    const clientName = client?.name || clientId;
+    const clientData = getClientAssets(clientId);
+
+    const workbook = await excelService.generateWorkbook(clientId, clientName, clientData);
+
+    const fileName = `${clientName} - Fixed Assets.xlsx`.replace(/[<>:"/\\|?*]/g, '_');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    console.error('Excel export error:', error);
+    res.status(500).json({ error: 'Failed to generate Excel file' });
+  }
+});
+
+// Import fixed assets from Excel workbook
+app.post('/api/admin/clients/:clientId/fixed-assets/import-excel', requireAdmin, excelUpload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    const workbook = new (require('exceljs').Workbook)();
+    await workbook.xlsx.load(req.file.buffer);
+
+    const parsed = excelService.parseWorkbook(workbook);
+
+    // Set clientId on all assets
+    const clientId = req.params.clientId;
+    parsed.assets.forEach(a => { a.clientId = clientId; });
+
+    // Replace in-memory data for this client
+    fixedAssetsData[clientId] = {
+      assetClasses: parsed.assetClasses,
+      assets: parsed.assets,
+      amortizationRuns: parsed.amortizationRuns,
+    };
+    saveFixedAssets(fixedAssetsData);
+
+    res.json({
+      success: true,
+      assetCount: parsed.assets.length,
+      classCount: parsed.assetClasses.length,
+      runCount: parsed.amortizationRuns.length,
+      warnings: parsed.warnings,
+    });
+  } catch (error) {
+    console.error('Excel import error:', error);
+    res.status(500).json({ error: 'Failed to import Excel file: ' + error.message });
+  }
 });
 
 // Sync fixed assets from QBO — queries GL transactions for each Fixed Asset cost account
