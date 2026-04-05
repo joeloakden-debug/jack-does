@@ -871,7 +871,7 @@ function renderAssetClasses() {
   if (!list) return;
 
   if (assetClasses.length === 0) {
-    list.innerHTML = '<p style="color:var(--gray-400);text-align:center;padding:20px;font-size:0.85rem;">no asset classes yet — sync from QBO to auto-create classes</p>';
+    list.innerHTML = '<p style="color:var(--gray-400);text-align:center;padding:20px;font-size:0.85rem;">no GL accounts yet — sync from QBO to import assets and their GL accounts</p>';
     return;
   }
 
@@ -890,18 +890,18 @@ function renderAssetClasses() {
             <span class="asset-class-name">${c.glAccountName}</span>
             <span class="asset-class-method-badge ${c.method}">${c.method === 'declining-balance' ? 'DB' : 'SL'}</span>
             <span class="asset-class-count">${assetCount} asset${assetCount !== 1 ? 's' : ''}</span>
-            ${needsAccounts ? '<span class="asset-setup-badge">needs accounts</span>' : ''}
+            ${needsAccounts ? '<span class="asset-setup-badge">needs expense/accum accounts</span>' : ''}
           </div>
           <div class="asset-class-params">
             <span>${methodLabel}</span>
             <span>salvage: $${(c.salvageValue || 0).toLocaleString()}</span>
-            ${c.expenseAccountName ? `<span>expense: ${c.expenseAccountName}</span>` : ''}
-            ${c.accumAccountName ? `<span>accum: ${c.accumAccountName}</span>` : ''}
+            ${c.expenseAccountName ? `<span>expense acct: ${c.expenseAccountName}</span>` : ''}
+            ${c.accumAccountName ? `<span>accum acct: ${c.accumAccountName}</span>` : ''}
           </div>
           ${ai ? `<div class="asset-class-ai">${ai.ccaClass ? `CCA Class ${ai.ccaClass} (${ai.ccaRate})` : ''} ${ai.reasoning ? `— ${ai.reasoning}` : ''}</div>` : ''}
         </div>
         <div class="asset-card-actions">
-          <button class="btn-edit-client" onclick="openEditClass('${c.id}')">edit</button>
+          <button class="btn-edit-client" onclick="openEditClass('${c.id}')">edit policy</button>
           <button class="btn-delete-asset" onclick="deleteClass('${c.id}')">delete</button>
         </div>
       </div>`;
@@ -982,7 +982,7 @@ function openEditClass(id) {
   const cls = assetClasses.find(c => c.id === id);
   if (!cls) return;
   editingClassId = id;
-  document.getElementById('asset-class-modal-title').textContent = `edit class: ${cls.glAccountName}`;
+  document.getElementById('asset-class-modal-title').textContent = `amortization policy: ${cls.glAccountName}`;
   document.getElementById('class-gl-name').value = cls.glAccountName || '';
   document.getElementById('class-method').value = cls.method || 'straight-line';
   document.getElementById('class-useful-life').value = cls.usefulLifeMonths || '';
@@ -1061,7 +1061,7 @@ async function saveClass() {
 async function deleteClass(id) {
   const cls = assetClasses.find(c => c.id === id);
   const assetCount = allFixedAssets.filter(a => a.active && (a.assetAccountId === cls?.glAccountId || a.glAccountName === cls?.glAccountName)).length;
-  if (!confirm(`delete asset class "${cls?.glAccountName}"? ${assetCount} asset${assetCount !== 1 ? 's' : ''} will lose their class policy.`)) return;
+  if (!confirm(`delete amortization policy for "${cls?.glAccountName}"? ${assetCount} asset${assetCount !== 1 ? 's' : ''} will lose their policy.`)) return;
   try {
     await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/classes/${id}`, {
       method: 'DELETE', headers: { 'Authorization': getAuth() },
@@ -1419,7 +1419,7 @@ function openEditAsset(id) {
     const methodLabel = cls.method === 'declining-balance'
       ? `declining balance @ ${((cls.decliningRate || 0) * 100).toFixed(0)}%/yr`
       : `straight-line, ${cls.usefulLifeMonths || '—'} months`;
-    let html = `<strong>class policy (${cls.glAccountName}):</strong> ${methodLabel}`;
+    let html = `<strong>GL account policy (${cls.glAccountName}):</strong> ${methodLabel}`;
     if (cls.aiSuggestion?.ccaClass) html += ` — CCA Class ${cls.aiSuggestion.ccaClass} (${cls.aiSuggestion.ccaRate})`;
     suggestionEl.innerHTML = html;
     suggestionEl.style.display = '';
