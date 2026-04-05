@@ -861,12 +861,17 @@ async function loadClientFixedAssets() {
     // Auto-create missing GL account policies for any assets that don't have one
     const missingGLAccounts = new Map();
     for (const asset of allFixedAssets) {
-      if (!asset.active || !asset.assetAccountId) continue;
-      const hasClass = assetClasses.some(c => c.glAccountId === asset.assetAccountId || c.glAccountName === asset.glAccountName);
-      if (!hasClass && !missingGLAccounts.has(asset.assetAccountId)) {
-        missingGLAccounts.set(asset.assetAccountId, {
-          glAccountId: asset.assetAccountId,
-          glAccountName: asset.glAccountName || asset.assetAccountName || asset.name,
+      if (!asset.active) continue;
+      const glKey = asset.glAccountName || asset.assetAccountName || asset.name;
+      if (!glKey) continue;
+      const hasClass = assetClasses.some(c =>
+        (asset.assetAccountId && c.glAccountId === asset.assetAccountId) ||
+        c.glAccountName === glKey
+      );
+      if (!hasClass && !missingGLAccounts.has(glKey)) {
+        missingGLAccounts.set(glKey, {
+          glAccountId: asset.assetAccountId || '',
+          glAccountName: glKey,
           // Grab expense/accum from the first asset that has them
           expenseAccountId: asset.expenseAccountId || '',
           expenseAccountName: asset.expenseAccountName || '',
@@ -877,7 +882,7 @@ async function loadClientFixedAssets() {
     }
 
     if (missingGLAccounts.size > 0) {
-      for (const [glId, info] of missingGLAccounts) {
+      for (const [glName, info] of missingGLAccounts) {
         try {
           const createRes = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/classes`, {
             method: 'POST',

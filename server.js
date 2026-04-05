@@ -1142,7 +1142,9 @@ app.post('/api/admin/clients/:clientId/fixed-assets/classes', requireAdmin, (req
   const clientData = getClientAssets(req.params.clientId);
 
   // Prevent duplicate classes for same GL account
-  const exists = clientData.assetClasses.find(c => c.glAccountId === glAccountId || c.glAccountName === glAccountName);
+  const exists = clientData.assetClasses.find(c =>
+    (glAccountId && c.glAccountId === glAccountId) || c.glAccountName === glAccountName
+  );
   if (exists) return res.status(409).json({ error: 'A class for this GL account already exists', existingClass: exists });
 
   const assetClass = {
