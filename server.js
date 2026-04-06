@@ -1328,13 +1328,24 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
               for (const txnRow of row.Rows.Row) {
                 if (txnRow.ColData) {
                   // ColData typically: [Date, TxnType, DocNum, Name, Memo, Split, Amount, Balance]
+                  // Some QBO reports return [Date, TxnType, DocNum, Name, Memo, Split, Debit, Credit, Balance]
                   const cols = txnRow.ColData;
                   const txnDate = cols[0]?.value || '';
                   const txnType = cols[1]?.value || '';
                   const docNum = cols[2]?.value || '';
                   const vendorName = cols[3]?.value || '';
                   const memo = cols[4]?.value || '';
-                  const amount = parseFloat(cols[6]?.value) || 0;
+                  // parseAmount: strip currency symbols, commas, parens, and parse with full precision
+                  // Important: never round — preserve exact GL value
+                  const parseAmount = (v) => {
+                    if (v === null || v === undefined || v === '') return 0;
+                    const s = String(v).replace(/[$,\s]/g, '').replace(/^\((.*)\)$/, '-$1');
+                    const n = parseFloat(s);
+                    return isNaN(n) ? 0 : n;
+                  };
+                  // Try col 6 (Amount or Debit). If that's empty/zero, try col 7 (Credit) or look for any non-zero col.
+                  let amount = parseAmount(cols[6]?.value);
+                  if (amount === 0 && cols[7]?.value) amount = parseAmount(cols[7]?.value);
 
                   // Skip zero amounts and closing/total rows
                   if (amount <= 0) continue;
