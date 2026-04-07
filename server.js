@@ -1331,6 +1331,28 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
     const importable = [];
 
     if (glReport?.Rows?.Row) {
+      // Build column index map from report metadata so we don't depend on a fixed column order.
+      // QBO can return GL Detail with varying column layouts. Common ColTitles include:
+      //   "Date", "Transaction Type", "Num", "Posting", "Create Date", "Created By",
+      //   "Name", "Memo/Description", "Account", "Split", "Amount", "Debit", "Credit", "Balance"
+      const colIdx = { date: 0, txnType: 1, docNum: 2, name: 3, memo: 4, amount: 6, debit: 6, credit: 7 };
+      const reportCols = glReport.Columns?.Column || [];
+      if (reportCols.length > 0) {
+        reportCols.forEach((c, i) => {
+          const t = (c.ColTitle || '').toLowerCase().trim();
+          const ty = (c.ColType || '').toLowerCase();
+          if (t === 'date' || ty === 'tx_date') colIdx.date = i;
+          else if (t === 'transaction type' || ty === 'txn_type') colIdx.txnType = i;
+          else if (t === 'num' || t === 'doc num' || ty === 'doc_num') colIdx.docNum = i;
+          else if (t === 'name' || ty === 'name') colIdx.name = i;
+          else if (t.includes('memo') || t.includes('description') || ty === 'memo') colIdx.memo = i;
+          else if (t === 'amount' || ty === 'subt_amount' || ty === 'amount') colIdx.amount = i;
+          else if (t === 'debit' || ty === 'debt_amt') colIdx.debit = i;
+          else if (t === 'credit' || ty === 'credt_amt') colIdx.credit = i;
+        });
+      }
+      console.log('[sync] GL Detail column map:', colIdx, 'titles:', reportCols.map(c => c.ColTitle));
+
       // GL Detail report structure: rows grouped by account, then individual transactions
       function parseGLRows(rows, parentAccountId, parentAccountName) {
         for (const row of rows) {
@@ -1346,14 +1368,12 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
             if (row.Rows?.Row) {
               for (const txnRow of row.Rows.Row) {
                 if (txnRow.ColData) {
-                  // ColData typically: [Date, TxnType, DocNum, Name, Memo, Split, Amount, Balance]
-                  // Some QBO reports return [Date, TxnType, DocNum, Name, Memo, Split, Debit, Credit, Balance]
                   const cols = txnRow.ColData;
-                  const txnDate = cols[0]?.value || '';
-                  const txnType = cols[1]?.value || '';
-                  const docNum = cols[2]?.value || '';
-                  const vendorName = cols[3]?.value || '';
-                  const memo = cols[4]?.value || '';
+                  const txnDate = cols[colIdx.date]?.value || '';
+                  const txnType = cols[colIdx.txnType]?.value || '';
+                  const docNum = cols[colIdx.docNum]?.value || '';
+                  const vendorName = cols[colIdx.name]?.value || '';
+                  const memo = cols[colIdx.memo]?.value || '';
                   // parseAmount: strip currency symbols, commas, parens, and parse with full precision
                   // Important: never round — preserve exact GL value
                   const parseAmount = (v) => {
@@ -1362,9 +1382,10 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
                     const n = parseFloat(s);
                     return isNaN(n) ? 0 : n;
                   };
-                  // Try col 6 (Amount or Debit). If that's empty/zero, try col 7 (Credit) or look for any non-zero col.
-                  let amount = parseAmount(cols[6]?.value);
-                  if (amount === 0 && cols[7]?.value) amount = parseAmount(cols[7]?.value);
+                  // Try amount column first; fall back to debit/credit columns
+                  let amount = parseAmount(cols[colIdx.amount]?.value);
+                  if (amount === 0) amount = parseAmount(cols[colIdx.debit]?.value);
+                  if (amount === 0 && colIdx.credit !== colIdx.debit) amount = parseAmount(cols[colIdx.credit]?.value);
 
                   // Skip zero amounts and closing/total rows
                   if (amount <= 0) continue;
