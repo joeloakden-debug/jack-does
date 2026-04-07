@@ -97,6 +97,21 @@
           <button class="btn-qbo-disconnect" id="btn-client-qbo-disconnect" style="display:none;">disconnect</button>
         </div>
 
+        <!-- Month-end close card (always visible on client detail) -->
+        <div id="month-end-close-card" style="border:1px solid var(--gray-200);border-radius:8px;padding:12px 16px;margin-bottom:16px;background:var(--gray-50);">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+            <div>
+              <div style="font-size:0.72rem;font-weight:600;color:var(--gray-500);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px;">month-end close (QBO)</div>
+              <p id="qbo-close-date-display" style="font-size:0.88rem;color:var(--gray-700);margin:0;">loading...</p>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+              <input type="date" id="qbo-close-date-input" style="padding:6px 10px;border:1px solid var(--gray-300);border-radius:4px;font-size:0.88rem;">
+              <button class="btn-add-client" id="btn-save-close-date" style="background:var(--blue-600);">save to QBO</button>
+            </div>
+          </div>
+          <div id="qbo-close-date-status" style="font-size:0.82rem;margin-top:8px;display:none;"></div>
+        </div>
+
         <!-- Client sub-tabs -->
         <nav class="client-sub-nav">
           <button class="sub-nav-btn active" data-client-tab="info">info</button>
@@ -122,21 +137,6 @@
 
           <div id="amortization-status" class="settings-success" style="display:none;"></div>
           <div id="last-amortization-run" style="font-size:0.82rem;color:var(--gray-400);margin-bottom:16px;"></div>
-
-          <!-- Month-end close card -->
-          <div id="month-end-close-card" style="border:1px solid var(--gray-200);border-radius:8px;padding:14px 16px;margin-bottom:20px;background:var(--gray-50);">
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
-              <div>
-                <h3 style="font-size:0.9rem;font-weight:600;color:var(--gray-700);text-transform:uppercase;letter-spacing:0.5px;margin:0 0 4px 0;">month-end close (QBO)</h3>
-                <p id="qbo-close-date-display" style="font-size:0.88rem;color:var(--gray-600);margin:0;">loading...</p>
-              </div>
-              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-                <input type="date" id="qbo-close-date-input" style="padding:6px 10px;border:1px solid var(--gray-300);border-radius:4px;font-size:0.88rem;">
-                <button class="btn-add-client" id="btn-save-close-date" style="background:var(--blue-600);">save to QBO</button>
-              </div>
-            </div>
-            <div id="qbo-close-date-status" style="font-size:0.82rem;margin-top:8px;display:none;"></div>
-          </div>
 
           <!-- Amortization Policies (by GL account) -->
           <div id="asset-classes-section" style="margin-bottom:24px;">

@@ -156,7 +156,9 @@ async function generateWorkbook(clientId, clientName, clientData) {
     { header: 'Run Date', key: 'ranAt', width: 20 },
     { header: 'Asset ID', key: 'assetId', width: 22 },
     { header: 'Asset Name', key: 'assetName', width: 30 },
+    { header: 'Description', key: 'description', width: 36 },
     { header: 'GL Account', key: 'glAccountName', width: 24 },
+    { header: 'Method', key: 'method', width: 18 },
     { header: 'Expense Account', key: 'expenseAccountName', width: 24 },
     { header: 'Accum Account', key: 'accumAccountName', width: 24 },
     { header: 'Amount', key: 'amount', width: 16, style: { numFmt: currencyFormat } },
@@ -165,17 +167,36 @@ async function generateWorkbook(clientId, clientName, clientData) {
     { header: 'Journal Entry ID', key: 'journalEntryId', width: 18 },
   ];
 
+  // Build asset lookup to backfill info for legacy run records that only stored {id, name, amount}
+  const assetLookup = new Map();
+  for (const a of assets) {
+    assetLookup.set(a.id, a);
+    if (a.name) assetLookup.set(a.name, a);
+  }
+  const classByGL = new Map();
+  for (const c of classes) {
+    if (c.glAccountName) classByGL.set(c.glAccountName, c);
+  }
+
   for (const run of runs) {
     const runAssets = run.assets || [];
     for (const ra of runAssets) {
+      const assetId = ra.assetId || ra.id || '';
+      const assetName = ra.assetName || ra.name || '';
+      const linkedAsset = assetLookup.get(assetId) || assetLookup.get(assetName) || null;
+      const glAccountName = ra.glAccountName || linkedAsset?.glAccountName || linkedAsset?.assetAccountName || '';
+      const linkedClass = glAccountName ? classByGL.get(glAccountName) : null;
+
       schedSheet.addRow({
         month: run.month || '',
         ranAt: run.ranAt || '',
-        assetId: ra.assetId || '',
-        assetName: ra.assetName || '',
-        glAccountName: ra.glAccountName || '',
-        expenseAccountName: ra.expenseAccountName || '',
-        accumAccountName: ra.accumAccountName || '',
+        assetId,
+        assetName,
+        description: ra.description || linkedAsset?.description || '',
+        glAccountName,
+        method: ra.method || linkedClass?.method || '',
+        expenseAccountName: ra.expenseAccountName || linkedClass?.expenseAccountName || linkedAsset?.expenseAccountName || '',
+        accumAccountName: ra.accumAccountName || linkedClass?.accumAccountName || linkedAsset?.accumAccountName || '',
         amount: parseFloat(ra.amount) || 0,
         runTotal: parseFloat(run.totalAmount) || 0,
         assetCount: run.assetCount || 0,
@@ -334,7 +355,9 @@ function parseWorkbook(workbook) {
       runMap.get(month).assets.push({
         assetId: toStr(getVal(row, hm, 'Asset ID')),
         assetName: toStr(getVal(row, hm, 'Asset Name')),
+        description: toStr(getVal(row, hm, 'Description')),
         glAccountName: toStr(getVal(row, hm, 'GL Account')),
+        method: toStr(getVal(row, hm, 'Method')),
         expenseAccountName: toStr(getVal(row, hm, 'Expense Account')),
         accumAccountName: toStr(getVal(row, hm, 'Accum Account')),
         amount: toNum(getVal(row, hm, 'Amount')),

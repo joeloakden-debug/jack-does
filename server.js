@@ -1745,9 +1745,10 @@ function computeAmortizationPreview(clientData, targetMonth) {
     lines.push({
       assetId: a.id,
       assetName: a.name,
+      description: a.description || '',
       amount: monthly,
       method: policy.method,
-      className: policy.className || a.glAccountName || '',
+      className: policy.glAccountName || a.glAccountName || a.assetAccountName || '',
       expenseAccountId: policy.expenseAccountId,
       expenseAccountName: policy.expenseAccountName,
       accumAccountId: policy.accumAccountId,
@@ -1876,7 +1877,20 @@ app.post('/api/admin/clients/:clientId/fixed-assets/run-amortization', requireAd
     const jeLines = [];
     const assetAmounts = [];
     for (const line of previewLines) {
-      assetAmounts.push({ id: line.assetId, name: line.assetName, amount: line.amount });
+      assetAmounts.push({
+        assetId: line.assetId,
+        id: line.assetId, // legacy alias
+        assetName: line.assetName,
+        name: line.assetName, // legacy alias
+        description: line.description || '',
+        glAccountName: line.className || '',
+        expenseAccountId: line.expenseAccountId,
+        expenseAccountName: line.expenseAccountName,
+        accumAccountId: line.accumAccountId,
+        accumAccountName: line.accumAccountName,
+        method: line.method || '',
+        amount: line.amount,
+      });
       jeLines.push({ accountId: line.expenseAccountId, accountName: line.expenseAccountName, description: `Amortization - ${line.assetName}`, amount: line.amount, type: 'debit' });
       jeLines.push({ accountId: line.accumAccountId, accountName: line.accumAccountName, description: `Amortization - ${line.assetName}`, amount: line.amount, type: 'credit' });
     }

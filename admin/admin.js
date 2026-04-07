@@ -693,6 +693,7 @@ function openClientDetail(clientId) {
 
   // Load QBO status for this client
   loadClientQboStatus(clientId);
+  loadQBOCloseDate();
 
   // Load accounts for this client's QBO connection
   loadAccounts(clientId);
@@ -731,6 +732,7 @@ async function loadClientQboStatus(clientId) {
       text.textContent = 'quickbooks connected';
       disconnectBtn.style.display = '';
       connectBtn.style.display = 'none';
+      loadQBOCloseDate();
     } else {
       dot.classList.remove('connected');
       dot.classList.add('disconnected');
@@ -914,7 +916,6 @@ async function saveQBOCloseDate() {
 
 async function loadClientFixedAssets() {
   if (!selectedClientId) return;
-  loadQBOCloseDate();
   try {
     const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets`, { headers: { 'Authorization': getAuth() } });
     const data = await res.json();
