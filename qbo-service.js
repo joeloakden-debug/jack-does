@@ -469,8 +469,29 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
   const qb = await getQBClient(clientId);
   if (!costAccountIds || costAccountIds.size === 0) return [];
 
-  const out = [];
+  // Group all lines hitting a cost account by (txnType, txnId, accountId) so multi-line
+  // postings (e.g. base + PST both debiting the same fixed-asset account) collapse into a
+  // single acquisition with the summed amount and the most descriptive line description.
+  const grouped = new Map(); // key -> acquisition record
   const isCost = (id) => id && costAccountIds.has(String(id));
+  const pickName = (existing, candidate) => {
+    const a = String(existing || '').trim();
+    const b = String(candidate || '').trim();
+    if (!a) return b;
+    if (!b) return a;
+    // Prefer the longer, more descriptive string
+    return b.length > a.length ? b : a;
+  };
+  const upsert = (key, base, addAmount, lineDescription) => {
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.amount += addAmount;
+      existing.description = pickName(existing.description, lineDescription);
+    } else {
+      grouped.set(key, { ...base, amount: addAmount, description: (lineDescription || '').trim() });
+    }
+  };
+  const out = []; // populated at end from `grouped`
 
   // ---------- JournalEntry ----------
   try {
@@ -486,17 +507,16 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
         if (det.PostingType !== 'Debit') continue;
         const acctId = det.AccountRef?.value;
         if (!isCost(acctId)) continue;
-        out.push({
+        const key = `JournalEntry|${je.Id}|${acctId}`;
+        upsert(key, {
           txnType: 'JournalEntry',
           txnId: je.Id,
           txnDate: je.TxnDate || '',
           accountId: String(acctId),
           accountName: det.AccountRef?.name || '',
-          description: (line.Description || '').trim(),
-          amount: parseFloat(line.Amount) || 0,
           vendorName: det.Entity?.EntityRef?.name || '',
           docNum: je.DocNumber || '',
-        });
+        }, parseFloat(line.Amount) || 0, line.Description);
       }
     }
   } catch (e) {
@@ -515,17 +535,16 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
         if (!det) continue;
         const acctId = det.AccountRef?.value;
         if (!isCost(acctId)) continue;
-        out.push({
+        const key = `Bill|${bill.Id}|${acctId}`;
+        upsert(key, {
           txnType: 'Bill',
           txnId: bill.Id,
           txnDate: bill.TxnDate || '',
           accountId: String(acctId),
           accountName: det.AccountRef?.name || '',
-          description: (line.Description || '').trim(),
-          amount: parseFloat(line.Amount) || 0,
           vendorName: bill.VendorRef?.name || '',
           docNum: bill.DocNumber || '',
-        });
+        }, parseFloat(line.Amount) || 0, line.Description);
       }
     }
   } catch (e) {
@@ -544,24 +563,28 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
         if (!det) continue;
         const acctId = det.AccountRef?.value;
         if (!isCost(acctId)) continue;
-        out.push({
+        const key = `Purchase|${pur.Id}|${acctId}`;
+        upsert(key, {
           txnType: 'Purchase',
           txnId: pur.Id,
           txnDate: pur.TxnDate || '',
           accountId: String(acctId),
           accountName: det.AccountRef?.name || '',
-          description: (line.Description || '').trim(),
-          amount: parseFloat(line.Amount) || 0,
           vendorName: pur.EntityRef?.name || '',
           docNum: pur.DocNumber || '',
-        });
+        }, parseFloat(line.Amount) || 0, line.Description);
       }
     }
   } catch (e) {
     console.error('[acquisitions] Purchase scan failed:', e.message);
   }
 
-  console.log('[acquisitions] total cost-account lines found:', out.length);
+  // Round summed amounts to 2 dp to avoid floating point drift
+  for (const acq of grouped.values()) {
+    acq.amount = Math.round(acq.amount * 100) / 100;
+    out.push(acq);
+  }
+  console.log('[acquisitions] grouped acquisitions:', out.length);
   return out;
 }
 
