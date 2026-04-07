@@ -1049,12 +1049,15 @@ app.get('/api/admin/clients', requireAdmin, (req, res) => {
 });
 
 app.post('/api/admin/clients', requireAdmin, (req, res) => {
-  const { name, email, password, billingFrequency } = req.body;
+  const { name, email, password, billingFrequency, fiscalYearEnd } = req.body;
   if (!name || !email) {
     return res.status(400).json({ error: 'Name and email are required' });
   }
   if (!password) {
     return res.status(400).json({ error: 'Password is required' });
+  }
+  if (fiscalYearEnd && !/^\d{2}-\d{2}$/.test(fiscalYearEnd)) {
+    return res.status(400).json({ error: 'fiscalYearEnd must be MM-DD' });
   }
   const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
   if (CLIENTS[id]) {
@@ -1066,6 +1069,7 @@ app.post('/api/admin/clients', requireAdmin, (req, res) => {
     email,
     password,
     billingFrequency: validFreqs.includes(billingFrequency) ? billingFrequency : 'monthly',
+    fiscalYearEnd: fiscalYearEnd || null,
     createdAt: new Date().toISOString(),
   };
   saveClients(CLIENTS);
@@ -1077,13 +1081,19 @@ app.put('/api/admin/clients/:id', requireAdmin, (req, res) => {
   if (!client) {
     return res.status(404).json({ error: 'Client not found' });
   }
-  const { name, email, password, billingFrequency } = req.body;
+  const { name, email, password, billingFrequency, fiscalYearEnd } = req.body;
   if (name) client.name = name;
   if (email) client.email = email;
   if (password) client.password = password;
   const validFreqs = ['monthly', 'quarterly', 'annual'];
   if (billingFrequency && validFreqs.includes(billingFrequency)) {
     client.billingFrequency = billingFrequency;
+  }
+  if (fiscalYearEnd !== undefined) {
+    if (fiscalYearEnd && !/^\d{2}-\d{2}$/.test(fiscalYearEnd)) {
+      return res.status(400).json({ error: 'fiscalYearEnd must be MM-DD' });
+    }
+    client.fiscalYearEnd = fiscalYearEnd || null;
   }
   CLIENTS[req.params.id] = client;
   saveClients(CLIENTS);
@@ -1222,7 +1232,14 @@ app.get('/api/admin/clients/:clientId/fixed-assets/export-excel', requireAdmin, 
     // Pull any amortization JEs from QBO so the schedule reflects what's actually posted
     await hydrateAmortizationRunsFromQBO(clientId, clientData);
 
-    const workbook = await excelService.generateWorkbook(clientId, clientName, clientData);
+    // Build (or recompute) the continuity schedule for the most recent run month
+    const runs = clientData.amortizationRuns || [];
+    const sortedRuns = runs.slice().sort((a, b) => (b.month || '').localeCompare(a.month || ''));
+    const asOfMonth = sortedRuns[0]?.month || formatMonthStr(new Date().getFullYear(), new Date().getMonth());
+    const fye = CLIENTS[clientId]?.fiscalYearEnd || null;
+    const continuitySchedule = buildContinuitySchedule(clientData, asOfMonth, fye);
+
+    const workbook = await excelService.generateWorkbook(clientId, clientName, clientData, continuitySchedule);
 
     const fileName = `${clientName} - Fixed Assets.xlsx`.replace(/[<>:"/\\|?*]/g, '_');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -1642,6 +1659,250 @@ function getPriorAmortTotal(assetId, amortizationRuns) {
   return total;
 }
 
+// ----- Continuity schedule helpers -----
+
+/**
+ * Given a target month "YYYY-MM" and a fiscal year-end "MM-DD",
+ * return the YYYY-MM of the start of the fiscal year that contains targetMonth.
+ */
+function getFiscalYearStart(targetMonth, fiscalYearEnd) {
+  const fye = (fiscalYearEnd && /^\d{2}-\d{2}$/.test(fiscalYearEnd)) ? fiscalYearEnd : '12-31';
+  const fyeMonth = parseInt(fye.split('-')[0], 10); // 1-12
+  const fyStartMonth = (fyeMonth % 12) + 1;          // 1-12
+  const { year: ty, monthIndex: tmIdx } = parseMonthStr(targetMonth);
+  const tm = tmIdx + 1; // 1-indexed
+  const fyStartYear = tm >= fyStartMonth ? ty : ty - 1;
+  return formatMonthStr(fyStartYear, fyStartMonth - 1);
+}
+
+/**
+ * Build a fiscal-year-to-date continuity schedule snapshot from current clientData.
+ *  - Rows: per asset, grouped by GL account
+ *  - Columns: opening accum + one column per fiscal-year month up to asOfMonth
+ *  - Subtotals per GL account, plus a grand total
+ */
+function buildContinuitySchedule(clientData, asOfMonth, fiscalYearEnd) {
+  const fyStart = getFiscalYearStart(asOfMonth, fiscalYearEnd);
+  const months = [];
+  let { year: y, monthIndex: m } = parseMonthStr(fyStart);
+  const { year: endY, monthIndex: endM } = parseMonthStr(asOfMonth);
+  while (y * 12 + m <= endY * 12 + endM) {
+    months.push(formatMonthStr(y, m));
+    ({ year: y, monthIndex: m } = addMonth(y, m, 1));
+  }
+
+  const groups = new Map();
+  const round2 = (n) => Math.round((n || 0) * 100) / 100;
+
+  // Helper to find an asset in a run by id or name (handles legacy + new shapes)
+  const matchEntry = (runAssets, asset) => (runAssets || []).find(ra =>
+    (ra.assetId && ra.assetId === asset.id) ||
+    (ra.id && ra.id === asset.id) ||
+    (ra.assetName && asset.name && ra.assetName === asset.name) ||
+    (ra.name && asset.name && ra.name === asset.name)
+  );
+
+  for (const a of clientData.assets || []) {
+    if (!a.active) continue;
+    const policy = getAssetPolicy(a, clientData.assetClasses) || {};
+    const glName = a.glAccountName || a.assetAccountName || 'Unclassified';
+
+    let openingAccum = 0;
+    const monthlyAmort = {};
+    for (const mo of months) monthlyAmort[mo] = 0;
+
+    for (const run of clientData.amortizationRuns || []) {
+      const entry = matchEntry(run.assets, a);
+      if (!entry) continue;
+      const amount = parseFloat(entry.amount) || 0;
+      const runMonth = run.month;
+      if (runMonth < fyStart) {
+        openingAccum += amount;
+      } else if (Object.prototype.hasOwnProperty.call(monthlyAmort, runMonth)) {
+        monthlyAmort[runMonth] += amount;
+      }
+    }
+
+    const fyAmort = months.reduce((s, mo) => s + monthlyAmort[mo], 0);
+    const closingAccum = openingAccum + fyAmort;
+    const netBookValue = (parseFloat(a.originalCost) || 0) - closingAccum;
+
+    if (!groups.has(glName)) groups.set(glName, { glAccountName: glName, assets: [] });
+
+    groups.get(glName).assets.push({
+      assetId: a.id,
+      name: a.name,
+      description: a.description || '',
+      glAccountName: glName,
+      vendorName: a.vendorName || '',
+      acquisitionDate: a.acquisitionDate || '',
+      originalCost: round2(a.originalCost),
+      salvageValue: round2(a.salvageValue),
+      method: policy.method || '',
+      usefulLifeMonths: policy.usefulLifeMonths || null,
+      expenseAccountName: policy.expenseAccountName || a.expenseAccountName || '',
+      accumAccountName: policy.accumAccountName || a.accumAccountName || '',
+      openingAccum: round2(openingAccum),
+      monthlyAmort: Object.fromEntries(Object.entries(monthlyAmort).map(([k, v]) => [k, round2(v)])),
+      closingAccum: round2(closingAccum),
+      netBookValue: round2(netBookValue),
+    });
+  }
+
+  // Subtotals + grand total
+  const glAccounts = [];
+  let totalCost = 0, totalOpening = 0, totalClosing = 0, totalNBV = 0;
+  const totalMonthly = {};
+  for (const mo of months) totalMonthly[mo] = 0;
+
+  for (const group of groups.values()) {
+    let cost = 0, opening = 0, closing = 0, nbv = 0;
+    const monthly = {};
+    for (const mo of months) monthly[mo] = 0;
+    for (const asset of group.assets) {
+      cost += asset.originalCost;
+      opening += asset.openingAccum;
+      closing += asset.closingAccum;
+      nbv += asset.netBookValue;
+      for (const mo of months) monthly[mo] += asset.monthlyAmort[mo];
+    }
+    group.subtotal = {
+      cost: round2(cost),
+      openingAccum: round2(opening),
+      monthlyAmort: Object.fromEntries(Object.entries(monthly).map(([k, v]) => [k, round2(v)])),
+      closingAccum: round2(closing),
+      netBookValue: round2(nbv),
+    };
+    glAccounts.push(group);
+    totalCost += cost;
+    totalOpening += opening;
+    totalClosing += closing;
+    totalNBV += nbv;
+    for (const mo of months) totalMonthly[mo] += monthly[mo];
+  }
+
+  return {
+    asOfMonth,
+    fiscalYearStart: fyStart,
+    fiscalYearEnd: fiscalYearEnd || '12-31',
+    months,
+    glAccounts,
+    total: {
+      cost: round2(totalCost),
+      openingAccum: round2(totalOpening),
+      monthlyAmort: Object.fromEntries(Object.entries(totalMonthly).map(([k, v]) => [k, round2(v)])),
+      closingAccum: round2(totalClosing),
+      netBookValue: round2(totalNBV),
+    },
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Reconcile a continuity schedule against QBO trial balance.
+ * Compares (a) cost account balances and (b) accumulated amortization balances per GL account.
+ * Returns { checks: [...], allPassed: boolean }
+ */
+async function reconcileScheduleToQBO(clientId, schedule) {
+  const checks = [];
+  const TOLERANCE = 0.01;
+
+  if (!qbo.isConnected(clientId)) {
+    return { checks: [], allPassed: false, error: 'QBO not connected' };
+  }
+
+  // Pull TB as-of last day of asOfMonth
+  const { year, monthIndex } = parseMonthStr(schedule.asOfMonth);
+  const asOf = lastDayOfMonthDate(year, monthIndex).toISOString().split('T')[0];
+
+  let tb;
+  try {
+    tb = await qbo.getTrialBalance(asOf, asOf, clientId);
+  } catch (e) {
+    return { checks: [], allPassed: false, error: `Failed to fetch trial balance: ${e.message}` };
+  }
+
+  // Flatten TB rows into a name -> balance map
+  const tbBalances = new Map();
+  function walkRows(rows) {
+    if (!rows) return;
+    for (const row of rows) {
+      if (row.ColData) {
+        const acctName = row.ColData[0]?.value || '';
+        const debit = parseFloat(String(row.ColData[1]?.value || '').replace(/[$,\s]/g, '')) || 0;
+        const credit = parseFloat(String(row.ColData[2]?.value || '').replace(/[$,\s]/g, '')) || 0;
+        if (acctName) tbBalances.set(acctName, debit - credit);
+      }
+      if (row.Rows?.Row) walkRows(row.Rows.Row);
+      if (row.Rows && Array.isArray(row.Rows)) walkRows(row.Rows);
+    }
+  }
+  walkRows(tb?.Rows?.Row);
+
+  for (const group of schedule.glAccounts) {
+    const glName = group.glAccountName;
+    // Cost check: compare schedule cost subtotal to TB balance for this account
+    const tbCost = tbBalances.get(glName);
+    const schedCost = group.subtotal.cost;
+    if (tbCost !== undefined) {
+      const diff = Math.round((tbCost - schedCost) * 100) / 100;
+      checks.push({
+        type: 'cost',
+        glAccount: glName,
+        schedule: schedCost,
+        qbo: Math.round(tbCost * 100) / 100,
+        difference: diff,
+        status: Math.abs(diff) < TOLERANCE ? 'pass' : 'fail',
+      });
+    } else {
+      checks.push({
+        type: 'cost',
+        glAccount: glName,
+        schedule: schedCost,
+        qbo: null,
+        difference: null,
+        status: 'missing',
+        note: `account "${glName}" not found on trial balance`,
+      });
+    }
+
+    // Accum check: try to find an accum account that matches this GL account
+    const accumName = group.assets[0]?.accumAccountName || '';
+    if (accumName) {
+      const tbAccum = tbBalances.get(accumName);
+      const schedAccum = group.subtotal.closingAccum;
+      if (tbAccum !== undefined) {
+        // Accum is a contra asset — TB credit balance shows as negative
+        const tbAccumAbs = Math.abs(tbAccum);
+        const diff = Math.round((tbAccumAbs - schedAccum) * 100) / 100;
+        checks.push({
+          type: 'accum',
+          glAccount: glName,
+          accumAccount: accumName,
+          schedule: schedAccum,
+          qbo: Math.round(tbAccumAbs * 100) / 100,
+          difference: diff,
+          status: Math.abs(diff) < TOLERANCE ? 'pass' : 'fail',
+        });
+      } else {
+        checks.push({
+          type: 'accum',
+          glAccount: glName,
+          accumAccount: accumName,
+          schedule: schedAccum,
+          qbo: null,
+          difference: null,
+          status: 'missing',
+          note: `accum account "${accumName}" not found on trial balance`,
+        });
+      }
+    }
+  }
+
+  const allPassed = checks.length > 0 && checks.every(c => c.status === 'pass');
+  return { checks, allPassed, asOf };
+}
+
 // ----- Helpers for determining the target amortization period -----
 
 // Parse "YYYY-MM" string into { year, monthIndex (0-11) }
@@ -1956,11 +2217,67 @@ app.post('/api/admin/clients/:clientId/fixed-assets/run-amortization', requireAd
     };
 
     clientData.amortizationRuns.push(runRecord);
+
+    // Build a continuity schedule snapshot reflecting state immediately after this run
+    const fye = CLIENTS[amortClientId]?.fiscalYearEnd || null;
+    const snapshot = buildContinuitySchedule(clientData, targetMonth, fye);
+    runRecord.snapshot = snapshot;
+    clientData.latestSchedule = snapshot;
+
     saveFixedAssets(fixedAssetsData);
-    res.json({ success: true, run: runRecord });
+
+    // Run reconciliation against QBO trial balance (best-effort, non-blocking on failure)
+    let reconciliation = null;
+    try {
+      reconciliation = await reconcileScheduleToQBO(amortClientId, snapshot);
+      runRecord.reconciliation = reconciliation;
+      saveFixedAssets(fixedAssetsData);
+    } catch (e) {
+      console.error('Reconciliation error:', e.message);
+      reconciliation = { error: e.message };
+    }
+
+    res.json({ success: true, run: runRecord, snapshot, reconciliation });
   } catch (error) {
     console.error('Amortization run error:', error.message);
     res.status(500).json({ error: `Failed to post journal entry: ${error.message}` });
+  }
+});
+
+// Get the latest continuity schedule snapshot for a client
+app.get('/api/admin/clients/:clientId/fixed-assets/continuity-schedule', requireAdmin, async (req, res) => {
+  const clientData = getClientAssets(req.params.clientId);
+  if (qbo.isConnected(req.params.clientId)) {
+    await hydrateAmortizationRunsFromQBO(req.params.clientId, clientData);
+  }
+  // Determine the most recent run month, or fall back to current month
+  const runs = clientData.amortizationRuns || [];
+  const sorted = runs.slice().sort((a, b) => (b.month || '').localeCompare(a.month || ''));
+  const asOfMonth = sorted[0]?.month || formatMonthStr(new Date().getFullYear(), new Date().getMonth());
+  const fye = CLIENTS[req.params.clientId]?.fiscalYearEnd || null;
+  // Prefer stored snapshot if it matches the latest run; else recompute
+  let schedule = clientData.latestSchedule;
+  if (!schedule || schedule.asOfMonth !== asOfMonth) {
+    schedule = buildContinuitySchedule(clientData, asOfMonth, fye);
+  }
+  res.json({ schedule });
+});
+
+// Re-run reconciliation on demand
+app.post('/api/admin/clients/:clientId/fixed-assets/reconcile', requireAdmin, async (req, res) => {
+  try {
+    const clientData = getClientAssets(req.params.clientId);
+    await hydrateAmortizationRunsFromQBO(req.params.clientId, clientData);
+    const runs = clientData.amortizationRuns || [];
+    const sorted = runs.slice().sort((a, b) => (b.month || '').localeCompare(a.month || ''));
+    const asOfMonth = sorted[0]?.month;
+    if (!asOfMonth) return res.status(400).json({ error: 'No amortization runs to reconcile' });
+    const fye = CLIENTS[req.params.clientId]?.fiscalYearEnd || null;
+    const schedule = buildContinuitySchedule(clientData, asOfMonth, fye);
+    const reconciliation = await reconcileScheduleToQBO(req.params.clientId, schedule);
+    res.json({ schedule, reconciliation });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 

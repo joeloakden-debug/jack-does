@@ -699,12 +699,21 @@ function openClientDetail(clientId) {
   loadAccounts(clientId);
 
   // Render client info
+  const fyeDisplay = formatFiscalYearEnd(client.fiscalYearEnd);
   document.getElementById('client-info-content').innerHTML = `
     <div style="display:grid;gap:12px;max-width:400px;padding:16px 0;">
       <div><span style="font-size:0.78rem;color:var(--gray-400);text-transform:uppercase;">email</span><br><strong>${client.email}</strong></div>
       <div><span style="font-size:0.78rem;color:var(--gray-400);text-transform:uppercase;">billing</span><br><span class="client-billing-badge ${client.billingFrequency}">${client.billingFrequency}</span></div>
+      <div><span style="font-size:0.78rem;color:var(--gray-400);text-transform:uppercase;">fiscal year-end</span><br><strong>${fyeDisplay}</strong></div>
       <div><span style="font-size:0.78rem;color:var(--gray-400);text-transform:uppercase;">client id</span><br><code style="font-size:0.82rem;">${clientId}</code></div>
     </div>`;
+}
+
+function formatFiscalYearEnd(mmdd) {
+  if (!mmdd || !/^\d{2}-\d{2}$/.test(mmdd)) return '<span style="color:var(--gray-400);">not set</span>';
+  const [m, d] = mmdd.split('-').map(Number);
+  const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${monthNames[m - 1]} ${d}`;
 }
 
 // ========================================
@@ -795,6 +804,7 @@ function openAddClient() {
   document.getElementById('client-password').value = '';
   document.getElementById('client-password').placeholder = 'set a password for portal login';
   document.getElementById('client-billing').value = 'monthly';
+  document.getElementById('client-fye').value = '';
   document.getElementById('client-modal-error').style.display = 'none';
   document.getElementById('client-modal').style.display = '';
 }
@@ -809,6 +819,7 @@ function openEditClient(id) {
   document.getElementById('client-password').value = '';
   document.getElementById('client-password').placeholder = 'leave blank to keep current password';
   document.getElementById('client-billing').value = client.billingFrequency || 'monthly';
+  document.getElementById('client-fye').value = client.fiscalYearEnd || '';
   document.getElementById('client-modal-error').style.display = 'none';
   document.getElementById('client-modal').style.display = '';
 }
@@ -820,12 +831,16 @@ async function saveClient() {
   const email = document.getElementById('client-email').value.trim();
   const password = document.getElementById('client-password').value;
   const billingFrequency = document.getElementById('client-billing').value;
+  const fiscalYearEnd = document.getElementById('client-fye').value.trim();
   const errorEl = document.getElementById('client-modal-error');
 
   if (!name || !email) { errorEl.textContent = 'name and email are required'; errorEl.style.display = ''; return; }
   if (!editingClientId && !password) { errorEl.textContent = 'password is required for new clients'; errorEl.style.display = ''; return; }
+  if (fiscalYearEnd && !/^\d{2}-\d{2}$/.test(fiscalYearEnd)) {
+    errorEl.textContent = 'fiscal year-end must be MM-DD (e.g. 12-31)'; errorEl.style.display = ''; return;
+  }
 
-  const body = { name, email, billingFrequency };
+  const body = { name, email, billingFrequency, fiscalYearEnd: fiscalYearEnd || null };
   if (password) body.password = password;
 
   try {
@@ -1736,10 +1751,54 @@ async function confirmRunAmortization() {
     const statusEl = document.getElementById('amortization-status');
     statusEl.textContent = `amortization posted to quickbooks — $${data.run.totalAmount.toFixed(2)} for ${data.run.assetCount} assets`;
     statusEl.style.display = '';
-    setTimeout(() => { statusEl.style.display = 'none'; }, 5000);
+    if (data.reconciliation) showReconciliationResult(data.reconciliation);
     loadClientFixedAssets();
   } catch (e) { errorEl.textContent = 'failed to post amortization'; errorEl.style.display = ''; }
   btn.textContent = 'post to quickbooks'; btn.disabled = false;
+}
+
+function showReconciliationResult(rec) {
+  const panel = document.getElementById('reconciliation-panel');
+  if (!panel) return;
+  if (rec.error) {
+    panel.innerHTML = `<div style="padding:12px;border-radius:6px;background:#fef3c7;border:1px solid #f59e0b;color:#92400e;">reconciliation error: ${rec.error}</div>`;
+    panel.style.display = '';
+    return;
+  }
+  const checks = rec.checks || [];
+  if (checks.length === 0) {
+    panel.innerHTML = '<div style="padding:12px;border-radius:6px;background:#f3f4f6;color:#6b7280;">no reconciliation checks performed</div>';
+    panel.style.display = '';
+    return;
+  }
+  const fmt = (n) => n === null || n === undefined ? '—' : `$${Number(n).toFixed(2)}`;
+  const statusBadge = (s) => {
+    if (s === 'pass') return '<span style="color:#16a34a;font-weight:600;">✓ pass</span>';
+    if (s === 'fail') return '<span style="color:#dc2626;font-weight:600;">✗ fail</span>';
+    return '<span style="color:#d97706;font-weight:600;">⚠ missing</span>';
+  };
+  const headerColor = rec.allPassed ? '#16a34a' : '#dc2626';
+  const headerText = rec.allPassed ? '✓ reconciliation passed' : '✗ reconciliation has differences';
+  const rows = checks.map(c => `
+    <tr>
+      <td>${c.type === 'cost' ? 'Cost' : 'Accum'}</td>
+      <td>${c.glAccount}${c.accumAccount ? ` <span style="color:#9ca3af;">→ ${c.accumAccount}</span>` : ''}</td>
+      <td style="text-align:right;">${fmt(c.schedule)}</td>
+      <td style="text-align:right;">${fmt(c.qbo)}</td>
+      <td style="text-align:right;">${fmt(c.difference)}</td>
+      <td>${statusBadge(c.status)}</td>
+    </tr>
+    ${c.note ? `<tr><td colspan="6" style="font-size:0.78rem;color:#9ca3af;padding-left:24px;">${c.note}</td></tr>` : ''}
+  `).join('');
+  panel.innerHTML = `
+    <div style="border:1px solid ${headerColor};border-radius:8px;overflow:hidden;margin-top:16px;">
+      <div style="padding:10px 14px;background:${headerColor};color:white;font-weight:600;">${headerText} <span style="opacity:0.85;font-weight:400;">(as of ${rec.asOf || ''})</span></div>
+      <table class="amortization-preview-table" style="margin:0;">
+        <thead><tr><th>type</th><th>account</th><th style="text-align:right;">schedule</th><th style="text-align:right;">QBO</th><th style="text-align:right;">diff</th><th>status</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+  panel.style.display = '';
 }
 
 // Fixed asset event listeners

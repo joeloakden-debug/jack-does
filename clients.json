@@ -4,6 +4,7 @@
     "email": "joeloakden@gmail.com",
     "password": "A18501850b!",
     "billingFrequency": "monthly",
+    "fiscalYearEnd": "02-28",
     "createdAt": "2026-03-29T00:00:00.000Z"
   }
 }

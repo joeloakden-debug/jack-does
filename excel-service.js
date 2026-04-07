@@ -35,9 +35,147 @@ function styleDataRows(sheet) {
 }
 
 // ========================================
+// CONTINUITY SCHEDULE SHEET (wide format)
+// ========================================
+function monthHeaderLabel(yyyymm) {
+  const [y, m] = yyyymm.split('-').map(Number);
+  const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${monthNames[m - 1]}-${String(y).slice(2)}`;
+}
+
+function addContinuitySheet(workbook, schedule, clientName) {
+  const sheet = workbook.addWorksheet('Continuity Schedule', {
+    properties: { tabColor: { argb: 'FFf97316' } },
+    views: [{ state: 'frozen', xSplit: 5, ySplit: 4 }],
+  });
+
+  const months = schedule.months || [];
+
+  // Title block
+  sheet.mergeCells(1, 1, 1, 8);
+  sheet.getCell(1, 1).value = `${clientName} — Fixed Asset Continuity Schedule`;
+  sheet.getCell(1, 1).font = { name: 'Calibri', size: 14, bold: true };
+
+  sheet.mergeCells(2, 1, 2, 8);
+  sheet.getCell(2, 1).value = `Fiscal year: ${schedule.fiscalYearStart} → ${schedule.asOfMonth}    (Year-end: ${schedule.fiscalYearEnd})`;
+  sheet.getCell(2, 1).font = { name: 'Calibri', size: 10, italic: true, color: { argb: 'FF6b7280' } };
+
+  // Header row (row 4)
+  const baseHeaders = ['Asset', 'Description', 'Vendor', 'Acq Date', 'Original Cost', 'Method', 'Opening Accum'];
+  const tailHeaders = ['Closing Accum', 'Net Book Value'];
+  const monthHeaders = months.map(monthHeaderLabel);
+  const headers = [...baseHeaders, ...monthHeaders, ...tailHeaders];
+
+  const headerRowIdx = 4;
+  headers.forEach((h, i) => {
+    const cell = sheet.getCell(headerRowIdx, i + 1);
+    cell.value = h;
+    cell.font = headerFont;
+    cell.fill = headerFill;
+    cell.border = headerBorder;
+    cell.alignment = { vertical: 'middle', horizontal: i < 4 ? 'left' : 'right', wrapText: true };
+  });
+  sheet.getRow(headerRowIdx).height = 28;
+
+  // Column widths
+  const widths = [28, 30, 18, 12, 14, 14, 14];
+  for (let i = 0; i < months.length; i++) widths.push(11);
+  widths.push(14, 14);
+  widths.forEach((w, i) => { sheet.getColumn(i + 1).width = w; });
+
+  // Number format columns: cost + opening + monthly + closing + nbv
+  const numericStartCol = 5; // Original Cost
+  const numericEndCol = headers.length;
+  for (let c = numericStartCol; c <= numericEndCol; c++) {
+    if (c === 6) continue; // Method column is text
+    sheet.getColumn(c).numFmt = currencyFormat;
+  }
+
+  let rowIdx = headerRowIdx + 1;
+
+  function writeRow(values, opts = {}) {
+    const row = sheet.getRow(rowIdx);
+    values.forEach((v, i) => {
+      row.getCell(i + 1).value = v;
+    });
+    if (opts.bold) row.font = { bold: true };
+    if (opts.fill) {
+      row.eachCell({ includeEmpty: false }, cell => {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: opts.fill } };
+      });
+    }
+    if (opts.topBorder) {
+      row.eachCell({ includeEmpty: false }, cell => {
+        cell.border = { ...(cell.border || {}), top: { style: 'thin', color: { argb: 'FF9ca3af' } } };
+      });
+    }
+    if (opts.doubleBottomBorder) {
+      row.eachCell({ includeEmpty: false }, cell => {
+        cell.border = { ...(cell.border || {}), bottom: { style: 'double', color: { argb: 'FF1a1a2e' } } };
+      });
+    }
+    rowIdx++;
+  }
+
+  for (const group of schedule.glAccounts) {
+    // Group header
+    sheet.mergeCells(rowIdx, 1, rowIdx, headers.length);
+    const ghCell = sheet.getCell(rowIdx, 1);
+    ghCell.value = group.glAccountName;
+    ghCell.font = { bold: true, color: { argb: 'FF1a1a2e' } };
+    ghCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE5E7EB' } };
+    ghCell.alignment = { vertical: 'middle', horizontal: 'left' };
+    sheet.getRow(rowIdx).height = 20;
+    rowIdx++;
+
+    for (const a of group.assets) {
+      const baseVals = [
+        a.name,
+        a.description,
+        a.vendorName,
+        a.acquisitionDate,
+        a.originalCost,
+        a.method,
+        a.openingAccum,
+      ];
+      const monthVals = months.map(m => a.monthlyAmort[m] || 0);
+      const tailVals = [a.closingAccum, a.netBookValue];
+      writeRow([...baseVals, ...monthVals, ...tailVals]);
+    }
+
+    // Subtotal row
+    const sub = group.subtotal;
+    const subBase = [`${group.glAccountName} subtotal`, '', '', '', sub.cost, '', sub.openingAccum];
+    const subMonths = months.map(m => sub.monthlyAmort[m] || 0);
+    const subTail = [sub.closingAccum, sub.netBookValue];
+    writeRow([...subBase, ...subMonths, ...subTail], {
+      bold: true,
+      fill: 'FFF3F4F6',
+      topBorder: true,
+    });
+    // Spacer row
+    rowIdx++;
+  }
+
+  // Grand total
+  const tot = schedule.total;
+  const totBase = ['TOTAL', '', '', '', tot.cost, '', tot.openingAccum];
+  const totMonths = months.map(m => tot.monthlyAmort[m] || 0);
+  const totTail = [tot.closingAccum, tot.netBookValue];
+  writeRow([...totBase, ...totMonths, ...totTail], {
+    bold: true,
+    fill: 'FF1a1a2e',
+    doubleBottomBorder: true,
+  });
+  // White text on dark fill for the total row
+  const totalRow = sheet.getRow(rowIdx - 1);
+  totalRow.eachCell({ includeEmpty: false }, cell => { cell.font = { bold: true, color: { argb: 'FFFFFFFF' } }; });
+}
+
+// ========================================
 // GENERATE WORKBOOK
 // ========================================
-async function generateWorkbook(clientId, clientName, clientData) {
+async function generateWorkbook(clientId, clientName, clientData, continuitySchedule = null) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Jack Does Accounting';
   workbook.created = new Date();
@@ -45,6 +183,11 @@ async function generateWorkbook(clientId, clientName, clientData) {
   const assets = clientData.assets || [];
   const classes = clientData.assetClasses || [];
   const runs = clientData.amortizationRuns || [];
+
+  // ---- Sheet 0 (first): Continuity Schedule (wide format) ----
+  if (continuitySchedule && continuitySchedule.glAccounts) {
+    addContinuitySheet(workbook, continuitySchedule, clientName);
+  }
 
   // ---- Sheet 1: Asset Register ----
   const assetSheet = workbook.addWorksheet('Asset Register', {
