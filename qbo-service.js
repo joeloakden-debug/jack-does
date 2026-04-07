@@ -381,6 +381,70 @@ async function getBookCloseDate(clientId = 'default') {
 }
 
 /**
+ * Fetch journal entries that look like fixed-asset amortization runs.
+ * Identifies them by PrivateNote starting with the standard prefix.
+ * Returns array of { month, ranAt, journalEntryId, totalAmount, assetCount, assets, txnDate, memo }
+ */
+async function getAmortizationRunsFromQBO(clientId = 'default', sinceDate = null) {
+  const qb = await getQBClient(clientId);
+  const PREFIX = 'Fixed asset amortization - ';
+  // node-quickbooks accepts an array of criteria, OR an object with top-level limit/desc/etc.
+  // Use array form (matching getJournalEntries) for date filter; QBO defaults are fine.
+  const criteria = sinceDate ? [{ field: 'TxnDate', value: sinceDate, operator: '>=' }] : [];
+  const result = await qbPromise(qb, 'findJournalEntries', criteria);
+  const entries = result?.QueryResponse?.JournalEntry || [];
+  const runs = [];
+  for (const je of entries) {
+    const memo = je.PrivateNote || '';
+    if (!memo.startsWith(PREFIX)) continue;
+    // Parse "Fixed asset amortization - YYYY-MM - {clientName}"
+    const rest = memo.slice(PREFIX.length);
+    const monthMatch = rest.match(/^(\d{4}-\d{2})/);
+    if (!monthMatch) continue;
+    const month = monthMatch[1];
+
+    // Sum debits to get total amortization amount, and group by description for assets
+    const lines = je.Line || [];
+    let totalAmount = 0;
+    const assetMap = new Map();
+    for (const line of lines) {
+      const detail = line.JournalEntryLineDetail;
+      if (!detail) continue;
+      if (detail.PostingType === 'Debit') {
+        totalAmount += parseFloat(line.Amount) || 0;
+      }
+      // Group by description: each asset appears as both a debit and credit line with same description
+      const desc = line.Description || '';
+      const assetName = desc.replace(/^Amortization\s*-\s*/i, '').trim();
+      if (!assetName) continue;
+      if (!assetMap.has(assetName)) {
+        assetMap.set(assetName, { assetName, name: assetName, amount: 0, expenseAccountName: '', accumAccountName: '' });
+      }
+      const a = assetMap.get(assetName);
+      if (detail.PostingType === 'Debit') {
+        a.amount = parseFloat(line.Amount) || 0;
+        a.expenseAccountName = detail.AccountRef?.name || '';
+      } else if (detail.PostingType === 'Credit') {
+        a.accumAccountName = detail.AccountRef?.name || '';
+      }
+    }
+
+    runs.push({
+      month,
+      ranAt: je.MetaData?.CreateTime || je.TxnDate || null,
+      txnDate: je.TxnDate || null,
+      journalEntryId: je.Id || null,
+      memo,
+      totalAmount: Math.round(totalAmount * 100) / 100,
+      assetCount: assetMap.size,
+      assets: Array.from(assetMap.values()),
+      sourceQBO: true,
+    });
+  }
+  return runs;
+}
+
+/**
  * Update the QBO book close date. Pass a YYYY-MM-DD string, or null to clear.
  * Requires full Preferences object with SyncToken.
  */
@@ -796,6 +860,7 @@ module.exports = {
   getPreferences,
   getBookCloseDate,
   updateBookCloseDate,
+  getAmortizationRunsFromQBO,
   getRecentInvoices,
   getRecentExpenses,
   getExpenseTransactions,

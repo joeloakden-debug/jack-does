@@ -1219,6 +1219,8 @@ app.get('/api/admin/clients/:clientId/fixed-assets/export-excel', requireAdmin, 
     const client = CLIENTS[clientId];
     const clientName = client?.name || clientId;
     const clientData = getClientAssets(clientId);
+    // Pull any amortization JEs from QBO so the schedule reflects what's actually posted
+    await hydrateAmortizationRunsFromQBO(clientId, clientData);
 
     const workbook = await excelService.generateWorkbook(clientId, clientName, clientData);
 
@@ -1672,6 +1674,45 @@ function lastDayOfMonthDate(year, monthIndex) {
  *  4. Never go beyond the current calendar month.
  * Returns { month: 'YYYY-MM', reason: string, closeDate: string|null, alreadyRun: bool }
  */
+/**
+ * Hydrate clientData.amortizationRuns from QBO journal entries.
+ * QBO is the source of truth — any amortization JE found there is merged into local
+ * runs (keyed by month). New entries are persisted so subsequent operations are fast.
+ * Safe no-op if QBO is not connected.
+ */
+async function hydrateAmortizationRunsFromQBO(clientId, clientData) {
+  if (!qbo.isConnected(clientId)) return clientData;
+  try {
+    const qboRuns = await qbo.getAmortizationRunsFromQBO(clientId);
+    if (!qboRuns || qboRuns.length === 0) return clientData;
+
+    const localByMonth = new Map((clientData.amortizationRuns || []).map(r => [r.month, r]));
+    let changed = false;
+    for (const qr of qboRuns) {
+      const existing = localByMonth.get(qr.month);
+      if (!existing) {
+        // Brand new — add it
+        clientData.amortizationRuns.push(qr);
+        localByMonth.set(qr.month, qr);
+        changed = true;
+      } else if (!existing.journalEntryId && qr.journalEntryId) {
+        // Local record missing JE id — patch it
+        existing.journalEntryId = qr.journalEntryId;
+        existing.sourceQBO = true;
+        changed = true;
+      }
+    }
+    if (changed) {
+      // Sort by month for sanity
+      clientData.amortizationRuns.sort((a, b) => (a.month || '').localeCompare(b.month || ''));
+      saveFixedAssets(fixedAssetsData);
+    }
+  } catch (e) {
+    console.error('Failed to hydrate amortization runs from QBO:', e.message);
+  }
+  return clientData;
+}
+
 function determineAmortizationMonth(clientData, closeDate) {
   const today = new Date();
   // Start with previous month
@@ -1798,10 +1839,11 @@ app.get('/api/admin/clients/:clientId/fixed-assets/preview-amortization', requir
   // Optional manual month override via query string (YYYY-MM)
   const overrideMonth = req.query.month && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : null;
 
-  // Fetch QBO book close date (best-effort)
+  // Fetch QBO book close date and hydrate amortization run history from QBO (best-effort)
   let closeDate = null;
   if (qbo.isConnected(clientId)) {
     try { closeDate = await qbo.getBookCloseDate(clientId); } catch (e) { /* ignore */ }
+    await hydrateAmortizationRunsFromQBO(clientId, clientData);
   }
 
   let targetMonth, reason;
@@ -1847,6 +1889,8 @@ app.post('/api/admin/clients/:clientId/fixed-assets/run-amortization', requireAd
 
     let closeDate = null;
     try { closeDate = await qbo.getBookCloseDate(amortClientId); } catch (e) { /* ignore */ }
+    // Hydrate from QBO so we never re-post a month that already exists there
+    await hydrateAmortizationRunsFromQBO(amortClientId, clientData);
 
     const targetMonth = overrideMonth || determineAmortizationMonth(clientData, closeDate).month;
 
