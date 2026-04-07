@@ -1314,7 +1314,7 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
 
     // Check which assets are already imported
     const clientData = getClientAssets(req.params.clientId);
-    const existingTxnKeys = new Set(clientData.assets.map(a => a.txnKey).filter(Boolean));
+    const existingTxnKeys = new Set(clientData.assets.filter(a => a.active).map(a => a.txnKey).filter(Boolean));
 
     // Query the General Ledger Detail for all cost accounts to find individual transactions
     const costAccountIds = costAccounts.map(a => a.Id).join(',');
