@@ -1398,7 +1398,7 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
                       qboAccountId: acctId,
                       glAccountName: acctNameResolved,
                       name: assetName,
-                      description: assetDescription !== assetName ? assetDescription : '',
+                      description: assetDescription || '',
                       accountType: 'Fixed Asset',
                       originalCost: amount,
                       txnDate,
@@ -1649,13 +1649,145 @@ function isEligibleForAmort(asset, policy, now, priorAmortTotal) {
   return (curMonth - acqMonth) < (policy.usefulLifeMonths || 60);
 }
 
-// Helper: get total prior amortization for an asset from run history
-function getPriorAmortTotal(assetId, amortizationRuns) {
+/**
+ * Build a robust per-asset, per-month amortization map from run history.
+ * Tolerates mismatched IDs (after re-syncs), missing IDs (QBO-hydrated runs),
+ * and falls back to GL/accum account matching when only one asset is in that group.
+ * Returns Map<assetId, Map<'YYYY-MM', amount>>
+ */
+function buildAmortizationMap(clientData) {
+  const map = new Map();
+  const assets = clientData.assets || [];
+  for (const a of assets) map.set(a.id, new Map());
+
+  const norm = (s) => String(s || '').toLowerCase().trim();
+
+  // Pre-build accum/gl groupings for fallback matching
+  const byAccum = new Map();
+  const byGl = new Map();
+  for (const a of assets) {
+    const policy = getAssetPolicy(a, clientData.assetClasses) || {};
+    const accum = a.accumAccountName || policy.accumAccountName || '';
+    const gl = a.glAccountName || a.assetAccountName || '';
+    if (accum) {
+      if (!byAccum.has(accum)) byAccum.set(accum, []);
+      byAccum.get(accum).push(a);
+    }
+    if (gl) {
+      if (!byGl.has(gl)) byGl.set(gl, []);
+      byGl.get(gl).push(a);
+    }
+  }
+
+  function findAsset(ra) {
+    // 1. Strict id match (new or legacy field name)
+    const raId = ra.assetId || ra.id;
+    if (raId) {
+      const hit = assets.find(a => a.id === raId);
+      if (hit) return hit;
+    }
+    // 2. Exact name match
+    const raName = ra.assetName || ra.name;
+    if (raName) {
+      let hit = assets.find(a => a.name === raName);
+      if (hit) return hit;
+      // 3. Case-insensitive name match
+      const target = norm(raName);
+      hit = assets.find(a => norm(a.name) === target);
+      if (hit) return hit;
+    }
+    // 4. Single-asset accum-account fallback
+    if (ra.accumAccountName) {
+      const grp = byAccum.get(ra.accumAccountName);
+      if (grp && grp.length === 1) return grp[0];
+    }
+    // 5. Single-asset GL-account fallback
+    if (ra.glAccountName) {
+      const grp = byGl.get(ra.glAccountName);
+      if (grp && grp.length === 1) return grp[0];
+    }
+    return null;
+  }
+
+  for (const run of clientData.amortizationRuns || []) {
+    const month = run.month;
+    if (!month) continue;
+    const runAssets = run.assets || [];
+
+    // Track per-asset matches in this run, and remember unmatched amount per accum group
+    const matchedByAccum = new Map(); // accumName -> matched total
+    const unmatchedByAccum = new Map(); // accumName -> unmatched total
+    const allMatchedAssetIds = new Set();
+
+    for (const ra of runAssets) {
+      const asset = findAsset(ra);
+      const amount = parseFloat(ra.amount) || 0;
+      const accum = ra.accumAccountName || '';
+      if (asset) {
+        const inner = map.get(asset.id);
+        inner.set(month, (inner.get(month) || 0) + amount);
+        allMatchedAssetIds.add(asset.id);
+        if (accum) matchedByAccum.set(accum, (matchedByAccum.get(accum) || 0) + amount);
+      } else if (accum) {
+        unmatchedByAccum.set(accum, (unmatchedByAccum.get(accum) || 0) + amount);
+      }
+    }
+
+    // Fallback: if a run has totalAmount but no usable per-asset breakdown, distribute by cost
+    const matchedTotal = Array.from(allMatchedAssetIds).reduce((s, id) => {
+      return s + (map.get(id)?.get(month) || 0);
+    }, 0);
+    const runTotal = parseFloat(run.totalAmount) || 0;
+    if (runTotal > 0 && matchedTotal === 0 && runAssets.length === 0) {
+      // Pure totalAmount-only run — distribute across active assets by cost (single GL only)
+      const active = assets.filter(a => a.active);
+      const totalCost = active.reduce((s, a) => s + (parseFloat(a.originalCost) || 0), 0);
+      if (totalCost > 0 && active.length > 0) {
+        for (const a of active) {
+          const share = (parseFloat(a.originalCost) || 0) / totalCost * runTotal;
+          const inner = map.get(a.id);
+          inner.set(month, (inner.get(month) || 0) + share);
+        }
+      }
+    }
+
+    // Distribute unmatched-per-accum totals across assets in that accum group, weighted by cost
+    for (const [accum, unmatchedAmt] of unmatchedByAccum) {
+      if (unmatchedAmt <= 0) continue;
+      const grp = byAccum.get(accum) || [];
+      if (grp.length === 0) continue;
+      const totalCost = grp.reduce((s, a) => s + (parseFloat(a.originalCost) || 0), 0);
+      if (totalCost <= 0) continue;
+      for (const a of grp) {
+        const share = (parseFloat(a.originalCost) || 0) / totalCost * unmatchedAmt;
+        const inner = map.get(a.id);
+        inner.set(month, (inner.get(month) || 0) + share);
+      }
+    }
+  }
+
+  return map;
+}
+
+// Helper: get total prior amortization for an asset (uses robust matcher)
+function getPriorAmortTotal(assetIdOrAsset, amortizationRunsOrClientData) {
+  // Backward compatible: if a string id + array were passed, use legacy strict match
+  if (typeof assetIdOrAsset === 'string' && Array.isArray(amortizationRunsOrClientData)) {
+    let total = 0;
+    amortizationRunsOrClientData.forEach(run => {
+      const assetEntry = run.assets?.find(a => a.id === assetIdOrAsset || a.assetId === assetIdOrAsset);
+      if (assetEntry) total += parseFloat(assetEntry.amount) || 0;
+    });
+    return total;
+  }
+  // New form: pass the asset object and the full clientData
+  const asset = assetIdOrAsset;
+  const clientData = amortizationRunsOrClientData;
+  const map = buildAmortizationMap(clientData);
+  const inner = map.get(asset.id);
+  if (!inner) return 0;
   let total = 0;
-  amortizationRuns.forEach(run => {
-    const assetEntry = run.assets?.find(a => a.id === assetId);
-    if (assetEntry) total += assetEntry.amount;
-  });
+  for (const v of inner.values()) total += v;
   return total;
 }
 
@@ -1694,13 +1826,8 @@ function buildContinuitySchedule(clientData, asOfMonth, fiscalYearEnd) {
   const groups = new Map();
   const round2 = (n) => Math.round((n || 0) * 100) / 100;
 
-  // Helper to find an asset in a run by id or name (handles legacy + new shapes)
-  const matchEntry = (runAssets, asset) => (runAssets || []).find(ra =>
-    (ra.assetId && ra.assetId === asset.id) ||
-    (ra.id && ra.id === asset.id) ||
-    (ra.assetName && asset.name && ra.assetName === asset.name) ||
-    (ra.name && asset.name && ra.name === asset.name)
-  );
+  // Use robust amortization map (handles id/name/accum/cost-ratio matching)
+  const amortMap = buildAmortizationMap(clientData);
 
   for (const a of clientData.assets || []) {
     if (!a.active) continue;
@@ -1711,11 +1838,8 @@ function buildContinuitySchedule(clientData, asOfMonth, fiscalYearEnd) {
     const monthlyAmort = {};
     for (const mo of months) monthlyAmort[mo] = 0;
 
-    for (const run of clientData.amortizationRuns || []) {
-      const entry = matchEntry(run.assets, a);
-      if (!entry) continue;
-      const amount = parseFloat(entry.amount) || 0;
-      const runMonth = run.month;
+    const inner = amortMap.get(a.id) || new Map();
+    for (const [runMonth, amount] of inner) {
       if (runMonth < fyStart) {
         openingAccum += amount;
       } else if (Object.prototype.hasOwnProperty.call(monthlyAmort, runMonth)) {
@@ -2034,7 +2158,7 @@ function computeAmortizationPreview(clientData, targetMonth) {
 
   clientData.assets.forEach(a => {
     const policy = getAssetPolicy(a, clientData.assetClasses);
-    const priorAmort = getPriorAmortTotal(a.id, clientData.amortizationRuns);
+    const priorAmort = getPriorAmortTotal(a, clientData);
     const acqDate = new Date(a.acquisitionDate);
     const monthsElapsed = (asOf.getFullYear() * 12 + asOf.getMonth()) - (acqDate.getFullYear() * 12 + acqDate.getMonth());
 
