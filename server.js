@@ -1362,16 +1362,47 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
       });
       console.log('[sync] GL Detail column map:', JSON.stringify(colIdx), 'titles:', reportCols.map(c => c.ColTitle));
 
+      // Pre-compute lookup helpers for cost-account membership.
+      // QBO sometimes ignores the report's `account` filter and returns the entire GL,
+      // so we have to gate every section on whether its header matches a known cost
+      // account. We also accept "<AcctNum> <AcctName>" since QBO often prefixes the
+      // account number to the section header.
+      const costAcctNames = new Set();
+      costAccounts.forEach(a => {
+        if (a.Name) costAcctNames.add(a.Name);
+        if (a.FullyQualifiedName) costAcctNames.add(a.FullyQualifiedName);
+        if (a.AcctNum && a.Name) costAcctNames.add(`${a.AcctNum} ${a.Name}`);
+      });
+      const matchCostAccount = (headerName) => {
+        if (!headerName) return null;
+        // Exact match
+        let m = costAccounts.find(a => a.Name === headerName || a.FullyQualifiedName === headerName);
+        if (m) return m;
+        // "<num> <name>" match
+        m = costAccounts.find(a => a.AcctNum && headerName === `${a.AcctNum} ${a.Name}`);
+        if (m) return m;
+        // Strip leading account number prefix and retry
+        const stripped = headerName.replace(/^\d+\s+/, '');
+        m = costAccounts.find(a => a.Name === stripped || a.FullyQualifiedName === stripped);
+        return m || null;
+      };
+
       // GL Detail report structure: rows grouped by account, then individual transactions
       function parseGLRows(rows, parentAccountId, parentAccountName) {
         for (const row of rows) {
           if (row.Header?.ColData) {
             // This is an account header — get the account name
             const acctName = row.Header.ColData[0]?.value || '';
-            // Find the matching QBO account
-            const matchedAcct = costAccounts.find(a => a.Name === acctName || a.FullyQualifiedName === acctName);
-            const acctId = matchedAcct?.Id || parentAccountId;
-            const acctNameResolved = matchedAcct?.Name || acctName || parentAccountName;
+            // Find the matching QBO cost account; skip the section entirely if not a cost account
+            const matchedAcct = matchCostAccount(acctName) || (parentAccountId ? costAccounts.find(a => a.Id === parentAccountId) : null);
+            if (!matchedAcct) {
+              console.log('[sync] skipping non-cost section:', acctName);
+              // Still recurse in case child sections under it are cost accounts
+              if (row.Rows?.Row) parseGLRows(row.Rows.Row, parentAccountId, parentAccountName);
+              continue;
+            }
+            const acctId = matchedAcct.Id;
+            const acctNameResolved = matchedAcct.Name;
 
             // Parse child rows (the actual transactions)
             if (row.Rows?.Row) {
