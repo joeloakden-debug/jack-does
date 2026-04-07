@@ -849,8 +849,72 @@ document.getElementById('client-modal').addEventListener('click', (e) => { if (e
 // FIXED ASSETS (per-client)
 // ========================================
 
+async function loadQBOCloseDate() {
+  if (!selectedClientId) return;
+  const displayEl = document.getElementById('qbo-close-date-display');
+  const inputEl = document.getElementById('qbo-close-date-input');
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/book-close-date`, { headers: { 'Authorization': getAuth() } });
+    const data = await res.json();
+    if (!data.connected) {
+      displayEl.textContent = 'QuickBooks not connected — connect QBO to manage close date';
+      inputEl.value = '';
+      inputEl.disabled = true;
+      document.getElementById('btn-save-close-date').disabled = true;
+      return;
+    }
+    inputEl.disabled = false;
+    document.getElementById('btn-save-close-date').disabled = false;
+    if (data.closeDate) {
+      displayEl.textContent = `books closed through: ${data.closeDate}`;
+      inputEl.value = data.closeDate;
+    } else {
+      displayEl.textContent = 'no close date set in QBO';
+      inputEl.value = '';
+    }
+  } catch (e) {
+    displayEl.textContent = 'failed to load QBO close date';
+  }
+}
+
+async function saveQBOCloseDate() {
+  if (!selectedClientId) return;
+  const inputEl = document.getElementById('qbo-close-date-input');
+  const statusEl = document.getElementById('qbo-close-date-status');
+  const btn = document.getElementById('btn-save-close-date');
+  const newDate = inputEl.value || null;
+  if (newDate && !confirm(`push close date ${newDate} to QuickBooks?\n\nthis will lock all transactions on or before this date in QBO.`)) return;
+  statusEl.style.display = 'none';
+  btn.textContent = 'saving...';
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/book-close-date`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ closeDate: newDate }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--red-600)';
+    } else {
+      statusEl.textContent = `saved to QuickBooks — books closed through ${data.closeDate || '(cleared)'}`;
+      statusEl.style.color = 'var(--green-600)';
+      await loadQBOCloseDate();
+    }
+    statusEl.style.display = '';
+  } catch (e) {
+    statusEl.textContent = 'failed to save close date';
+    statusEl.style.color = 'var(--red-600)';
+    statusEl.style.display = '';
+  }
+  btn.textContent = 'save to QBO';
+  btn.disabled = false;
+}
+
 async function loadClientFixedAssets() {
   if (!selectedClientId) return;
+  loadQBOCloseDate();
   try {
     const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets`, { headers: { 'Authorization': getAuth() } });
     const data = await res.json();
@@ -1600,41 +1664,56 @@ async function deleteAsset(id) {
   } catch (e) { alert('failed to delete asset'); }
 }
 
-async function openRunAmortization() {
+let currentAmortMonth = null;
+
+async function loadAmortizationPreview(monthOverride) {
   const errorEl = document.getElementById('amortization-modal-error');
+  const previewEl = document.getElementById('amortization-preview');
+  const closeEl = document.getElementById('amortization-close-date');
+  const reasonEl = document.getElementById('amortization-month');
+  const monthInput = document.getElementById('amortization-month-input');
+  const confirmBtn = document.getElementById('amortization-confirm');
   errorEl.style.display = 'none';
+  previewEl.innerHTML = '<p style="color:var(--gray-500);">loading...</p>';
   try {
-    const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/preview-amortization`, {
-      headers: { 'Authorization': getAuth() },
-    });
+    const url = `/api/admin/clients/${selectedClientId}/fixed-assets/preview-amortization${monthOverride ? `?month=${monthOverride}` : ''}`;
+    const res = await fetch(url, { headers: { 'Authorization': getAuth() } });
     const data = await res.json();
 
+    currentAmortMonth = data.month;
+    monthInput.value = data.month;
+    closeEl.textContent = data.closeDate ? `qbo books closed through: ${data.closeDate}` : 'no qbo close date set';
+    reasonEl.textContent = data.reason ? `(${data.reason})` : '';
+
     if (data.alreadyRun) {
-      document.getElementById('amortization-month').textContent = `month: ${data.month}`;
-      document.getElementById('amortization-preview').innerHTML =
-        `<p style="color:var(--amber-600);">amortization was already run for ${data.month} on ${new Date(data.runDetails.ranAt).toLocaleDateString()}.<br>total: $${data.runDetails.totalAmount.toFixed(2)} (${data.runDetails.assetCount} assets)</p>`;
-      document.getElementById('amortization-confirm').style.display = 'none';
-      document.getElementById('amortization-modal').style.display = 'flex';
+      previewEl.innerHTML =
+        `<p style="color:var(--amber-600);">amortization was already run for ${data.month}${data.runDetails ? ` on ${new Date(data.runDetails.ranAt).toLocaleDateString()}.<br>total: $${data.runDetails.totalAmount.toFixed(2)} (${data.runDetails.assetCount} assets)` : ''}</p>`;
+      confirmBtn.style.display = 'none';
       return;
     }
     if (data.eligibleCount === 0) {
-      document.getElementById('amortization-month').textContent = `month: ${data.month}`;
-      document.getElementById('amortization-preview').innerHTML = '<p style="color:var(--gray-500);">no eligible assets for amortization this month.</p>';
-      document.getElementById('amortization-confirm').style.display = 'none';
-      document.getElementById('amortization-modal').style.display = 'flex';
+      previewEl.innerHTML = '<p style="color:var(--gray-500);">no eligible assets for amortization this month.</p>';
+      confirmBtn.style.display = 'none';
       return;
     }
 
-    document.getElementById('amortization-month').textContent = `month: ${data.month}`;
-    document.getElementById('amortization-preview').innerHTML = `
+    previewEl.innerHTML = `
       <table class="amortization-preview-table">
         <thead><tr><th>asset</th><th>dr expense</th><th>cr accum</th><th style="text-align:right;">amount</th></tr></thead>
         <tbody>${data.lines.map(l => `<tr><td>${l.assetName}</td><td>${l.expenseAccountName}</td><td>${l.accumAccountName}</td><td style="text-align:right;">$${l.amount.toFixed(2)}</td></tr>`).join('')}</tbody>
         <tfoot><tr><td colspan="3">total</td><td style="text-align:right;">$${data.totalAmount.toFixed(2)}</td></tr></tfoot>
       </table>`;
-    document.getElementById('amortization-confirm').style.display = '';
-    document.getElementById('amortization-modal').style.display = 'flex';
-  } catch (e) { alert('failed to preview amortization'); }
+    confirmBtn.style.display = '';
+  } catch (e) {
+    previewEl.innerHTML = '';
+    errorEl.textContent = 'failed to preview amortization';
+    errorEl.style.display = '';
+  }
+}
+
+async function openRunAmortization() {
+  document.getElementById('amortization-modal').style.display = 'flex';
+  await loadAmortizationPreview(null);
 }
 
 function closeAmortizationModal() { document.getElementById('amortization-modal').style.display = 'none'; }
@@ -1647,6 +1726,7 @@ async function confirmRunAmortization() {
   try {
     const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/run-amortization`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ month: currentAmortMonth }),
     });
     const data = await res.json();
     if (data.error) { errorEl.textContent = data.error; errorEl.style.display = ''; btn.textContent = 'post to quickbooks'; btn.disabled = false; return; }
@@ -1666,8 +1746,13 @@ document.getElementById('asset-modal-cancel').addEventListener('click', closeAss
 document.getElementById('asset-modal-save').addEventListener('click', saveAsset);
 document.getElementById('asset-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeAssetModal(); });
 document.getElementById('btn-run-amortization').addEventListener('click', openRunAmortization);
+document.getElementById('btn-save-close-date').addEventListener('click', saveQBOCloseDate);
 document.getElementById('amortization-cancel').addEventListener('click', closeAmortizationModal);
 document.getElementById('amortization-confirm').addEventListener('click', confirmRunAmortization);
+document.getElementById('amortization-month-input').addEventListener('change', (e) => {
+  const val = e.target.value;
+  if (val && /^\d{4}-\d{2}$/.test(val)) loadAmortizationPreview(val);
+});
 document.getElementById('amortization-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeAmortizationModal(); });
 document.getElementById('btn-sync-qbo-assets').addEventListener('click', syncFromQBO);
 document.getElementById('qbo-sync-cancel').addEventListener('click', () => { document.getElementById('qbo-sync-modal').style.display = 'none'; });

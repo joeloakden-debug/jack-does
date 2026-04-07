@@ -1640,16 +1640,92 @@ function getPriorAmortTotal(assetId, amortizationRuns) {
   return total;
 }
 
-// Preview amortization for a client
-app.get('/api/admin/clients/:clientId/fixed-assets/preview-amortization', requireAdmin, (req, res) => {
-  const clientData = getClientAssets(req.params.clientId);
-  const now = new Date();
-  const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+// ----- Helpers for determining the target amortization period -----
 
-  const alreadyRun = clientData.amortizationRuns.find(r => r.month === currentMonth);
-  if (alreadyRun) {
-    return res.json({ alreadyRun: true, runDetails: alreadyRun, month: currentMonth });
+// Parse "YYYY-MM" string into { year, monthIndex (0-11) }
+function parseMonthStr(s) {
+  const [y, m] = s.split('-').map(Number);
+  return { year: y, monthIndex: m - 1 };
+}
+function formatMonthStr(year, monthIndex) {
+  return `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
+}
+function addMonth(year, monthIndex, delta) {
+  const total = year * 12 + monthIndex + delta;
+  return { year: Math.floor(total / 12), monthIndex: total % 12 };
+}
+// First day of a month as a Date for comparisons
+function firstDayOfMonth(year, monthIndex) {
+  return new Date(year, monthIndex, 1);
+}
+// Last day of a month as Date
+function lastDayOfMonthDate(year, monthIndex) {
+  return new Date(year, monthIndex + 1, 0);
+}
+
+/**
+ * Determine the target amortization month.
+ * Rules:
+ *  1. Start with previous calendar month (e.g. if today is April, start with March).
+ *  2. If QBO's book close date covers that month (last day <= close date), advance forward.
+ *  3. If amortization has already been run for that month, advance forward.
+ *  4. Never go beyond the current calendar month.
+ * Returns { month: 'YYYY-MM', reason: string, closeDate: string|null, alreadyRun: bool }
+ */
+function determineAmortizationMonth(clientData, closeDate) {
+  const today = new Date();
+  // Start with previous month
+  let { year, monthIndex } = addMonth(today.getFullYear(), today.getMonth(), -1);
+  const currentYear = today.getFullYear();
+  const currentMonth = today.getMonth();
+
+  const closeDateObj = closeDate ? new Date(closeDate) : null;
+  const runMonths = new Set((clientData.amortizationRuns || []).map(r => r.month));
+
+  let safety = 0;
+  while (safety++ < 120) {
+    const monthStr = formatMonthStr(year, monthIndex);
+    const lastDay = lastDayOfMonthDate(year, monthIndex);
+
+    // Advance past closed periods
+    if (closeDateObj && lastDay <= closeDateObj) {
+      ({ year, monthIndex } = addMonth(year, monthIndex, 1));
+      continue;
+    }
+    // Advance past months already run
+    if (runMonths.has(monthStr)) {
+      ({ year, monthIndex } = addMonth(year, monthIndex, 1));
+      continue;
+    }
+    // Cap at current calendar month (don't amortize a future month)
+    if (year * 12 + monthIndex > currentYear * 12 + currentMonth) {
+      // All eligible months are already covered — fall back to current month
+      return {
+        month: formatMonthStr(currentYear, currentMonth),
+        closeDate: closeDate || null,
+        alreadyRun: runMonths.has(formatMonthStr(currentYear, currentMonth)),
+        reason: 'all prior months already amortized',
+      };
+    }
+    return {
+      month: monthStr,
+      closeDate: closeDate || null,
+      alreadyRun: false,
+      reason: closeDateObj ? 'first open month after close date' : 'first unposted prior month',
+    };
   }
+  // Fallback (should never hit)
+  return { month: formatMonthStr(currentYear, currentMonth - 1), closeDate: closeDate || null, alreadyRun: false, reason: 'fallback' };
+}
+
+/**
+ * Compute the full preview for a given month.
+ * Returns { lines, totalAmount }
+ */
+function computeAmortizationPreview(clientData, targetMonth) {
+  const { year, monthIndex } = parseMonthStr(targetMonth);
+  // "now" for eligibility checks = last day of target month
+  const asOf = lastDayOfMonthDate(year, monthIndex);
 
   const lines = [];
   let totalAmount = 0;
@@ -1658,81 +1734,162 @@ app.get('/api/admin/clients/:clientId/fixed-assets/preview-amortization', requir
     const policy = getAssetPolicy(a, clientData.assetClasses);
     const priorAmort = getPriorAmortTotal(a.id, clientData.amortizationRuns);
     const acqDate = new Date(a.acquisitionDate);
-    const monthsElapsed = (now.getFullYear() * 12 + now.getMonth()) - (acqDate.getFullYear() * 12 + acqDate.getMonth());
+    const monthsElapsed = (asOf.getFullYear() * 12 + asOf.getMonth()) - (acqDate.getFullYear() * 12 + acqDate.getMonth());
 
-    if (!isEligibleForAmort(a, policy, now, priorAmort)) return;
+    if (!isEligibleForAmort(a, policy, asOf, priorAmort)) return;
 
     const monthly = calcMonthlyAmort(a, policy, monthsElapsed, priorAmort);
     if (monthly <= 0) return;
 
     totalAmount += monthly;
     lines.push({
+      assetId: a.id,
       assetName: a.name,
       amount: monthly,
       method: policy.method,
       className: policy.className || a.glAccountName || '',
+      expenseAccountId: policy.expenseAccountId,
       expenseAccountName: policy.expenseAccountName,
+      accumAccountId: policy.accumAccountId,
       accumAccountName: policy.accumAccountName,
     });
   });
 
-  res.json({ alreadyRun: false, month: currentMonth, eligibleCount: lines.length, totalAmount: Math.round(totalAmount * 100) / 100, lines });
+  return { lines, totalAmount };
+}
+
+// Get QBO book close date
+app.get('/api/admin/clients/:clientId/book-close-date', requireAdmin, async (req, res) => {
+  try {
+    if (!qbo.isConnected(req.params.clientId)) {
+      return res.json({ connected: false, closeDate: null });
+    }
+    const closeDate = await qbo.getBookCloseDate(req.params.clientId);
+    res.json({ connected: true, closeDate });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Update QBO book close date (push back to QBO)
+app.post('/api/admin/clients/:clientId/book-close-date', requireAdmin, async (req, res) => {
+  try {
+    if (!qbo.isConnected(req.params.clientId)) {
+      return res.status(400).json({ error: 'QuickBooks is not connected for this client' });
+    }
+    const { closeDate } = req.body || {};
+    if (closeDate && !/^\d{4}-\d{2}-\d{2}$/.test(closeDate)) {
+      return res.status(400).json({ error: 'closeDate must be YYYY-MM-DD or null' });
+    }
+    const saved = await qbo.updateBookCloseDate(req.params.clientId, closeDate || null);
+    res.json({ success: true, closeDate: saved });
+  } catch (e) {
+    console.error('Update book close date error:', e.message);
+    res.status(500).json({ error: `Failed to update QBO close date: ${e.message}` });
+  }
+});
+
+// Preview amortization for a client
+app.get('/api/admin/clients/:clientId/fixed-assets/preview-amortization', requireAdmin, async (req, res) => {
+  const clientData = getClientAssets(req.params.clientId);
+  const clientId = req.params.clientId;
+
+  // Optional manual month override via query string (YYYY-MM)
+  const overrideMonth = req.query.month && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : null;
+
+  // Fetch QBO book close date (best-effort)
+  let closeDate = null;
+  if (qbo.isConnected(clientId)) {
+    try { closeDate = await qbo.getBookCloseDate(clientId); } catch (e) { /* ignore */ }
+  }
+
+  let targetMonth, reason;
+  if (overrideMonth) {
+    targetMonth = overrideMonth;
+    reason = 'manual override';
+  } else {
+    const determined = determineAmortizationMonth(clientData, closeDate);
+    targetMonth = determined.month;
+    reason = determined.reason;
+  }
+
+  const alreadyRun = clientData.amortizationRuns.find(r => r.month === targetMonth);
+  if (alreadyRun) {
+    return res.json({ alreadyRun: true, runDetails: alreadyRun, month: targetMonth, closeDate, reason });
+  }
+
+  const { lines, totalAmount } = computeAmortizationPreview(clientData, targetMonth);
+
+  res.json({
+    alreadyRun: false,
+    month: targetMonth,
+    closeDate,
+    reason,
+    eligibleCount: lines.length,
+    totalAmount: Math.round(totalAmount * 100) / 100,
+    lines,
+  });
 });
 
 // Run amortization for a client and post JE to QBO
 app.post('/api/admin/clients/:clientId/fixed-assets/run-amortization', requireAdmin, async (req, res) => {
   try {
     const clientData = getClientAssets(req.params.clientId);
-    const now = new Date();
-    const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-
-    const alreadyRun = clientData.amortizationRuns.find(r => r.month === currentMonth);
-    if (alreadyRun) {
-      return res.status(400).json({ error: `Amortization already run for ${currentMonth}` });
-    }
-
     const amortClientId = req.params.clientId;
+
     if (!qbo.isConnected(amortClientId)) {
       return res.status(400).json({ error: 'QuickBooks is not connected for this client. Please connect QBO in the client detail view first.' });
     }
 
-    const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-    const lastDayStr = lastDayOfMonth.toISOString().split('T')[0];
+    // Determine target month: accept override from body, else auto-determine
+    const overrideMonth = req.body?.month && /^\d{4}-\d{2}$/.test(req.body.month) ? req.body.month : null;
 
-    const jeLines = [];
-    let totalAmount = 0;
-    const assetAmounts = [];
+    let closeDate = null;
+    try { closeDate = await qbo.getBookCloseDate(amortClientId); } catch (e) { /* ignore */ }
 
-    clientData.assets.forEach(a => {
-      const policy = getAssetPolicy(a, clientData.assetClasses);
-      const priorAmort = getPriorAmortTotal(a.id, clientData.amortizationRuns);
-      const acqDate = new Date(a.acquisitionDate);
-      const monthsElapsed = (now.getFullYear() * 12 + now.getMonth()) - (acqDate.getFullYear() * 12 + acqDate.getMonth());
+    const targetMonth = overrideMonth || determineAmortizationMonth(clientData, closeDate).month;
 
-      if (!isEligibleForAmort(a, policy, now, priorAmort)) return;
-
-      const monthly = calcMonthlyAmort(a, policy, monthsElapsed, priorAmort);
-      if (monthly <= 0) return;
-
-      totalAmount += monthly;
-      assetAmounts.push({ id: a.id, name: a.name, amount: monthly });
-      jeLines.push({ accountId: policy.expenseAccountId, accountName: policy.expenseAccountName, description: `Amortization - ${a.name}`, amount: monthly, type: 'debit' });
-      jeLines.push({ accountId: policy.accumAccountId, accountName: policy.accumAccountName, description: `Amortization - ${a.name}`, amount: monthly, type: 'credit' });
-    });
-
-    if (assetAmounts.length === 0) {
-      return res.status(400).json({ error: 'No eligible assets for amortization this month' });
+    // Guard: don't post to a closed period
+    if (closeDate) {
+      const { year, monthIndex } = parseMonthStr(targetMonth);
+      const lastDay = lastDayOfMonthDate(year, monthIndex);
+      if (lastDay <= new Date(closeDate)) {
+        return res.status(400).json({ error: `Target month ${targetMonth} falls within closed period (close date ${closeDate})` });
+      }
     }
 
-    const clientName = CLIENTS[req.params.clientId]?.name || req.params.clientId;
+    const alreadyRun = clientData.amortizationRuns.find(r => r.month === targetMonth);
+    if (alreadyRun) {
+      return res.status(400).json({ error: `Amortization already run for ${targetMonth}` });
+    }
+
+    const { year, monthIndex } = parseMonthStr(targetMonth);
+    const asOf = lastDayOfMonthDate(year, monthIndex);
+    const lastDayStr = asOf.toISOString().split('T')[0];
+
+    const { lines: previewLines, totalAmount } = computeAmortizationPreview(clientData, targetMonth);
+
+    if (previewLines.length === 0) {
+      return res.status(400).json({ error: `No eligible assets for amortization in ${targetMonth}` });
+    }
+
+    const jeLines = [];
+    const assetAmounts = [];
+    for (const line of previewLines) {
+      assetAmounts.push({ id: line.assetId, name: line.assetName, amount: line.amount });
+      jeLines.push({ accountId: line.expenseAccountId, accountName: line.expenseAccountName, description: `Amortization - ${line.assetName}`, amount: line.amount, type: 'debit' });
+      jeLines.push({ accountId: line.accumAccountId, accountName: line.accumAccountName, description: `Amortization - ${line.assetName}`, amount: line.amount, type: 'credit' });
+    }
+
+    const clientName = CLIENTS[amortClientId]?.name || amortClientId;
     const result = await qbo.createJournalEntry({
       date: lastDayStr,
-      memo: `Fixed asset amortization - ${currentMonth} - ${clientName}`,
+      memo: `Fixed asset amortization - ${targetMonth} - ${clientName}`,
       lines: jeLines,
     }, amortClientId);
 
     const runRecord = {
-      month: currentMonth,
+      month: targetMonth,
       ranAt: new Date().toISOString(),
       journalEntryId: result.Id || null,
       totalAmount: Math.round(totalAmount * 100) / 100,

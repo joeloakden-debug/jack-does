@@ -345,6 +345,70 @@ async function getCompanyInfo(clientId = 'default') {
 }
 
 /**
+ * Get Company Preferences (includes BookCloseDate / closing date setting)
+ * Returns the raw Preferences object; closing date is at:
+ *   preferences.AccountingInfoPrefs.BookCloseDate (YYYY-MM-DD string, or undefined)
+ */
+async function getPreferences(clientId = 'default') {
+  const qb = await getQBClient(clientId);
+  return new Promise((resolve, reject) => {
+    qb.findPreferenceses({}, (err, result) => {
+      if (err) return reject(err);
+      // Preferences is a singleton per company; return the first (or the object itself)
+      if (result?.QueryResponse?.Preferences?.[0]) {
+        resolve(result.QueryResponse.Preferences[0]);
+      } else if (Array.isArray(result) && result[0]) {
+        resolve(result[0]);
+      } else {
+        resolve(result);
+      }
+    });
+  });
+}
+
+/**
+ * Get the QBO book close date (closing date) for a client.
+ * Returns a YYYY-MM-DD string or null if none set.
+ */
+async function getBookCloseDate(clientId = 'default') {
+  try {
+    const prefs = await getPreferences(clientId);
+    return prefs?.AccountingInfoPrefs?.BookCloseDate || null;
+  } catch (e) {
+    console.error('Failed to fetch book close date:', e.message);
+    return null;
+  }
+}
+
+/**
+ * Update the QBO book close date. Pass a YYYY-MM-DD string, or null to clear.
+ * Requires full Preferences object with SyncToken.
+ */
+async function updateBookCloseDate(clientId = 'default', newDate) {
+  const qb = await getQBClient(clientId);
+  const prefs = await getPreferences(clientId);
+  if (!prefs) throw new Error('Could not load QBO Preferences');
+
+  // Mutate the AccountingInfoPrefs block
+  const updated = JSON.parse(JSON.stringify(prefs));
+  updated.AccountingInfoPrefs = updated.AccountingInfoPrefs || {};
+  if (newDate) {
+    updated.AccountingInfoPrefs.BookCloseDate = newDate;
+  } else {
+    delete updated.AccountingInfoPrefs.BookCloseDate;
+  }
+  // sparse update requires Id + SyncToken
+  updated.sparse = true;
+
+  return new Promise((resolve, reject) => {
+    qb.updatePreferences(updated, (err, result) => {
+      if (err) return reject(err);
+      resolve(result?.AccountingInfoPrefs?.BookCloseDate || null);
+    });
+  });
+}
+
+/**
  * Helper to build date filter criteria for find* methods
  */
 function dateFilter(startDate, endDate) {
@@ -729,6 +793,9 @@ module.exports = {
   getGeneralLedger,
   getGeneralLedgerForAccount,
   getCompanyInfo,
+  getPreferences,
+  getBookCloseDate,
+  updateBookCloseDate,
   getRecentInvoices,
   getRecentExpenses,
   getExpenseTransactions,

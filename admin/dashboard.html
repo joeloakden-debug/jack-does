@@ -123,6 +123,21 @@
           <div id="amortization-status" class="settings-success" style="display:none;"></div>
           <div id="last-amortization-run" style="font-size:0.82rem;color:var(--gray-400);margin-bottom:16px;"></div>
 
+          <!-- Month-end close card -->
+          <div id="month-end-close-card" style="border:1px solid var(--gray-200);border-radius:8px;padding:14px 16px;margin-bottom:20px;background:var(--gray-50);">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+              <div>
+                <h3 style="font-size:0.9rem;font-weight:600;color:var(--gray-700);text-transform:uppercase;letter-spacing:0.5px;margin:0 0 4px 0;">month-end close (QBO)</h3>
+                <p id="qbo-close-date-display" style="font-size:0.88rem;color:var(--gray-600);margin:0;">loading...</p>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <input type="date" id="qbo-close-date-input" style="padding:6px 10px;border:1px solid var(--gray-300);border-radius:4px;font-size:0.88rem;">
+                <button class="btn-add-client" id="btn-save-close-date" style="background:var(--blue-600);">save to QBO</button>
+              </div>
+            </div>
+            <div id="qbo-close-date-status" style="font-size:0.82rem;margin-top:8px;display:none;"></div>
+          </div>
+
           <!-- Amortization Policies (by GL account) -->
           <div id="asset-classes-section" style="margin-bottom:24px;">
             <h3 style="font-size:0.9rem;font-weight:600;color:var(--gray-500);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px;">amortization policies (by GL account)</h3>
@@ -282,7 +297,14 @@
       <div class="modal-overlay" id="amortization-modal" style="display:none;">
         <div class="modal-card">
           <h3>run amortization</h3>
-          <p id="amortization-month" style="font-size:0.88rem;color:var(--gray-600);margin-bottom:12px;"></p>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+            <label style="font-size:0.88rem;color:var(--gray-700);display:flex;align-items:center;gap:6px;">
+              month:
+              <input type="month" id="amortization-month-input" style="padding:4px 8px;border:1px solid var(--gray-300);border-radius:4px;font-size:0.88rem;">
+            </label>
+            <span id="amortization-close-date" style="font-size:0.8rem;color:var(--gray-500);"></span>
+          </div>
+          <p id="amortization-month" style="font-size:0.8rem;color:var(--gray-500);margin-bottom:12px;font-style:italic;"></p>
           <div id="amortization-preview"></div>
           <div id="amortization-modal-error" class="login-error" style="display:none;"></div>
           <div class="modal-actions">
