@@ -469,6 +469,49 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
   const qb = await getQBClient(clientId);
   if (!costAccountIds || costAccountIds.size === 0) return [];
 
+  // Fetch tax rates once and figure out which are recoverable. In Canada GST/HST is
+  // recoverable (input tax credit), PST/QST/RST is not. Non-recoverable tax has to be
+  // capitalized into the asset cost, so we need to know which TaxRateRefs to add back.
+  const recoverableRateIds = new Set();
+  try {
+    const trResult = await qbPromise(qb, 'findTaxRates', []);
+    const rates = trResult?.QueryResponse?.TaxRate || [];
+    console.log('[acquisitions] tax rates:', rates.map(r => `${r.Id}:${r.Name}`).join(', '));
+    for (const r of rates) {
+      const name = (r.Name || '').toUpperCase();
+      // Recoverable: GST, HST, or any rate explicitly tagged ITC
+      if (/\b(GST|HST|ITC)\b/.test(name) && !/\b(PST|QST|RST)\b/.test(name)) {
+        recoverableRateIds.add(String(r.Id));
+      }
+    }
+    console.log('[acquisitions] recoverable rate ids:', Array.from(recoverableRateIds));
+  } catch (e) {
+    console.error('[acquisitions] failed to load tax rates:', e.message);
+  }
+
+  // Compute the non-recoverable tax that should be capitalized into a given line's cost.
+  // We attribute a tax line to a cost line by matching NetAmountTaxable === line.Amount.
+  // If multiple cost lines share the same NetAmountTaxable we split proportionally.
+  function computeNonRecoverableTaxForLine(txnTaxDetail, lineAmount, totalCostLineCount) {
+    const taxLines = txnTaxDetail?.TaxLine || [];
+    let extra = 0;
+    for (const tl of taxLines) {
+      const det = tl.TaxLineDetail || tl;
+      const rateId = det.TaxRateRef?.value;
+      if (!rateId || recoverableRateIds.has(String(rateId))) continue;
+      const taxAmt = parseFloat(tl.Amount || det.Amount) || 0;
+      const taxable = parseFloat(det.NetAmountTaxable);
+      // If NetAmountTaxable matches this line, attribute the full tax line to it.
+      // Otherwise fall back to even split across all cost lines on this txn.
+      if (!isNaN(taxable) && Math.abs(taxable - lineAmount) < 0.01) {
+        extra += taxAmt;
+      } else if (totalCostLineCount > 0) {
+        extra += taxAmt / totalCostLineCount;
+      }
+    }
+    return extra;
+  }
+
   // Group all lines hitting a cost account by (txnType, txnId, accountId) so multi-line
   // postings (e.g. base + PST both debiting the same fixed-asset account) collapse into a
   // single acquisition with the summed amount and the most descriptive line description.
@@ -535,11 +578,15 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
       const lines = bill.Line || [];
       const touches = lines.some(l => l.AccountBasedExpenseLineDetail && isCost(l.AccountBasedExpenseLineDetail.AccountRef?.value));
       if (touches) console.log('[acquisitions] Bill touching cost acct:', JSON.stringify(bill));
+      const costLineCount = lines.filter(l => l.AccountBasedExpenseLineDetail && isCost(l.AccountBasedExpenseLineDetail.AccountRef?.value)).length;
       for (const line of lines) {
         const det = line.AccountBasedExpenseLineDetail;
         if (!det) continue;
         const acctId = det.AccountRef?.value;
         if (!isCost(acctId)) continue;
+        const baseAmount = parseFloat(line.Amount) || 0;
+        const nonRecTax = computeNonRecoverableTaxForLine(bill.TxnTaxDetail, baseAmount, costLineCount);
+        const lineCost = baseAmount + nonRecTax;
         const key = `Bill|${bill.Id}|${acctId}`;
         upsert(key, {
           txnType: 'Bill',
@@ -549,7 +596,7 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
           accountName: det.AccountRef?.name || '',
           vendorName: bill.VendorRef?.name || '',
           docNum: bill.DocNumber || '',
-        }, parseFloat(line.Amount) || 0, line.Description);
+        }, lineCost, line.Description);
       }
     }
   } catch (e) {
@@ -565,11 +612,16 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
       const lines = pur.Line || [];
       const touches = lines.some(l => l.AccountBasedExpenseLineDetail && isCost(l.AccountBasedExpenseLineDetail.AccountRef?.value));
       if (touches) console.log('[acquisitions] Purchase touching cost acct:', JSON.stringify(pur));
+      const costLineCount = lines.filter(l => l.AccountBasedExpenseLineDetail && isCost(l.AccountBasedExpenseLineDetail.AccountRef?.value)).length;
       for (const line of lines) {
         const det = line.AccountBasedExpenseLineDetail;
         if (!det) continue;
         const acctId = det.AccountRef?.value;
         if (!isCost(acctId)) continue;
+        const baseAmount = parseFloat(line.Amount) || 0;
+        const nonRecTax = computeNonRecoverableTaxForLine(pur.TxnTaxDetail, baseAmount, costLineCount);
+        const lineCost = baseAmount + nonRecTax;
+        console.log('[acquisitions] cost line in Purchase', pur.Id, ': base', baseAmount, '+ nonRecTax', nonRecTax, '=', lineCost);
         const key = `Purchase|${pur.Id}|${acctId}`;
         upsert(key, {
           txnType: 'Purchase',
@@ -579,7 +631,7 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
           accountName: det.AccountRef?.name || '',
           vendorName: pur.EntityRef?.name || '',
           docNum: pur.DocNumber || '',
-        }, parseFloat(line.Amount) || 0, line.Description);
+        }, lineCost, line.Description);
       }
     }
   } catch (e) {
