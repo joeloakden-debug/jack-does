@@ -489,27 +489,34 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
     console.error('[acquisitions] failed to load tax rates:', e.message);
   }
 
-  // Compute the non-recoverable tax that should be capitalized into a given line's cost.
-  // We attribute a tax line to a cost line by matching NetAmountTaxable === line.Amount.
-  // If multiple cost lines share the same NetAmountTaxable we split proportionally.
-  function computeNonRecoverableTaxForLine(txnTaxDetail, lineAmount, totalCostLineCount) {
-    const taxLines = txnTaxDetail?.TaxLine || [];
-    let extra = 0;
+  // Compute the TOTAL non-recoverable tax on a txn across all tax lines. We then prorate
+  // that total across cost lines by their share of the cost-line base amount. This is
+  // far more robust than per-line attribution via NetAmountTaxable (which is sometimes
+  // missing or set on a combined basis).
+  function computeTotalNonRecoverableTax(txnTaxDetail) {
+    if (!txnTaxDetail) return 0;
+    const taxLines = txnTaxDetail.TaxLine || [];
+    let nonRec = 0;
+    let recSum = 0;
     for (const tl of taxLines) {
       const det = tl.TaxLineDetail || tl;
       const rateId = det.TaxRateRef?.value;
-      if (!rateId || recoverableRateIds.has(String(rateId))) continue;
-      const taxAmt = parseFloat(tl.Amount || det.Amount) || 0;
-      const taxable = parseFloat(det.NetAmountTaxable);
-      // If NetAmountTaxable matches this line, attribute the full tax line to it.
-      // Otherwise fall back to even split across all cost lines on this txn.
-      if (!isNaN(taxable) && Math.abs(taxable - lineAmount) < 0.01) {
-        extra += taxAmt;
-      } else if (totalCostLineCount > 0) {
-        extra += taxAmt / totalCostLineCount;
+      const taxAmt = parseFloat(tl.Amount != null ? tl.Amount : det.Amount) || 0;
+      if (rateId && recoverableRateIds.has(String(rateId))) {
+        recSum += taxAmt;
+      } else if (rateId) {
+        nonRec += taxAmt;
+      } else {
+        // No rate ref → can't classify; skip. Will be caught by TotalTax fallback below.
       }
     }
-    return extra;
+    // Fallback: if we have a TotalTax but no classifiable TaxLine rate refs, and we know
+    // recoverable sum, the remainder is non-recoverable.
+    const totalTax = parseFloat(txnTaxDetail.TotalTax) || 0;
+    if (nonRec === 0 && totalTax > 0 && recSum < totalTax - 0.01) {
+      nonRec = totalTax - recSum;
+    }
+    return nonRec;
   }
 
   // Group all lines hitting a cost account by (txnType, txnId, accountId) so multi-line
@@ -569,6 +576,46 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
     console.error('[acquisitions] JournalEntry scan failed:', e.message);
   }
 
+  // Helper: process a Bill or Purchase document, prorating non-recoverable tax across
+  // cost lines proportionally to their base amount. Refetches the doc by ID to make sure
+  // TxnTaxDetail.TaxLine is fully populated (list queries sometimes omit nested fields).
+  async function processExpenseDoc(docType, docId, listDoc) {
+    let doc = listDoc;
+    try {
+      const fetcher = docType === 'Bill' ? 'getBill' : 'getPurchase';
+      const fresh = await qbPromise(qb, fetcher, [docId]);
+      if (fresh) doc = fresh;
+    } catch (e) {
+      console.error(`[acquisitions] failed to refetch ${docType} ${docId}:`, e.message);
+    }
+    const lines = doc.Line || [];
+    const costLines = lines.filter(l => l.AccountBasedExpenseLineDetail && isCost(l.AccountBasedExpenseLineDetail.AccountRef?.value));
+    if (costLines.length === 0) return;
+    const costBaseTotal = costLines.reduce((s, l) => s + (parseFloat(l.Amount) || 0), 0);
+    const totalNonRec = computeTotalNonRecoverableTax(doc.TxnTaxDetail);
+    console.log(`[acquisitions] ${docType} ${docId}: costBaseTotal=${costBaseTotal} totalNonRecTax=${totalNonRec}`);
+    for (const line of costLines) {
+      const det = line.AccountBasedExpenseLineDetail;
+      const acctId = det.AccountRef?.value;
+      const baseAmount = parseFloat(line.Amount) || 0;
+      // Prorate non-recoverable tax by this line's share of the cost-line base
+      const share = costBaseTotal > 0 ? baseAmount / costBaseTotal : 0;
+      const nonRecTax = totalNonRec * share;
+      const lineCost = baseAmount + nonRecTax;
+      console.log(`[acquisitions]   line acct=${acctId} base=${baseAmount} +nonRecTax=${nonRecTax} = ${lineCost}`);
+      const key = `${docType}|${docId}|${acctId}`;
+      upsert(key, {
+        txnType: docType,
+        txnId: docId,
+        txnDate: doc.TxnDate || '',
+        accountId: String(acctId),
+        accountName: det.AccountRef?.name || '',
+        vendorName: (docType === 'Bill' ? doc.VendorRef?.name : doc.EntityRef?.name) || '',
+        docNum: doc.DocNumber || '',
+      }, lineCost, line.Description);
+    }
+  }
+
   // ---------- Bill ----------
   try {
     const billResult = await qbPromise(qb, 'findBills', []);
@@ -577,27 +624,9 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
     for (const bill of bills) {
       const lines = bill.Line || [];
       const touches = lines.some(l => l.AccountBasedExpenseLineDetail && isCost(l.AccountBasedExpenseLineDetail.AccountRef?.value));
-      if (touches) console.log('[acquisitions] Bill touching cost acct:', JSON.stringify(bill));
-      const costLineCount = lines.filter(l => l.AccountBasedExpenseLineDetail && isCost(l.AccountBasedExpenseLineDetail.AccountRef?.value)).length;
-      for (const line of lines) {
-        const det = line.AccountBasedExpenseLineDetail;
-        if (!det) continue;
-        const acctId = det.AccountRef?.value;
-        if (!isCost(acctId)) continue;
-        const baseAmount = parseFloat(line.Amount) || 0;
-        const nonRecTax = computeNonRecoverableTaxForLine(bill.TxnTaxDetail, baseAmount, costLineCount);
-        const lineCost = baseAmount + nonRecTax;
-        const key = `Bill|${bill.Id}|${acctId}`;
-        upsert(key, {
-          txnType: 'Bill',
-          txnId: bill.Id,
-          txnDate: bill.TxnDate || '',
-          accountId: String(acctId),
-          accountName: det.AccountRef?.name || '',
-          vendorName: bill.VendorRef?.name || '',
-          docNum: bill.DocNumber || '',
-        }, lineCost, line.Description);
-      }
+      if (!touches) continue;
+      console.log('[acquisitions] Bill touching cost acct:', JSON.stringify(bill));
+      await processExpenseDoc('Bill', bill.Id, bill);
     }
   } catch (e) {
     console.error('[acquisitions] Bill scan failed:', e.message);
@@ -611,28 +640,9 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
     for (const pur of purchases) {
       const lines = pur.Line || [];
       const touches = lines.some(l => l.AccountBasedExpenseLineDetail && isCost(l.AccountBasedExpenseLineDetail.AccountRef?.value));
-      if (touches) console.log('[acquisitions] Purchase touching cost acct:', JSON.stringify(pur));
-      const costLineCount = lines.filter(l => l.AccountBasedExpenseLineDetail && isCost(l.AccountBasedExpenseLineDetail.AccountRef?.value)).length;
-      for (const line of lines) {
-        const det = line.AccountBasedExpenseLineDetail;
-        if (!det) continue;
-        const acctId = det.AccountRef?.value;
-        if (!isCost(acctId)) continue;
-        const baseAmount = parseFloat(line.Amount) || 0;
-        const nonRecTax = computeNonRecoverableTaxForLine(pur.TxnTaxDetail, baseAmount, costLineCount);
-        const lineCost = baseAmount + nonRecTax;
-        console.log('[acquisitions] cost line in Purchase', pur.Id, ': base', baseAmount, '+ nonRecTax', nonRecTax, '=', lineCost);
-        const key = `Purchase|${pur.Id}|${acctId}`;
-        upsert(key, {
-          txnType: 'Purchase',
-          txnId: pur.Id,
-          txnDate: pur.TxnDate || '',
-          accountId: String(acctId),
-          accountName: det.AccountRef?.name || '',
-          vendorName: pur.EntityRef?.name || '',
-          docNum: pur.DocNumber || '',
-        }, lineCost, line.Description);
-      }
+      if (!touches) continue;
+      console.log('[acquisitions] Purchase touching cost acct:', JSON.stringify(pur));
+      await processExpenseDoc('Purchase', pur.Id, pur);
     }
   } catch (e) {
     console.error('[acquisitions] Purchase scan failed:', e.message);
