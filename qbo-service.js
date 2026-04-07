@@ -500,6 +500,9 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
     console.log('[acquisitions] scanned', jes.length, 'journal entries');
     for (const je of jes) {
       const lines = je.Line || [];
+      // Does any line touch a cost account? If so, dump the whole JE so we can see tax/extra fields.
+      const touches = lines.some(l => l.JournalEntryLineDetail && isCost(l.JournalEntryLineDetail.AccountRef?.value));
+      if (touches) console.log('[acquisitions] JE touching cost acct:', JSON.stringify(je));
       for (const line of lines) {
         const det = line.JournalEntryLineDetail;
         if (!det) continue;
@@ -530,6 +533,8 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
     console.log('[acquisitions] scanned', bills.length, 'bills');
     for (const bill of bills) {
       const lines = bill.Line || [];
+      const touches = lines.some(l => l.AccountBasedExpenseLineDetail && isCost(l.AccountBasedExpenseLineDetail.AccountRef?.value));
+      if (touches) console.log('[acquisitions] Bill touching cost acct:', JSON.stringify(bill));
       for (const line of lines) {
         const det = line.AccountBasedExpenseLineDetail;
         if (!det) continue;
@@ -558,6 +563,8 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
     console.log('[acquisitions] scanned', purchases.length, 'purchases');
     for (const pur of purchases) {
       const lines = pur.Line || [];
+      const touches = lines.some(l => l.AccountBasedExpenseLineDetail && isCost(l.AccountBasedExpenseLineDetail.AccountRef?.value));
+      if (touches) console.log('[acquisitions] Purchase touching cost acct:', JSON.stringify(pur));
       for (const line of lines) {
         const det = line.AccountBasedExpenseLineDetail;
         if (!det) continue;
