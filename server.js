@@ -1355,7 +1355,6 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
         else if (title === 'credit' || type === 'credt_amt' || type === 'credit') colIdx.credit = i;
       });
       console.log('[sync] GL Detail column map:', JSON.stringify(colIdx), 'titles:', reportCols.map(c => c.ColTitle));
-      let sampledRow = false;
 
       // GL Detail report structure: rows grouped by account, then individual transactions
       function parseGLRows(rows, parentAccountId, parentAccountName) {
@@ -1373,7 +1372,7 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
               for (const txnRow of row.Rows.Row) {
                 if (txnRow.ColData) {
                   const cols = txnRow.ColData;
-                  if (!sampledRow) { sampledRow = true; console.log('[sync] sample ColData row:', JSON.stringify(cols)); }
+                  console.log('[sync] row in', acctNameResolved, ':', JSON.stringify(cols));
                   const get = (idx) => (idx >= 0 && cols[idx]) ? (cols[idx].value || '') : '';
                   const txnDate = get(colIdx.date);
                   const txnType = get(colIdx.txnType);
