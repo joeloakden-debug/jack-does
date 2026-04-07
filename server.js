@@ -1301,12 +1301,18 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
     const allAccounts = Array.isArray(accounts) ? accounts : [];
     const fixedAssetAccounts = allAccounts.filter(a => a.AccountType === 'Fixed Asset' && a.Active);
 
-    // Separate cost accounts from accumulated amortization/depreciation accounts
+    // Separate cost accounts from accumulated amortization/depreciation accounts.
+    // QBO doesn't always populate AccountSubType, so also recognize accum accounts by
+    // a name match against "accumulated amortization|depreciation".
     const accumSubTypes = ['AccumulatedDepreciation', 'AccumulatedAmortization'];
-    const costAccounts = fixedAssetAccounts
-      .filter(a => !a.AccountSubType || !accumSubTypes.includes(a.AccountSubType));
-    const accumAccounts = fixedAssetAccounts
-      .filter(a => a.AccountSubType && accumSubTypes.includes(a.AccountSubType));
+    const accumNameRe = /accumulated\s*(amortization|depreciation|amort|depr)/i;
+    const isAccum = (a) => (a.AccountSubType && accumSubTypes.includes(a.AccountSubType))
+      || accumNameRe.test(a.Name || '')
+      || accumNameRe.test(a.FullyQualifiedName || '');
+    const costAccounts = fixedAssetAccounts.filter(a => !isAccum(a));
+    const accumAccounts = fixedAssetAccounts.filter(isAccum);
+    console.log('[sync] cost accounts:', costAccounts.map(a => `${a.Id} ${a.Name}`));
+    console.log('[sync] accum accounts:', accumAccounts.map(a => `${a.Id} ${a.Name}`));
 
     // Get expense accounts for auto-suggesting amortization expense account
     const expenseAccounts = allAccounts
