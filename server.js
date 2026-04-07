@@ -1322,205 +1322,64 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
     const clientData = getClientAssets(req.params.clientId);
     const existingTxnKeys = new Set(clientData.assets.filter(a => a.active).map(a => a.txnKey).filter(Boolean));
 
-    // Query the General Ledger Detail for all cost accounts to find individual transactions
-    const costAccountIds = costAccounts.map(a => a.Id).join(',');
-    let glReport = null;
-    if (costAccountIds) {
-      try {
-        glReport = await qbo.getGeneralLedgerForAccount(costAccountIds, syncClientId);
-      } catch (e) {
-        console.error('Could not fetch GL detail for fixed assets:', e.message);
-      }
+    // Read fixed-asset acquisitions directly from JE / Bill / Purchase records.
+    // Each entry corresponds to a single line that debits a cost account, with the
+    // line description as the asset name and the line amount as the cost.
+    const costAccountIdSet = new Set(costAccounts.map(a => String(a.Id)));
+    const costAccountById = new Map(costAccounts.map(a => [String(a.Id), a]));
+    let acquisitions = [];
+    try {
+      acquisitions = await qbo.getFixedAssetAcquisitions(syncClientId, costAccountIdSet);
+    } catch (e) {
+      console.error('Could not fetch fixed-asset acquisitions from QBO:', e.message);
     }
+    console.log('[sync] acquisitions:', acquisitions.length);
 
-    // Parse GL report into individual asset transactions
     const importable = [];
+    for (const acq of acquisitions) {
+      if (!(acq.amount > 0)) continue;
+      const costAcct = costAccountById.get(String(acq.accountId));
+      if (!costAcct) continue;
 
-    if (glReport?.Rows?.Row) {
-      // Build column index map from report metadata. We start with -1 (not present) and
-      // resolve each field by walking glReport.Columns.Column. QBO can return very few
-      // columns (e.g. just Memo/Description, Split, Amount, Balance for some accounts), so
-      // hardcoded positions are unsafe.
-      const reportCols = Array.isArray(glReport.Columns?.Column)
-        ? glReport.Columns.Column
-        : (glReport.Columns?.Column ? [glReport.Columns.Column] : []);
-      console.log('[sync] raw report columns:', JSON.stringify(reportCols));
+      // Build a stable txnKey so re-syncing doesn't duplicate
+      const txnKey = `${acq.txnType}-${acq.txnId}-${acq.accountId}-${acq.amount}`;
+      if (existingTxnKeys.has(txnKey)) continue;
 
-      const colIdx = { date: -1, txnType: -1, docNum: -1, name: -1, memo: -1, amount: -1, debit: -1, credit: -1, split: -1 };
-      reportCols.forEach((c, i) => {
-        const title = String(c.ColTitle || '').toLowerCase().trim();
-        const type = String(c.ColType || '').toLowerCase().trim();
-        if (title.includes('memo') || title.includes('description') || type === 'memo') colIdx.memo = i;
-        else if (title === 'date' || type === 'tx_date' || type === 'date') colIdx.date = i;
-        else if (title.includes('transaction type') || type === 'txn_type') colIdx.txnType = i;
-        else if (title === 'num' || title.includes('doc num') || type === 'doc_num') colIdx.docNum = i;
-        else if (title === 'name' || type === 'name' || title === 'vendor') colIdx.name = i;
-        else if (title === 'split' || type === 'split_acc' || type === 'split') colIdx.split = i;
-        else if (title === 'amount' || type === 'subt_amount' || type === 'amount') colIdx.amount = i;
-        else if (title === 'debit' || type === 'debt_amt' || type === 'debit') colIdx.debit = i;
-        else if (title === 'credit' || type === 'credt_amt' || type === 'credit') colIdx.credit = i;
+      // Auto-match accumulated amortization account by name proximity
+      const nameBase = (costAcct.Name || '').toLowerCase().replace(/[-–—]/g, ' ').trim();
+      const matchedAccum = accumAccounts.find(acc => {
+        const accumName = (acc.Name || '').toLowerCase().replace(/[-–—]/g, ' ').trim();
+        return accumName.includes(nameBase)
+          || nameBase.includes(accumName.replace(/accumulated\s*(amortization|depreciation)\s*/i, '').trim());
       });
-      console.log('[sync] GL Detail column map:', JSON.stringify(colIdx), 'titles:', reportCols.map(c => c.ColTitle));
-
-      // Pre-compute lookup helpers for cost-account membership.
-      // QBO sometimes ignores the report's `account` filter and returns the entire GL,
-      // so we have to gate every section on whether its header matches a known cost
-      // account. We also accept "<AcctNum> <AcctName>" since QBO often prefixes the
-      // account number to the section header.
-      const costAcctNames = new Set();
-      costAccounts.forEach(a => {
-        if (a.Name) costAcctNames.add(a.Name);
-        if (a.FullyQualifiedName) costAcctNames.add(a.FullyQualifiedName);
-        if (a.AcctNum && a.Name) costAcctNames.add(`${a.AcctNum} ${a.Name}`);
+      const matchedExpense = expenseAccounts.find(exp => {
+        const expName = (exp.Name || '').toLowerCase();
+        return expName.includes('amortization') || expName.includes('depreciation');
       });
-      const matchCostAccount = (headerName) => {
-        if (!headerName) return null;
-        // Exact match
-        let m = costAccounts.find(a => a.Name === headerName || a.FullyQualifiedName === headerName);
-        if (m) return m;
-        // "<num> <name>" match
-        m = costAccounts.find(a => a.AcctNum && headerName === `${a.AcctNum} ${a.Name}`);
-        if (m) return m;
-        // Strip leading account number prefix and retry
-        const stripped = headerName.replace(/^\d+\s+/, '');
-        m = costAccounts.find(a => a.Name === stripped || a.FullyQualifiedName === stripped);
-        return m || null;
-      };
 
-      // GL Detail report structure: rows grouped by account, then individual transactions
-      function parseGLRows(rows, parentAccountId, parentAccountName) {
-        for (const row of rows) {
-          if (row.Header?.ColData) {
-            // This is an account header — get the account name
-            const acctName = row.Header.ColData[0]?.value || '';
-            // Find the matching QBO cost account; skip the section entirely if not a cost account
-            const matchedAcct = matchCostAccount(acctName) || (parentAccountId ? costAccounts.find(a => a.Id === parentAccountId) : null);
-            if (!matchedAcct) {
-              console.log('[sync] skipping non-cost section:', acctName);
-              // Still recurse in case child sections under it are cost accounts
-              if (row.Rows?.Row) parseGLRows(row.Rows.Row, parentAccountId, parentAccountName);
-              continue;
-            }
-            const acctId = matchedAcct.Id;
-            const acctNameResolved = matchedAcct.Name;
+      // Asset name = the line description on the source transaction (what the user typed
+      // into the JE/Bill/Expense). Fall back gracefully only if the line had no description.
+      const assetName = acq.description || acq.vendorName || costAcct.Name;
+      const assetDescription = acq.description || '';
 
-            // Parse child rows (the actual transactions)
-            if (row.Rows?.Row) {
-              for (const txnRow of row.Rows.Row) {
-                if (txnRow.ColData) {
-                  const cols = txnRow.ColData;
-                  console.log('[sync] row in', acctNameResolved, ':', JSON.stringify(cols));
-                  const get = (idx) => (idx >= 0 && cols[idx]) ? (cols[idx].value || '') : '';
-                  const txnDate = get(colIdx.date);
-                  const txnType = get(colIdx.txnType);
-                  const docNum = get(colIdx.docNum);
-                  const vendorName = get(colIdx.name);
-                  const memo = get(colIdx.memo);
-                  // parseAmount: strip currency symbols, commas, parens, and parse with full precision
-                  // Important: never round — preserve exact GL value
-                  const parseAmount = (v) => {
-                    if (v === null || v === undefined || v === '') return 0;
-                    const s = String(v).replace(/[$,\s]/g, '').replace(/^\((.*)\)$/, '-$1');
-                    const n = parseFloat(s);
-                    return isNaN(n) ? 0 : n;
-                  };
-                  // Try amount column first; fall back to debit/credit columns
-                  let amount = parseAmount(get(colIdx.amount));
-                  if (amount === 0) amount = parseAmount(get(colIdx.debit));
-                  if (amount === 0) amount = parseAmount(get(colIdx.credit));
-
-                  // Skip zero amounts and closing/total rows
-                  if (amount <= 0) continue;
-
-                  // Build a unique key for this transaction to avoid re-importing
-                  const txnKey = `${acctId}-${txnDate}-${amount}-${memo || docNum}`;
-
-                  if (!existingTxnKeys.has(txnKey)) {
-                    // Auto-match accumulated amortization account
-                    const nameBase = acctNameResolved.toLowerCase().replace(/[-–—]/g, ' ').trim();
-                    const matchedAccum = accumAccounts.find(acc => {
-                      const accumName = acc.Name.toLowerCase().replace(/[-–—]/g, ' ').trim();
-                      return accumName.includes(nameBase) || nameBase.includes(accumName.replace(/accumulated\s*(amortization|depreciation)\s*/i, '').trim());
-                    });
-
-                    // Auto-match expense account
-                    const matchedExpense = expenseAccounts.find(exp => {
-                      const expName = exp.Name.toLowerCase();
-                      return expName.includes('amortization') || expName.includes('depreciation');
-                    }) || expenseAccounts.find(exp => {
-                      const words = nameBase.split(/\s+/);
-                      const expName = exp.Name.toLowerCase();
-                      return words.some(w => w.length > 3 && expName.includes(w));
-                    });
-
-                    // Use memo/vendor as the asset description (e.g. "Asus Vivobook")
-                    const assetDescription = memo || vendorName || '';
-                    const assetName = assetDescription || acctNameResolved;
-
-                    importable.push({
-                      qboAccountId: acctId,
-                      glAccountName: acctNameResolved,
-                      name: assetName,
-                      description: assetDescription || '',
-                      accountType: 'Fixed Asset',
-                      originalCost: amount,
-                      txnDate,
-                      txnType,
-                      docNum,
-                      vendorName,
-                      memo,
-                      txnKey,
-                      suggestedAccumAccountId: matchedAccum?.Id || '',
-                      suggestedAccumAccountName: matchedAccum?.Name || '',
-                      suggestedExpenseAccountId: matchedExpense?.Id || '',
-                      suggestedExpenseAccountName: matchedExpense?.Name || '',
-                    });
-                  }
-                }
-                // Recurse into sub-rows if present
-                if (txnRow.Rows?.Row) {
-                  parseGLRows([txnRow], acctId, acctNameResolved);
-                }
-              }
-            }
-          }
-          // Also recurse for nested structures
-          if (row.Rows?.Row && !row.Header) {
-            parseGLRows(row.Rows.Row, parentAccountId, parentAccountName);
-          }
-        }
-      }
-
-      parseGLRows(glReport.Rows.Row, null, null);
-    }
-
-    // Fallback: if GL report returned nothing, fall back to account-level import
-    if (importable.length === 0 && costAccounts.length > 0) {
-      const existingQboIds = new Set(clientData.assets.map(a => a.qboAccountId).filter(Boolean));
-      for (const a of costAccounts) {
-        if (existingQboIds.has(a.Id)) continue;
-        const nameBase = a.Name.toLowerCase().replace(/[-–—]/g, ' ').trim();
-        const matchedAccum = accumAccounts.find(acc => {
-          const accumName = acc.Name.toLowerCase().replace(/[-–—]/g, ' ').trim();
-          return accumName.includes(nameBase) || nameBase.includes(accumName.replace(/accumulated\s*(amortization|depreciation)\s*/i, '').trim());
-        });
-        const matchedExpense = expenseAccounts.find(exp => exp.Name.toLowerCase().includes('amortization') || exp.Name.toLowerCase().includes('depreciation'));
-
-        importable.push({
-          qboAccountId: a.Id,
-          glAccountName: a.Name,
-          name: a.Name || a.FullyQualifiedName,
-          description: a.Description || '',
-          accountType: a.AccountSubType || a.AccountType,
-          originalCost: a.CurrentBalance ?? 0,
-          txnDate: a.MetaData?.CreateTime ? a.MetaData.CreateTime.split('T')[0] : null,
-          txnKey: null,
-          suggestedAccumAccountId: matchedAccum?.Id || '',
-          suggestedAccumAccountName: matchedAccum?.Name || '',
-          suggestedExpenseAccountId: matchedExpense?.Id || '',
-          suggestedExpenseAccountName: matchedExpense?.Name || '',
-        });
-      }
+      importable.push({
+        qboAccountId: String(costAcct.Id),
+        glAccountName: costAcct.Name,
+        name: assetName,
+        description: assetDescription,
+        accountType: 'Fixed Asset',
+        originalCost: acq.amount,
+        txnDate: acq.txnDate,
+        txnType: acq.txnType,
+        docNum: acq.docNum,
+        vendorName: acq.vendorName || '',
+        memo: acq.description || '',
+        txnKey,
+        suggestedAccumAccountId: matchedAccum?.Id || '',
+        suggestedAccumAccountName: matchedAccum?.Name || '',
+        suggestedExpenseAccountId: matchedExpense?.Id || '',
+        suggestedExpenseAccountName: matchedExpense?.Name || '',
+      });
     }
 
     res.json({ accounts: importable });

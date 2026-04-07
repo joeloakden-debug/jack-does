@@ -445,6 +445,127 @@ async function getAmortizationRunsFromQBO(clientId = 'default', sinceDate = null
 }
 
 /**
+ * Fetch fixed-asset acquisitions directly from QBO transactions.
+ *
+ * Walks JournalEntry, Bill, and Purchase (Expense/Check/CreditCardCharge) records and
+ * extracts every line whose AccountRef matches one of the supplied cost-account IDs.
+ * Returns one entry per acquisition line so the caller can build importable assets.
+ *
+ *  costAccountIds: Set<string> of QBO account Ids that are fixed-asset cost accounts
+ *
+ * Returned shape:
+ *   {
+ *     txnType: 'JournalEntry' | 'Bill' | 'Purchase',
+ *     txnId: string,
+ *     txnDate: 'YYYY-MM-DD',
+ *     accountId: string,        // cost-account hit
+ *     description: string,      // line description (becomes the asset name)
+ *     amount: number,           // positive cost
+ *     vendorName: string,       // entity ref name if available
+ *     docNum: string,
+ *   }
+ */
+async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = new Set()) {
+  const qb = await getQBClient(clientId);
+  if (!costAccountIds || costAccountIds.size === 0) return [];
+
+  const out = [];
+  const isCost = (id) => id && costAccountIds.has(String(id));
+
+  // ---------- JournalEntry ----------
+  try {
+    const jeResult = await qbPromise(qb, 'findJournalEntries', []);
+    const jes = jeResult?.QueryResponse?.JournalEntry || [];
+    console.log('[acquisitions] scanned', jes.length, 'journal entries');
+    for (const je of jes) {
+      const lines = je.Line || [];
+      for (const line of lines) {
+        const det = line.JournalEntryLineDetail;
+        if (!det) continue;
+        // Acquisitions are debits to a cost account
+        if (det.PostingType !== 'Debit') continue;
+        const acctId = det.AccountRef?.value;
+        if (!isCost(acctId)) continue;
+        out.push({
+          txnType: 'JournalEntry',
+          txnId: je.Id,
+          txnDate: je.TxnDate || '',
+          accountId: String(acctId),
+          accountName: det.AccountRef?.name || '',
+          description: (line.Description || '').trim(),
+          amount: parseFloat(line.Amount) || 0,
+          vendorName: det.Entity?.EntityRef?.name || '',
+          docNum: je.DocNumber || '',
+        });
+      }
+    }
+  } catch (e) {
+    console.error('[acquisitions] JournalEntry scan failed:', e.message);
+  }
+
+  // ---------- Bill ----------
+  try {
+    const billResult = await qbPromise(qb, 'findBills', []);
+    const bills = billResult?.QueryResponse?.Bill || [];
+    console.log('[acquisitions] scanned', bills.length, 'bills');
+    for (const bill of bills) {
+      const lines = bill.Line || [];
+      for (const line of lines) {
+        const det = line.AccountBasedExpenseLineDetail;
+        if (!det) continue;
+        const acctId = det.AccountRef?.value;
+        if (!isCost(acctId)) continue;
+        out.push({
+          txnType: 'Bill',
+          txnId: bill.Id,
+          txnDate: bill.TxnDate || '',
+          accountId: String(acctId),
+          accountName: det.AccountRef?.name || '',
+          description: (line.Description || '').trim(),
+          amount: parseFloat(line.Amount) || 0,
+          vendorName: bill.VendorRef?.name || '',
+          docNum: bill.DocNumber || '',
+        });
+      }
+    }
+  } catch (e) {
+    console.error('[acquisitions] Bill scan failed:', e.message);
+  }
+
+  // ---------- Purchase (Expense / Check / CreditCardCharge / Cash) ----------
+  try {
+    const purchResult = await qbPromise(qb, 'findPurchases', []);
+    const purchases = purchResult?.QueryResponse?.Purchase || [];
+    console.log('[acquisitions] scanned', purchases.length, 'purchases');
+    for (const pur of purchases) {
+      const lines = pur.Line || [];
+      for (const line of lines) {
+        const det = line.AccountBasedExpenseLineDetail;
+        if (!det) continue;
+        const acctId = det.AccountRef?.value;
+        if (!isCost(acctId)) continue;
+        out.push({
+          txnType: 'Purchase',
+          txnId: pur.Id,
+          txnDate: pur.TxnDate || '',
+          accountId: String(acctId),
+          accountName: det.AccountRef?.name || '',
+          description: (line.Description || '').trim(),
+          amount: parseFloat(line.Amount) || 0,
+          vendorName: pur.EntityRef?.name || '',
+          docNum: pur.DocNumber || '',
+        });
+      }
+    }
+  } catch (e) {
+    console.error('[acquisitions] Purchase scan failed:', e.message);
+  }
+
+  console.log('[acquisitions] total cost-account lines found:', out.length);
+  return out;
+}
+
+/**
  * Update the QBO book close date. Pass a YYYY-MM-DD string, or null to clear.
  * Requires full Preferences object with SyncToken.
  */
@@ -861,6 +982,7 @@ module.exports = {
   getBookCloseDate,
   updateBookCloseDate,
   getAmortizationRunsFromQBO,
+  getFixedAssetAcquisitions,
   getRecentInvoices,
   getRecentExpenses,
   getExpenseTransactions,
