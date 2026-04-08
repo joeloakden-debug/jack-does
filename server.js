@@ -1229,8 +1229,8 @@ app.get('/api/admin/clients/:clientId/fixed-assets/export-excel', requireAdmin, 
     const client = CLIENTS[clientId];
     const clientName = client?.name || clientId;
     const clientData = getClientAssets(clientId);
-    // Pull any amortization JEs from QBO so the schedule reflects what's actually posted
-    await hydrateAmortizationRunsFromQBO(clientId, clientData);
+    // Amortization runs are kept in sync with QBO via the "Sync from QBO" flow, so the
+    // saved JSON is the source of truth here. No live QBO call on export.
 
     // Build (or recompute) the continuity schedule for the most recent run month
     const runs = clientData.amortizationRuns || [];
@@ -1382,7 +1382,20 @@ app.post('/api/admin/clients/:clientId/fixed-assets/sync-qbo', requireAdmin, asy
       });
     }
 
-    res.json({ accounts: importable });
+    // Rehydrate posted amortization runs from QBO so the saved JSON reflects any
+    // edits/deletions/backdated adjustments made directly in QBO. This is a full
+    // replace, keyed by month, so the UI and Excel export share the same cached data.
+    try {
+      await hydrateAmortizationRunsFromQBO(syncClientId, clientData);
+    } catch (e) {
+      console.error('[sync] amortization rehydrate failed:', e.message);
+    }
+
+    // Record when this client last completed a full QBO sync
+    clientData.lastSyncedAt = new Date().toISOString();
+    saveFixedAssets(fixedAssetsData);
+
+    res.json({ accounts: importable, lastSyncedAt: clientData.lastSyncedAt });
   } catch (error) {
     console.error('QBO sync error:', error.message);
     res.status(500).json({ error: `Failed to fetch from QBO: ${error.message}` });
@@ -1983,37 +1996,41 @@ function lastDayOfMonthDate(year, monthIndex) {
  */
 /**
  * Hydrate clientData.amortizationRuns from QBO journal entries.
- * QBO is the source of truth — any amortization JE found there is merged into local
- * runs (keyed by month). New entries are persisted so subsequent operations are fast.
- * Safe no-op if QBO is not connected.
+ *
+ * QBO is the source of truth — this does a FULL REPLACE of the amortization run history
+ * on the client, so any edit, deletion, or backdated adjustment made directly in QBO
+ * flows through on the next sync. Local-only metadata (snapshot, reconciliation) is
+ * carried forward for months that still exist in QBO, keyed by month.
+ *
+ * Safe no-op if QBO is not connected. If the QBO fetch fails we leave the existing
+ * local runs untouched rather than blowing them away.
  */
 async function hydrateAmortizationRunsFromQBO(clientId, clientData) {
   if (!qbo.isConnected(clientId)) return clientData;
   try {
     const qboRuns = await qbo.getAmortizationRunsFromQBO(clientId);
-    if (!qboRuns || qboRuns.length === 0) return clientData;
+    if (!Array.isArray(qboRuns)) return clientData;
 
+    // Preserve local-only metadata (snapshot, reconciliation) keyed by month so a
+    // fresh rehydrate doesn't wipe out cached snapshots for months QBO still has.
     const localByMonth = new Map((clientData.amortizationRuns || []).map(r => [r.month, r]));
-    let changed = false;
-    for (const qr of qboRuns) {
-      const existing = localByMonth.get(qr.month);
-      if (!existing) {
-        // Brand new — add it
-        clientData.amortizationRuns.push(qr);
-        localByMonth.set(qr.month, qr);
-        changed = true;
-      } else if (!existing.journalEntryId && qr.journalEntryId) {
-        // Local record missing JE id — patch it
-        existing.journalEntryId = qr.journalEntryId;
-        existing.sourceQBO = true;
-        changed = true;
+    const replaced = qboRuns.map(qr => {
+      const local = localByMonth.get(qr.month);
+      if (local) {
+        return {
+          ...qr,
+          snapshot: local.snapshot || null,
+          reconciliation: local.reconciliation || null,
+          // Keep the original local ranAt if QBO didn't give us one
+          ranAt: qr.ranAt || local.ranAt || null,
+        };
       }
-    }
-    if (changed) {
-      // Sort by month for sanity
-      clientData.amortizationRuns.sort((a, b) => (a.month || '').localeCompare(b.month || ''));
-      saveFixedAssets(fixedAssetsData);
-    }
+      return qr;
+    });
+    replaced.sort((a, b) => (a.month || '').localeCompare(b.month || ''));
+    clientData.amortizationRuns = replaced;
+    clientData.amortizationRunsSyncedAt = new Date().toISOString();
+    saveFixedAssets(fixedAssetsData);
   } catch (e) {
     console.error('Failed to hydrate amortization runs from QBO:', e.message);
   }
@@ -2293,9 +2310,7 @@ app.post('/api/admin/clients/:clientId/fixed-assets/run-amortization', requireAd
 // Get the latest continuity schedule snapshot for a client
 app.get('/api/admin/clients/:clientId/fixed-assets/continuity-schedule', requireAdmin, async (req, res) => {
   const clientData = getClientAssets(req.params.clientId);
-  if (qbo.isConnected(req.params.clientId)) {
-    await hydrateAmortizationRunsFromQBO(req.params.clientId, clientData);
-  }
+  // Amortization runs are rehydrated during "Sync from QBO", not on every read.
   // Determine the most recent run month, or fall back to current month
   const runs = clientData.amortizationRuns || [];
   const sorted = runs.slice().sort((a, b) => (b.month || '').localeCompare(a.month || ''));
@@ -2313,7 +2328,7 @@ app.get('/api/admin/clients/:clientId/fixed-assets/continuity-schedule', require
 app.post('/api/admin/clients/:clientId/fixed-assets/reconcile', requireAdmin, async (req, res) => {
   try {
     const clientData = getClientAssets(req.params.clientId);
-    await hydrateAmortizationRunsFromQBO(req.params.clientId, clientData);
+    // Reconciliation reads cached run history; use "Sync from QBO" to refresh it.
     const runs = clientData.amortizationRuns || [];
     const sorted = runs.slice().sort((a, b) => (b.month || '').localeCompare(a.month || ''));
     const asOfMonth = sorted[0]?.month;
