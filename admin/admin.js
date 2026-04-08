@@ -866,67 +866,39 @@ document.getElementById('client-modal').addEventListener('click', (e) => { if (e
 // FIXED ASSETS (per-client)
 // ========================================
 
+// Read-only view of the QBO book close date.
+//
+// The QBO Preferences API technically accepts BookCloseDate updates but silently
+// no-ops them — Intuit reserves that field for their own UI. So we display the
+// current value and deep-link out to QBO's settings page for edits, then offer
+// a refresh button so the user can re-pull after setting it there.
 async function loadQBOCloseDate() {
   if (!selectedClientId) return;
   const displayEl = document.getElementById('qbo-close-date-display');
-  const inputEl = document.getElementById('qbo-close-date-input');
+  const openBtn = document.getElementById('btn-open-qbo-close-settings');
+  const refreshBtn = document.getElementById('btn-refresh-close-date');
   try {
     const res = await fetch(`/api/admin/clients/${selectedClientId}/book-close-date`, { headers: { 'Authorization': getAuth() } });
     const data = await res.json();
     if (!data.connected) {
-      displayEl.textContent = 'QuickBooks not connected — connect QBO to manage close date';
-      inputEl.value = '';
-      inputEl.disabled = true;
-      document.getElementById('btn-save-close-date').disabled = true;
+      displayEl.textContent = 'QuickBooks not connected — connect QBO to see the close date';
+      openBtn.style.display = 'none';
+      refreshBtn.style.display = 'none';
       return;
     }
-    inputEl.disabled = false;
-    document.getElementById('btn-save-close-date').disabled = false;
     if (data.closeDate) {
-      displayEl.textContent = `books closed through: ${data.closeDate}`;
-      inputEl.value = data.closeDate;
+      displayEl.innerHTML = `books closed through: <strong style="color:var(--gray-900);">${data.closeDate}</strong>`;
     } else {
       displayEl.textContent = 'no close date set in QBO';
-      inputEl.value = '';
     }
+    // Deep link — QBO doesn't expose a stable direct URL to the close-books
+    // dialog, but the account-and-settings advanced page gets you one click away.
+    openBtn.href = 'https://app.qbo.intuit.com/app/accountandsettings';
+    openBtn.style.display = '';
+    refreshBtn.style.display = '';
   } catch (e) {
     displayEl.textContent = 'failed to load QBO close date';
   }
-}
-
-async function saveQBOCloseDate() {
-  if (!selectedClientId) return;
-  const inputEl = document.getElementById('qbo-close-date-input');
-  const statusEl = document.getElementById('qbo-close-date-status');
-  const btn = document.getElementById('btn-save-close-date');
-  const newDate = inputEl.value || null;
-  if (newDate && !confirm(`push close date ${newDate} to QuickBooks?\n\nthis will lock all transactions on or before this date in QBO.`)) return;
-  statusEl.style.display = 'none';
-  btn.textContent = 'saving...';
-  btn.disabled = true;
-  try {
-    const res = await fetch(`/api/admin/clients/${selectedClientId}/book-close-date`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
-      body: JSON.stringify({ closeDate: newDate }),
-    });
-    const data = await res.json();
-    if (data.error) {
-      statusEl.textContent = data.error;
-      statusEl.style.color = 'var(--red-600)';
-    } else {
-      statusEl.textContent = `saved to QuickBooks — books closed through ${data.closeDate || '(cleared)'}`;
-      statusEl.style.color = 'var(--green-600)';
-      await loadQBOCloseDate();
-    }
-    statusEl.style.display = '';
-  } catch (e) {
-    statusEl.textContent = 'failed to save close date';
-    statusEl.style.color = 'var(--red-600)';
-    statusEl.style.display = '';
-  }
-  btn.textContent = 'save to QBO';
-  btn.disabled = false;
 }
 
 async function loadClientFixedAssets() {
@@ -1886,7 +1858,7 @@ document.getElementById('asset-modal-cancel').addEventListener('click', closeAss
 document.getElementById('asset-modal-save').addEventListener('click', saveAsset);
 document.getElementById('asset-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeAssetModal(); });
 document.getElementById('btn-run-amortization').addEventListener('click', openRunAmortization);
-document.getElementById('btn-save-close-date').addEventListener('click', saveQBOCloseDate);
+document.getElementById('btn-refresh-close-date').addEventListener('click', loadQBOCloseDate);
 document.getElementById('amortization-cancel').addEventListener('click', closeAmortizationModal);
 document.getElementById('amortization-confirm').addEventListener('click', confirmRunAmortization);
 document.getElementById('amortization-month-input').addEventListener('change', (e) => {

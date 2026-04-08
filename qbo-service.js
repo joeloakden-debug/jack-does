@@ -657,51 +657,12 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
   return out;
 }
 
-/**
- * Update the QBO book close date. Pass a YYYY-MM-DD string, or null to clear.
- * Requires full Preferences object with SyncToken.
- */
-async function updateBookCloseDate(clientId = 'default', newDate) {
-  const qb = await getQBClient(clientId);
-  const prefs = await getPreferences(clientId);
-  if (!prefs) throw new Error('Could not load QBO Preferences');
-  if (!prefs.Id || !prefs.SyncToken) {
-    throw new Error('QBO Preferences missing Id or SyncToken — cannot perform sparse update');
-  }
-
-  // Build a minimal sparse update payload. Sending the entire Preferences object
-  // back can cause QBO to reject or silently no-op the change because some nested
-  // sub-prefs are read-only. Sparse updates only need Id + SyncToken + the fields
-  // you actually want to change.
-  // Merge with the existing AccountingInfoPrefs so we don't clobber sibling fields
-  // (FirstMonthOfFiscalYear, TaxYearMonth, etc).
-  const existingAcct = prefs.AccountingInfoPrefs || {};
-  const acctPrefs = { ...existingAcct };
-  if (newDate) {
-    acctPrefs.BookCloseDate = newDate;
-  } else {
-    delete acctPrefs.BookCloseDate;
-  }
-
-  const payload = {
-    Id: prefs.Id,
-    SyncToken: prefs.SyncToken,
-    sparse: true,
-    AccountingInfoPrefs: acctPrefs,
-  };
-
-  return new Promise((resolve, reject) => {
-    qb.updatePreferences(payload, (err, result) => {
-      if (err) {
-        console.error('[qbo] updatePreferences error:', err?.fault?.error || err.message || err);
-        return reject(err);
-      }
-      const saved = result?.AccountingInfoPrefs?.BookCloseDate || null;
-      console.log(`[qbo] BookCloseDate update — requested: ${newDate}, saved: ${saved}`);
-      resolve(saved);
-    });
-  });
-}
+// NOTE: there's intentionally no updateBookCloseDate function. QBO's
+// Preferences API silently no-ops third-party writes to BookCloseDate (returns
+// 200, but the response and the next GET both show the old value). This was
+// confirmed via live logging: a PUT with sparse AccountingInfoPrefs.BookCloseDate
+// came back with saved=null. Users must set the close date in QBO's own UI
+// (Gear → Account and Settings → Advanced → Close the books).
 
 /**
  * Helper to build date filter criteria for find* methods
@@ -1090,7 +1051,6 @@ module.exports = {
   getCompanyInfo,
   getPreferences,
   getBookCloseDate,
-  updateBookCloseDate,
   getAmortizationRunsFromQBO,
   getFixedAssetAcquisitions,
   getRecentInvoices,

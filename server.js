@@ -2168,23 +2168,10 @@ app.get('/api/admin/clients/:clientId/book-close-date', requireAdmin, async (req
   }
 });
 
-// Update QBO book close date (push back to QBO)
-app.post('/api/admin/clients/:clientId/book-close-date', requireAdmin, async (req, res) => {
-  try {
-    if (!qbo.isConnected(req.params.clientId)) {
-      return res.status(400).json({ error: 'QuickBooks is not connected for this client' });
-    }
-    const { closeDate } = req.body || {};
-    if (closeDate && !/^\d{4}-\d{2}-\d{2}$/.test(closeDate)) {
-      return res.status(400).json({ error: 'closeDate must be YYYY-MM-DD or null' });
-    }
-    const saved = await qbo.updateBookCloseDate(req.params.clientId, closeDate || null);
-    res.json({ success: true, closeDate: saved });
-  } catch (e) {
-    console.error('Update book close date error:', e.message);
-    res.status(500).json({ error: `Failed to update QBO close date: ${e.message}` });
-  }
-});
+// NOTE: there's no POST endpoint for book-close-date. QBO's Preferences API
+// silently no-ops third-party BookCloseDate writes — confirmed by logging a
+// live update that returned saved=null. The UI now shows the current value
+// (GET above) as read-only and directs users to edit it in QBO directly.
 
 // Preview amortization for a client
 app.get('/api/admin/clients/:clientId/fixed-assets/preview-amortization', requireAdmin, async (req, res) => {
