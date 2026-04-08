@@ -138,15 +138,12 @@
           <div id="reconciliation-panel" style="display:none;margin-bottom:16px;"></div>
           <div id="last-amortization-run" style="font-size:0.82rem;color:var(--gray-400);margin-bottom:16px;"></div>
 
-          <!-- Amortization Policies (by GL account) -->
+          <!-- Amortization Policies (by GL account) — also shows class-level totals -->
           <div id="asset-classes-section" style="margin-bottom:24px;">
-            <h3 style="font-size:0.9rem;font-weight:600;color:var(--gray-500);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px;">amortization policies (by GL account)</h3>
+            <h3 style="font-size:0.9rem;font-weight:600;color:var(--gray-500);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px;">asset classes (policy &amp; totals)</h3>
+            <p style="font-size:0.78rem;color:var(--gray-500);margin:-6px 0 12px 0;">Per-asset detail lives in the exported Excel file. The UI summarizes by class only.</p>
             <div id="asset-classes-list"></div>
           </div>
-
-          <!-- Individual Assets -->
-          <h3 style="font-size:0.9rem;font-weight:600;color:var(--gray-500);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px;">individual assets</h3>
-          <div id="fixed-assets-list" class="clients-list"></div>
         </div>
       </div>
 
@@ -210,10 +207,6 @@
             <input type="number" step="0.01" id="class-declining-rate" placeholder="30">
           </div>
           <div class="form-group">
-            <label>salvage value ($)</label>
-            <input type="number" step="0.01" id="class-salvage" placeholder="0.00">
-          </div>
-          <div class="form-group">
             <label>QBO amortization expense account</label>
             <select id="class-account-expense" class="edit-account-select"><option value="">select account...</option></select>
           </div>
@@ -222,8 +215,9 @@
             <select id="class-account-accum" class="edit-account-select"><option value="">select account...</option></select>
           </div>
           <div id="class-ai-suggestion" style="display:none;font-size:0.78rem;color:var(--blue-600);background:var(--blue-50);padding:8px 12px;border-radius:6px;margin-bottom:8px;"></div>
-          <div style="margin-bottom:12px;">
+          <div style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;">
             <button class="btn-suggest-amort" id="btn-suggest-class-amort" type="button">AI suggest policy</button>
+            <button class="btn-suggest-amort" id="btn-apply-class-ai" type="button" style="display:none;background:var(--green-600);">apply AI suggestion</button>
           </div>
           <div id="class-modal-error" class="login-error" style="display:none;"></div>
           <div class="modal-actions">

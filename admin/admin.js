@@ -962,6 +962,7 @@ async function loadClientFixedAssets() {
     }
 
     if (missingGLAccounts.size > 0) {
+      const newlyCreatedClassIds = [];
       for (const [glName, info] of missingGLAccounts) {
         try {
           const createRes = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/classes`, {
@@ -972,7 +973,6 @@ async function loadClientFixedAssets() {
               glAccountName: info.glAccountName,
               method: 'straight-line',
               usefulLifeMonths: 36,
-              salvageValue: 0,
               expenseAccountId: info.expenseAccountId,
               expenseAccountName: info.expenseAccountName,
               accumAccountId: info.accumAccountId,
@@ -980,11 +980,18 @@ async function loadClientFixedAssets() {
             }),
           });
           const createData = await createRes.json();
-          if (createData.assetClass) assetClasses.push(createData.assetClass);
+          if (createData.assetClass) {
+            assetClasses.push(createData.assetClass);
+            newlyCreatedClassIds.push(createData.assetClass.id);
+          }
         } catch (e) { console.error('Failed to auto-create class:', e); }
       }
-      // Run AI suggestions for newly created classes
-      runAISuggestionsForClasses();
+      // Run AI suggestions ONLY for the classes we just created — never re-assess
+      // existing policies. The suggestion is saved as advisory data; the user has
+      // to open the edit-policy modal and click "apply" to actually adopt it.
+      if (newlyCreatedClassIds.length > 0) {
+        runAISuggestionsForClasses(newlyCreatedClassIds);
+      }
     }
 
     // Backfill expense/accum accounts on existing classes that are missing them
@@ -1031,24 +1038,42 @@ function getAssetClass(asset) {
 
 /**
  * Calculate the monthly amortization amount for an asset based on its class policy.
- * Returns null if no policy is set.
+ * Salvage value is read from the asset (it's an asset-level concept, not a class-level
+ * concept). Returns null if no policy is set.
  */
 function calcMonthlyAmort(asset, cls) {
   if (!cls || !asset.originalCost) return null;
   const cost = parseFloat(asset.originalCost) || 0;
-  const salvage = parseFloat(cls.salvageValue) || 0;
+  const salvage = parseFloat(asset.salvageValue) || 0;
 
   if (cls.method === 'declining-balance') {
     const rate = parseFloat(cls.decliningRate) || 0;
     if (!rate) return null;
-    // First month: annual rate / 12 applied to (cost - salvage)
     return (cost - salvage) * rate / 12;
   } else {
-    // Straight-line
     const months = parseInt(cls.usefulLifeMonths) || 0;
     if (!months) return null;
     return (cost - salvage) / months;
   }
+}
+
+/**
+ * Sum life-to-date amortization runs for a single asset (matched by id, then by name).
+ * Used to compute accumulated amortization at the asset and class level for the UI.
+ */
+function ltdAmortForAsset(asset) {
+  let total = 0;
+  for (const run of fixedAssetRuns || []) {
+    for (const a of run.assets || []) {
+      if ((a.assetId && a.assetId === asset.id) ||
+          (a.id && a.id === asset.id) ||
+          (a.name && a.name === asset.name) ||
+          (a.assetName && a.assetName === asset.name)) {
+        total += parseFloat(a.amount) || 0;
+      }
+    }
+  }
+  return total;
 }
 
 function renderAssetClasses() {
@@ -1060,8 +1085,18 @@ function renderAssetClasses() {
     return;
   }
 
+  const fmtCurrency = (n) => '$' + (n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
   list.innerHTML = assetClasses.map(c => {
-    const assetCount = allFixedAssets.filter(a => a.active && (a.assetAccountId === c.glAccountId || a.glAccountName === c.glAccountName)).length;
+    const classAssets = allFixedAssets.filter(a => a.active && (a.assetAccountId === c.glAccountId || a.glAccountName === c.glAccountName));
+    const assetCount = classAssets.length;
+    let totalCost = 0, totalAccum = 0;
+    for (const a of classAssets) {
+      totalCost += parseFloat(a.originalCost) || 0;
+      totalAccum += ltdAmortForAsset(a);
+    }
+    const totalNbv = totalCost - totalAccum;
+
     const methodLabel = c.method === 'declining-balance'
       ? `declining balance @ ${((c.decliningRate || 0) * 100).toFixed(0)}%/yr`
       : `straight-line, ${c.usefulLifeMonths || '—'} months`;
@@ -1079,11 +1114,15 @@ function renderAssetClasses() {
           </div>
           <div class="asset-class-params">
             <span>${methodLabel}</span>
-            <span>salvage: $${(c.salvageValue || 0).toLocaleString()}</span>
             ${c.expenseAccountName ? `<span>expense acct: ${c.expenseAccountName}</span>` : ''}
             ${c.accumAccountName ? `<span>accum acct: ${c.accumAccountName}</span>` : ''}
           </div>
-          ${ai ? `<div class="asset-class-ai">${ai.ccaClass ? `CCA Class ${ai.ccaClass} (${ai.ccaRate})` : ''} ${ai.reasoning ? `— ${ai.reasoning}` : ''}</div>` : ''}
+          <div class="asset-class-totals" style="display:flex;gap:20px;margin-top:8px;padding-top:8px;border-top:1px solid var(--gray-700);font-size:0.82rem;">
+            <span style="color:var(--gray-400);">cost: <strong style="color:var(--gray-100);">${fmtCurrency(totalCost)}</strong></span>
+            <span style="color:var(--gray-400);">accum amort: <strong style="color:var(--gray-100);">${fmtCurrency(totalAccum)}</strong></span>
+            <span style="color:var(--gray-400);">net book value: <strong style="color:var(--gray-100);">${fmtCurrency(totalNbv)}</strong></span>
+          </div>
+          ${ai ? `<div class="asset-class-ai" style="margin-top:6px;font-size:0.78rem;color:var(--blue-400);">AI suggests: ${ai.method === 'declining-balance' ? `declining balance @ ${((ai.decliningRate || 0) * 100).toFixed(0)}%/yr` : `straight-line, ${ai.usefulLifeMonths || '—'} months`}${ai.ccaClass ? ` — CCA Class ${ai.ccaClass} (${ai.ccaRate})` : ''}${ai.reasoning ? ` — ${ai.reasoning}` : ''}</div>` : ''}
         </div>
         <div class="asset-card-actions">
           <button class="btn-edit-client" onclick="openEditClass('${c.id}')">edit policy</button>
@@ -1093,41 +1132,13 @@ function renderAssetClasses() {
   }).join('');
 }
 
+// Per-asset list was removed from the UI in favor of class-level summaries
+// (renderAssetClasses now shows count + total cost/accum/NBV per class). The
+// detailed asset list still lives in the exported Excel workbook. This function
+// just keeps the "last amortization run" footer line up to date.
 function renderFixedAssets() {
-  const list = document.getElementById('fixed-assets-list');
-  const activeAssets = allFixedAssets.filter(a => a.active);
-
-  if (activeAssets.length === 0) {
-    list.innerHTML = '<p style="color:var(--gray-400);text-align:center;padding:40px;">no fixed assets yet. sync from QBO to import.</p>';
-  } else {
-    list.innerHTML = activeAssets.map(a => {
-      const cls = getAssetClass(a);
-      const className = cls?.glAccountName || a.glAccountName || '—';
-      const acqDate = a.acquisitionDate || '';
-      const monthlyAmort = calcMonthlyAmort(a, cls);
-
-      return `
-        <div class="asset-card">
-          <div class="asset-card-main">
-            <div class="asset-card-header">
-              <div class="asset-card-name">${a.name}</div>
-            </div>
-            <div class="asset-card-desc">${className}${a.vendorName ? ` — ${a.vendorName}` : ''}</div>
-            <div class="asset-card-amounts">
-              <span class="asset-card-amount">cost: <strong>$${(a.originalCost || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
-              <span class="asset-card-amount">acquired: <strong>${acqDate}</strong></span>
-              <span class="asset-card-amount">monthly amort: <strong>${monthlyAmort !== null ? '$' + monthlyAmort.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'}</strong></span>
-            </div>
-          </div>
-          <div class="asset-card-actions">
-            <button class="btn-edit-client" onclick="openEditAsset('${a.id}')">edit</button>
-            <button class="btn-delete-asset" onclick="deleteAsset('${a.id}')">delete</button>
-          </div>
-        </div>`;
-    }).join('');
-  }
-
   const lastRunEl = document.getElementById('last-amortization-run');
+  if (!lastRunEl) return;
   if (fixedAssetRuns.length > 0) {
     const lastRun = fixedAssetRuns[fixedAssetRuns.length - 1];
     lastRunEl.textContent = `last run: ${lastRun.month} on ${new Date(lastRun.ranAt).toLocaleDateString()} — $${lastRun.totalAmount.toFixed(2)} (${lastRun.assetCount} assets)`;
@@ -1174,25 +1185,49 @@ function openEditClass(id) {
   document.getElementById('class-method').value = cls.method || 'straight-line';
   document.getElementById('class-useful-life').value = cls.usefulLifeMonths || '';
   document.getElementById('class-declining-rate').value = cls.decliningRate ? (cls.decliningRate * 100) : '';
-  document.getElementById('class-salvage').value = cls.salvageValue || 0;
   document.getElementById('class-modal-error').style.display = 'none';
 
-  // Show AI suggestion if available
+  // Show AI suggestion if available, with full recommended values + apply button
   const aiEl = document.getElementById('class-ai-suggestion');
+  const applyBtn = document.getElementById('btn-apply-class-ai');
   if (cls.aiSuggestion) {
     const ai = cls.aiSuggestion;
-    let html = `<strong>AI: ${ai.method === 'declining-balance' ? 'declining balance' : 'straight-line'}</strong>`;
+    const methodLabel = ai.method === 'declining-balance'
+      ? `declining balance @ ${((ai.decliningRate || 0) * 100).toFixed(0)}%/yr`
+      : `straight-line, ${ai.usefulLifeMonths || '—'} months`;
+    let html = `<strong>AI suggests: ${methodLabel}</strong>`;
     if (ai.ccaClass) html += ` — CCA Class ${ai.ccaClass} (${ai.ccaRate})`;
     if (ai.reasoning) html += `<br>${ai.reasoning}`;
+    html += `<br><em style="color:var(--gray-500);">This is advisory only — click "apply AI suggestion" to copy these values into the form.</em>`;
     aiEl.innerHTML = html;
     aiEl.style.display = '';
+    applyBtn.style.display = '';
   } else {
     aiEl.style.display = 'none';
+    applyBtn.style.display = 'none';
   }
 
   populateClassDropdowns(cls);
   toggleClassMethod();
   document.getElementById('asset-class-modal').style.display = 'flex';
+}
+
+// Apply the saved AI suggestion to the form fields. Does NOT save — the user
+// still has to click "save" to persist.
+function applyClassAiSuggestion() {
+  const cls = assetClasses.find(c => c.id === editingClassId);
+  if (!cls || !cls.aiSuggestion) return;
+  const ai = cls.aiSuggestion;
+  const method = ai.method || 'straight-line';
+  document.getElementById('class-method').value = method;
+  toggleClassMethod();
+  if (method === 'declining-balance' && ai.decliningRate) {
+    document.getElementById('class-declining-rate').value = (ai.decliningRate * 100).toFixed(0);
+    document.getElementById('class-useful-life').value = '';
+  } else if (ai.usefulLifeMonths) {
+    document.getElementById('class-useful-life').value = ai.usefulLifeMonths;
+    document.getElementById('class-declining-rate').value = '';
+  }
 }
 
 function closeClassModal() {
@@ -1207,7 +1242,6 @@ async function saveClass() {
   const method = document.getElementById('class-method').value;
   const usefulLifeMonths = document.getElementById('class-useful-life').value;
   const decliningRatePercent = document.getElementById('class-declining-rate').value;
-  const salvageValue = document.getElementById('class-salvage').value || '0';
   const expenseEl = document.getElementById('class-account-expense');
   const accumEl = document.getElementById('class-account-accum');
 
@@ -1224,7 +1258,6 @@ async function saveClass() {
     method,
     usefulLifeMonths: parseInt(usefulLifeMonths) || null,
     decliningRate: decliningRatePercent ? parseFloat(decliningRatePercent) / 100 : null,
-    salvageValue: parseFloat(salvageValue) || 0,
     expenseAccountId: expenseEl.value || '',
     expenseAccountName: expenseEl.selectedOptions[0]?.dataset.name || '',
     accumAccountId: accumEl.value || '',
@@ -1287,8 +1320,6 @@ async function suggestClassAmortization() {
       } else {
         document.getElementById('class-useful-life').value = data.usefulLifeMonths;
       }
-      document.getElementById('class-salvage').value = data.salvageValue || 0;
-
       let html = `<strong>AI: ${suggestedMethod === 'declining-balance' ? 'declining balance' : 'straight-line'}</strong>`;
       if (data.ccaClass) html += ` — CCA Class ${data.ccaClass} (${data.ccaRate})`;
       if (data.reasoning) html += `<br>${data.reasoning}`;
@@ -1309,6 +1340,7 @@ document.getElementById('class-modal-save').addEventListener('click', saveClass)
 document.getElementById('class-modal-cancel').addEventListener('click', closeClassModal);
 document.getElementById('asset-class-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeClassModal(); });
 document.getElementById('btn-suggest-class-amort').addEventListener('click', suggestClassAmortization);
+document.getElementById('btn-apply-class-ai').addEventListener('click', applyClassAiSuggestion);
 
 // QBO Sync
 async function syncFromQBO() {
@@ -1419,12 +1451,15 @@ async function importSelectedAssets() {
     }
   }
 
-  // Create classes for any GL accounts that don't already have one
+  // Create classes for any GL accounts that don't already have one. Track the IDs
+  // of classes we actually create here so we can run AI suggestions on those alone
+  // — never on classes that already had a policy.
+  const newlyCreatedClassIds = [];
   for (const [glId, info] of uniqueGLAccounts) {
     const exists = assetClasses.some(c => c.glAccountId === glId);
     if (!exists) {
       try {
-        await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/classes`, {
+        const createRes = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/classes`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
           body: JSON.stringify({
@@ -1432,13 +1467,14 @@ async function importSelectedAssets() {
             glAccountName: info.glAccountName,
             method: 'straight-line',
             usefulLifeMonths: 36,
-            salvageValue: 0,
             expenseAccountId: info.expenseAccountId,
             expenseAccountName: info.expenseAccountName,
             accumAccountId: info.accumAccountId,
             accumAccountName: info.accumAccountName,
           }),
         });
+        const createData = await createRes.json();
+        if (createData.assetClass) newlyCreatedClassIds.push(createData.assetClass.id);
       } catch (e) { console.error('Failed to create asset class:', e); }
     }
   }
@@ -1449,25 +1485,33 @@ async function importSelectedAssets() {
   importBtn.disabled = false;
   await loadClientFixedAssets();
 
-  // Now run AI suggestions for each new class in the background
-  if (uniqueGLAccounts.size > 0) {
-    runAISuggestionsForClasses();
+  // Run AI suggestions only for newly-created classes. Existing policies are left
+  // alone — the user is the source of truth once they've reviewed a policy.
+  if (newlyCreatedClassIds.length > 0) {
+    runAISuggestionsForClasses(newlyCreatedClassIds);
   }
 }
 
 /**
- * Run AI amortization suggestions for all asset classes that don't have one yet
+ * Run AI amortization suggestions for the given list of asset class IDs.
+ *
+ * The suggestion is saved as ADVISORY data on the class (aiSuggestion field) but
+ * the class's actual policy fields (method, usefulLifeMonths, decliningRate) are
+ * NOT modified. The user has to open the edit-policy modal and click "apply
+ * suggestion" to actually adopt the AI's recommendation. This was a deliberate
+ * product decision: AI advises, the user decides.
  */
-async function runAISuggestionsForClasses() {
+async function runAISuggestionsForClasses(classIds = []) {
+  if (!Array.isArray(classIds) || classIds.length === 0) return;
   const statusEl = document.getElementById('amortization-status');
-  const classesNeedingSuggestion = assetClasses.filter(c => !c.aiSuggestion);
-  if (classesNeedingSuggestion.length === 0) return;
+  const targets = assetClasses.filter(c => classIds.includes(c.id) && !c.aiSuggestion);
+  if (targets.length === 0) return;
 
-  statusEl.textContent = `getting AI amortization suggestions for ${classesNeedingSuggestion.length} class${classesNeedingSuggestion.length !== 1 ? 'es' : ''}...`;
+  statusEl.textContent = `getting AI amortization suggestions for ${targets.length} new class${targets.length !== 1 ? 'es' : ''}...`;
   statusEl.style.display = '';
 
   let updated = 0;
-  for (const cls of classesNeedingSuggestion) {
+  for (const cls of targets) {
     try {
       const sugRes = await fetch('/api/admin/fixed-assets/suggest-amortization', {
         method: 'POST',
@@ -1476,18 +1520,18 @@ async function runAISuggestionsForClasses() {
       });
       const suggestion = await sugRes.json();
 
-      if (suggestion.usefulLifeMonths) {
+      if (suggestion.method || suggestion.usefulLifeMonths || suggestion.decliningRate) {
         const suggestedMethod = suggestion.method || 'straight-line';
+        // Save the AI's full recommendation as advisory data ONLY. Do not touch
+        // the class's actual method/usefulLifeMonths/decliningRate fields.
         const updateBody = {
-          method: suggestedMethod,
-          usefulLifeMonths: suggestion.usefulLifeMonths,
-          decliningRate: suggestion.decliningRate || null,
-          salvageValue: suggestion.salvageValue || 0,
           aiSuggestion: {
+            method: suggestedMethod,
+            usefulLifeMonths: suggestion.usefulLifeMonths || null,
+            decliningRate: suggestion.decliningRate || null,
             ccaClass: suggestion.ccaClass || null,
             ccaRate: suggestion.ccaRate || null,
             reasoning: suggestion.reasoning || '',
-            method: suggestedMethod,
             suggestedAt: new Date().toISOString(),
           },
         };
@@ -1502,11 +1546,11 @@ async function runAISuggestionsForClasses() {
     } catch (e) {
       console.error(`AI suggestion failed for class "${cls.glAccountName}":`, e);
     }
-    statusEl.textContent = `AI suggestions: ${updated} of ${classesNeedingSuggestion.length} classes updated...`;
+    statusEl.textContent = `AI suggestions: ${updated} of ${targets.length} classes...`;
   }
 
-  statusEl.textContent = `AI suggestions complete — ${updated} class${updated !== 1 ? 'es' : ''} updated`;
-  setTimeout(() => { statusEl.style.display = 'none'; }, 5000);
+  statusEl.textContent = `AI suggestions complete — ${updated} new class${updated !== 1 ? 'es' : ''} now have advisory recommendations. Open "edit policy" to review and apply.`;
+  setTimeout(() => { statusEl.style.display = 'none'; }, 8000);
 
   await loadClientFixedAssets();
 }
@@ -2045,6 +2089,13 @@ async function init() {
         document.getElementById('view-clients').style.display = '';
         await loadClients();
         openClientDetail(connectedClientId);
+        // Auto-jump to the fixed-assets tab and trigger a sync so the user
+        // doesn't have to click again — the whole point of connecting is to
+        // pull data, so just do it.
+        setTimeout(() => {
+          switchClientTab('fixed-assets');
+          setTimeout(() => syncFromQBO(), 400);
+        }, 300);
       }, 100);
     }
     window.history.replaceState({}, '', window.location.pathname);
