@@ -1117,10 +1117,10 @@ function renderAssetClasses() {
             ${c.expenseAccountName ? `<span>expense acct: ${c.expenseAccountName}</span>` : ''}
             ${c.accumAccountName ? `<span>accum acct: ${c.accumAccountName}</span>` : ''}
           </div>
-          <div class="asset-class-totals" style="display:flex;gap:20px;margin-top:8px;padding-top:8px;border-top:1px solid var(--gray-700);font-size:0.82rem;">
-            <span style="color:var(--gray-400);">cost: <strong style="color:var(--gray-100);">${fmtCurrency(totalCost)}</strong></span>
-            <span style="color:var(--gray-400);">accum amort: <strong style="color:var(--gray-100);">${fmtCurrency(totalAccum)}</strong></span>
-            <span style="color:var(--gray-400);">net book value: <strong style="color:var(--gray-100);">${fmtCurrency(totalNbv)}</strong></span>
+          <div class="asset-class-totals" style="display:flex;gap:20px;margin-top:8px;padding-top:8px;border-top:1px solid var(--gray-200);font-size:0.82rem;">
+            <span style="color:var(--gray-600);">cost: <strong style="color:var(--gray-900);">${fmtCurrency(totalCost)}</strong></span>
+            <span style="color:var(--gray-600);">accum amort: <strong style="color:var(--gray-900);">${fmtCurrency(totalAccum)}</strong></span>
+            <span style="color:var(--gray-600);">net book value: <strong style="color:var(--gray-900);">${fmtCurrency(totalNbv)}</strong></span>
           </div>
           ${ai ? `<div class="asset-class-ai" style="margin-top:6px;font-size:0.78rem;color:var(--blue-400);">AI suggests: ${ai.method === 'declining-balance' ? `declining balance @ ${((ai.decliningRate || 0) * 100).toFixed(0)}%/yr` : `straight-line, ${ai.usefulLifeMonths || '—'} months`}${ai.ccaClass ? ` — CCA Class ${ai.ccaClass} (${ai.ccaRate})` : ''}${ai.reasoning ? ` — ${ai.reasoning}` : ''}</div>` : ''}
         </div>
@@ -1401,10 +1401,33 @@ async function importSelectedAssets() {
   importBtn.textContent = 'importing...';
   importBtn.disabled = true;
 
+  const accounts = Array.from(checkboxes).map(cb => JSON.parse(cb.dataset.account));
+  const newClassIds = await importAssetsFromQboAccounts(accounts);
+
+  // Close modal and show assets immediately
+  document.getElementById('qbo-sync-modal').style.display = 'none';
+  importBtn.textContent = 'import selected';
+  importBtn.disabled = false;
+  await loadClientFixedAssets();
+
+  if (newClassIds.length > 0) {
+    runAISuggestionsForClasses(newClassIds);
+  }
+}
+
+/**
+ * Import a list of QBO accounts (as returned by /sync-qbo) into this client's
+ * fixed-asset roster. Creates the asset records, auto-creates any missing
+ * asset classes, and returns the IDs of newly-created classes so the caller
+ * can run AI suggestions on them.
+ *
+ * Pure function — no DOM dependency — so it can be called from the manual
+ * modal flow OR from the pre-amortization auto-sync.
+ */
+async function importAssetsFromQboAccounts(accounts) {
   const importedAssets = [];
 
-  for (const cb of checkboxes) {
-    const account = JSON.parse(cb.dataset.account);
+  for (const account of accounts) {
     const body = {
       name: account.name,
       description: account.description || '',
@@ -1479,17 +1502,7 @@ async function importSelectedAssets() {
     }
   }
 
-  // Close modal and show assets immediately
-  document.getElementById('qbo-sync-modal').style.display = 'none';
-  importBtn.textContent = 'import selected';
-  importBtn.disabled = false;
-  await loadClientFixedAssets();
-
-  // Run AI suggestions only for newly-created classes. Existing policies are left
-  // alone — the user is the source of truth once they've reviewed a policy.
-  if (newlyCreatedClassIds.length > 0) {
-    runAISuggestionsForClasses(newlyCreatedClassIds);
-  }
+  return newlyCreatedClassIds;
 }
 
 /**
@@ -1781,7 +1794,30 @@ function closeAmortizationModal() { document.getElementById('amortization-modal'
 async function confirmRunAmortization() {
   const errorEl = document.getElementById('amortization-modal-error');
   const btn = document.getElementById('amortization-confirm');
-  errorEl.style.display = 'none'; btn.textContent = 'posting...'; btn.disabled = true;
+  errorEl.style.display = 'none'; btn.textContent = 'syncing from QBO...'; btn.disabled = true;
+
+  // Always pull the latest fixed assets from QBO before running amortization so
+  // we never miss an asset that was added in QBO since the last sync. Silent —
+  // no modal. Any new accounts get auto-imported and the preview is refreshed
+  // so the user sees what they're actually about to post.
+  try {
+    const syncRes = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/sync-qbo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+    });
+    const syncData = await syncRes.json();
+    if (syncData.accounts && syncData.accounts.length > 0) {
+      const newClassIds = await importAssetsFromQboAccounts(syncData.accounts);
+      await loadClientFixedAssets();
+      await loadAmortizationPreview(currentAmortMonth);
+      if (newClassIds.length > 0) runAISuggestionsForClasses(newClassIds);
+    }
+  } catch (e) {
+    console.error('pre-amortization sync failed:', e);
+    // Non-fatal — fall through and run amortization with what we have
+  }
+
+  btn.textContent = 'posting...';
 
   try {
     const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/run-amortization`, {

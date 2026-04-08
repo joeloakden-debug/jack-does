@@ -665,22 +665,40 @@ async function updateBookCloseDate(clientId = 'default', newDate) {
   const qb = await getQBClient(clientId);
   const prefs = await getPreferences(clientId);
   if (!prefs) throw new Error('Could not load QBO Preferences');
-
-  // Mutate the AccountingInfoPrefs block
-  const updated = JSON.parse(JSON.stringify(prefs));
-  updated.AccountingInfoPrefs = updated.AccountingInfoPrefs || {};
-  if (newDate) {
-    updated.AccountingInfoPrefs.BookCloseDate = newDate;
-  } else {
-    delete updated.AccountingInfoPrefs.BookCloseDate;
+  if (!prefs.Id || !prefs.SyncToken) {
+    throw new Error('QBO Preferences missing Id or SyncToken — cannot perform sparse update');
   }
-  // sparse update requires Id + SyncToken
-  updated.sparse = true;
+
+  // Build a minimal sparse update payload. Sending the entire Preferences object
+  // back can cause QBO to reject or silently no-op the change because some nested
+  // sub-prefs are read-only. Sparse updates only need Id + SyncToken + the fields
+  // you actually want to change.
+  // Merge with the existing AccountingInfoPrefs so we don't clobber sibling fields
+  // (FirstMonthOfFiscalYear, TaxYearMonth, etc).
+  const existingAcct = prefs.AccountingInfoPrefs || {};
+  const acctPrefs = { ...existingAcct };
+  if (newDate) {
+    acctPrefs.BookCloseDate = newDate;
+  } else {
+    delete acctPrefs.BookCloseDate;
+  }
+
+  const payload = {
+    Id: prefs.Id,
+    SyncToken: prefs.SyncToken,
+    sparse: true,
+    AccountingInfoPrefs: acctPrefs,
+  };
 
   return new Promise((resolve, reject) => {
-    qb.updatePreferences(updated, (err, result) => {
-      if (err) return reject(err);
-      resolve(result?.AccountingInfoPrefs?.BookCloseDate || null);
+    qb.updatePreferences(payload, (err, result) => {
+      if (err) {
+        console.error('[qbo] updatePreferences error:', err?.fault?.error || err.message || err);
+        return reject(err);
+      }
+      const saved = result?.AccountingInfoPrefs?.BookCloseDate || null;
+      console.log(`[qbo] BookCloseDate update — requested: ${newDate}, saved: ${saved}`);
+      resolve(saved);
     });
   });
 }
