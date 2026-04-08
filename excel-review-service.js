@@ -166,24 +166,23 @@ async function buildReviewContext(clientId, clientData, continuitySchedule, getA
     })),
   };
 
-  // ---- QBO trial balance slice ----
-  let qboTbSlice = {};
+  // ---- QBO trial balance ----
+  // Return the WHOLE TB (it's small) rather than pre-filtering against the schedule's
+  // account names — QBO often returns fully-qualified names like "Fixed Assets:Computer
+  // hardware" while the schedule stores just the leaf name, so an exact-match filter
+  // would silently drop everything. Let Claude do the matching with its own judgment.
+  let qboTrialBalance = {};
   let qboError = null;
   if (qbo.isConnected(clientId)) {
     try {
       const tb = await qbo.getTrialBalance(asOfDate, asOfDate, clientId);
       const tbMap = flattenTrialBalance(tb);
-      // Pull every account that appears in our schedule (cost + accum + expense)
-      const wanted = new Set();
-      for (const g of continuitySchedule.glAccounts || []) {
-        if (g.glAccountName) wanted.add(g.glAccountName);
-        for (const asset of g.assets) {
-          if (asset.accumAccountName) wanted.add(asset.accumAccountName);
-          if (asset.expenseAccountName) wanted.add(asset.expenseAccountName);
-        }
+      console.log(`[review] QBO TB rows: ${tbMap.size}`);
+      for (const [name, balance] of tbMap) {
+        qboTrialBalance[name] = round2(balance);
       }
-      for (const name of wanted) {
-        if (tbMap.has(name)) qboTbSlice[name] = round2(tbMap.get(name));
+      if (tbMap.size === 0) {
+        qboError = 'QBO trial balance returned no rows for the as-of date';
       }
     } catch (e) {
       qboError = `Failed to fetch QBO trial balance: ${e.message}`;
@@ -227,7 +226,7 @@ async function buildReviewContext(clientId, clientData, continuitySchedule, getA
     qboError,
     assets,
     scheduleSummary,
-    qboTbSlice,
+    qboTrialBalance,
     qboAcquisitions,
   };
 }
@@ -304,7 +303,13 @@ ${JSON.stringify(ctx.scheduleSummary, null, 2)}
 ${JSON.stringify(ctx.assets, null, 2)}
 
 === QBO TRIAL BALANCE (as of ${ctx.asOfDate}) ===
-${JSON.stringify(ctx.qboTbSlice, null, 2)}
+The keys here are the account names exactly as QBO returned them. They may use
+fully-qualified names like "Fixed Assets:Computer hardware" while the schedule
+uses the leaf name "Computer hardware" — match by leaf name (the part after the
+last colon) when comparing to the schedule's glAccountName / accumAccountName /
+expenseAccountName. Values are signed (debit positive, credit negative); accum
+balances will appear as negative numbers and should be compared by absolute value.
+${JSON.stringify(ctx.qboTrialBalance, null, 2)}
 
 === QBO SOURCE ACQUISITIONS ===
 ${JSON.stringify(ctx.qboAcquisitions, null, 2)}
