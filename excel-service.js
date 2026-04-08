@@ -517,4 +517,103 @@ function parseWorkbook(workbook) {
   return { assets, assetClasses, amortizationRuns, warnings };
 }
 
-module.exports = { generateWorkbook, parseWorkbook };
+// ========================================
+// REVIEW NOTES SHEET
+// ========================================
+// Renders Claude's review findings as a self-contained sheet so the workbook
+// can travel without losing the audit trail. Called by the server's export
+// endpoint AFTER generateWorkbook returns, so review failures don't block the
+// download itself.
+function addReviewSheet(workbook, review) {
+  if (!review) return;
+  const sheet = workbook.addWorksheet('Review Notes', {
+    properties: { tabColor: { argb: 'FFa855f7' } },
+  });
+
+  // Status banner colors
+  const statusColors = {
+    clean:    { argb: 'FF22c55e' }, // green
+    warnings: { argb: 'FFf59e0b' }, // amber
+    errors:   { argb: 'FFef4444' }, // red
+    error:    { argb: 'FFef4444' }, // (review itself failed)
+    skipped:  { argb: 'FF6b7280' }, // gray
+  };
+
+  // Title
+  sheet.mergeCells(1, 1, 1, 6);
+  sheet.getCell(1, 1).value = 'Claude Review — Fixed Asset Schedule';
+  sheet.getCell(1, 1).font = { name: 'Calibri', size: 14, bold: true };
+
+  // Status row
+  sheet.mergeCells(2, 1, 2, 6);
+  const statusCell = sheet.getCell(2, 1);
+  const labelMap = { clean: 'CLEAN', warnings: 'WARNINGS', errors: 'ERRORS', error: 'REVIEW FAILED', skipped: 'SKIPPED' };
+  statusCell.value = `Status: ${labelMap[review.status] || review.status?.toUpperCase() || 'UNKNOWN'}`;
+  statusCell.font = { name: 'Calibri', size: 12, bold: true, color: { argb: 'FFFFFFFF' } };
+  statusCell.fill = { type: 'pattern', pattern: 'solid', fgColor: statusColors[review.status] || { argb: 'FF6b7280' } };
+  statusCell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+  sheet.getRow(2).height = 22;
+
+  // Meta
+  sheet.mergeCells(3, 1, 3, 6);
+  sheet.getCell(3, 1).value = `As of: ${review.asOfMonth || 'n/a'}    Generated: ${review.generatedAt || ''}`;
+  sheet.getCell(3, 1).font = { name: 'Calibri', size: 9, italic: true, color: { argb: 'FF6b7280' } };
+
+  // Summary
+  sheet.mergeCells(4, 1, 4, 6);
+  sheet.getCell(4, 1).value = review.summary || '';
+  sheet.getCell(4, 1).font = { name: 'Calibri', size: 10 };
+  sheet.getCell(4, 1).alignment = { wrapText: true, vertical: 'top' };
+  sheet.getRow(4).height = 32;
+
+  // Findings table header
+  const headerRowIdx = 6;
+  const headers = ['Severity', 'Category', 'Asset', 'Message', 'Expected', 'Actual'];
+  headers.forEach((h, i) => {
+    const cell = sheet.getCell(headerRowIdx, i + 1);
+    cell.value = h;
+    cell.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1a1a2e' } };
+  });
+  sheet.getRow(headerRowIdx).height = 20;
+
+  // Column widths
+  sheet.getColumn(1).width = 12;
+  sheet.getColumn(2).width = 16;
+  sheet.getColumn(3).width = 30;
+  sheet.getColumn(4).width = 70;
+  sheet.getColumn(5).width = 14;
+  sheet.getColumn(6).width = 14;
+
+  // Findings rows
+  const findings = review.findings || [];
+  if (findings.length === 0) {
+    sheet.mergeCells(headerRowIdx + 1, 1, headerRowIdx + 1, 6);
+    sheet.getCell(headerRowIdx + 1, 1).value = 'No findings — schedule passed all checks.';
+    sheet.getCell(headerRowIdx + 1, 1).font = { name: 'Calibri', size: 10, italic: true };
+    return;
+  }
+
+  const sevColors = {
+    error:   { argb: 'FFfecaca' },
+    warning: { argb: 'FFfde68a' },
+    info:    { argb: 'FFdbeafe' },
+  };
+  findings.forEach((f, i) => {
+    const r = headerRowIdx + 1 + i;
+    sheet.getCell(r, 1).value = (f.severity || '').toUpperCase();
+    sheet.getCell(r, 1).fill = { type: 'pattern', pattern: 'solid', fgColor: sevColors[f.severity] || { argb: 'FFf3f4f6' } };
+    sheet.getCell(r, 1).font = { name: 'Calibri', size: 9, bold: true };
+    sheet.getCell(r, 2).value = f.category || '';
+    sheet.getCell(r, 3).value = f.assetName || '';
+    sheet.getCell(r, 4).value = f.message || '';
+    sheet.getCell(r, 4).alignment = { wrapText: true, vertical: 'top' };
+    sheet.getCell(r, 5).value = f.expected != null ? f.expected : '';
+    sheet.getCell(r, 6).value = f.actual != null ? f.actual : '';
+    if (typeof f.expected === 'number') sheet.getCell(r, 5).numFmt = currencyFormat;
+    if (typeof f.actual === 'number') sheet.getCell(r, 6).numFmt = currencyFormat;
+    sheet.getRow(r).height = Math.max(20, Math.ceil((f.message || '').length / 70) * 14);
+  });
+}
+
+module.exports = { generateWorkbook, parseWorkbook, addReviewSheet };

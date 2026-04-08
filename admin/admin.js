@@ -1820,30 +1820,109 @@ document.getElementById('qbo-sync-import').addEventListener('click', importSelec
 document.getElementById('qbo-sync-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) document.getElementById('qbo-sync-modal').style.display = 'none'; });
 document.getElementById('btn-suggest-amort').addEventListener('click', suggestAmortization);
 
-// Excel export/import
+// Excel export — runs Claude review server-side and surfaces a traffic-light panel
+// after the file download starts.
 document.getElementById('btn-export-excel').addEventListener('click', async () => {
   if (!selectedClientId) return;
   const btn = document.getElementById('btn-export-excel');
-  btn.textContent = 'exporting...';
+  btn.textContent = 'exporting & reviewing...';
   btn.disabled = true;
+  // Show a loading state in the review panel right away so the user knows
+  // a review is running in parallel with the file generation.
+  renderReviewPanel({ status: 'loading' });
   try {
     const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/export-excel`, {
       headers: { 'Authorization': getAuth() },
     });
-    if (!res.ok) { alert('export failed'); return; }
+    if (!res.ok) { alert('export failed'); renderReviewPanel(null); return; }
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    // Use client name for filename
     const client = allClients.find(c => c.id === selectedClientId);
     a.download = `${client?.name || selectedClientId} - Fixed Assets.xlsx`;
     a.click();
     URL.revokeObjectURL(url);
-  } catch (e) { alert('export failed: ' + e.message); }
+    // Fetch the cached review and render the panel
+    try {
+      const reviewRes = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/last-review`, {
+        headers: { 'Authorization': getAuth() },
+      });
+      const data = await reviewRes.json();
+      renderReviewPanel(data.review);
+    } catch (e) {
+      console.error('Failed to fetch review:', e);
+      renderReviewPanel({ status: 'error', summary: 'Could not load review result.', findings: [] });
+    }
+  } catch (e) { alert('export failed: ' + e.message); renderReviewPanel(null); }
   btn.textContent = 'export to Excel';
   btn.disabled = false;
 });
+
+// Render the Claude review traffic-light panel below the export button.
+// Status can be: clean / warnings / errors / error / skipped / loading / null
+function renderReviewPanel(review) {
+  const panel = document.getElementById('claude-review-panel');
+  if (!panel) return;
+  if (!review) {
+    panel.style.display = 'none';
+    panel.innerHTML = '';
+    return;
+  }
+  if (review.status === 'loading') {
+    panel.style.display = '';
+    panel.innerHTML = `
+      <div style="background:var(--gray-800);border-left:4px solid var(--gray-500);padding:12px 16px;border-radius:6px;color:var(--gray-300);font-size:0.9rem;">
+        <strong>Claude is reviewing the schedule…</strong>
+        <div style="font-size:0.82rem;color:var(--gray-400);margin-top:4px;">Comparing the workbook to QBO and running calculation/reasonability checks.</div>
+      </div>`;
+    return;
+  }
+  const colors = {
+    clean:    { bar: '#22c55e', label: 'CLEAN' },
+    warnings: { bar: '#f59e0b', label: 'WARNINGS' },
+    errors:   { bar: '#ef4444', label: 'ERRORS' },
+    error:    { bar: '#ef4444', label: 'REVIEW FAILED' },
+    skipped:  { bar: '#6b7280', label: 'SKIPPED' },
+  };
+  const c = colors[review.status] || { bar: '#6b7280', label: (review.status || 'unknown').toUpperCase() };
+  const sevBg = { error: '#7f1d1d', warning: '#78350f', info: '#1e3a8a' };
+  const findingRows = (review.findings || []).map(f => `
+    <tr>
+      <td style="padding:6px 10px;font-size:0.78rem;font-weight:600;background:${sevBg[f.severity] || '#374151'};color:#fff;text-transform:uppercase;">${f.severity || ''}</td>
+      <td style="padding:6px 10px;font-size:0.82rem;color:var(--gray-300);">${escapeHtml(f.category || '')}</td>
+      <td style="padding:6px 10px;font-size:0.82rem;color:var(--gray-200);">${escapeHtml(f.assetName || '—')}</td>
+      <td style="padding:6px 10px;font-size:0.82rem;color:var(--gray-200);">${escapeHtml(f.message || '')}</td>
+    </tr>`).join('');
+  const findingsTable = (review.findings && review.findings.length)
+    ? `<table style="width:100%;border-collapse:collapse;margin-top:10px;background:var(--gray-900);border-radius:4px;overflow:hidden;">
+         <thead><tr>
+           <th style="padding:6px 10px;text-align:left;font-size:0.72rem;color:var(--gray-400);text-transform:uppercase;">Severity</th>
+           <th style="padding:6px 10px;text-align:left;font-size:0.72rem;color:var(--gray-400);text-transform:uppercase;">Category</th>
+           <th style="padding:6px 10px;text-align:left;font-size:0.72rem;color:var(--gray-400);text-transform:uppercase;">Asset</th>
+           <th style="padding:6px 10px;text-align:left;font-size:0.72rem;color:var(--gray-400);text-transform:uppercase;">Message</th>
+         </tr></thead>
+         <tbody>${findingRows}</tbody>
+       </table>`
+    : '<div style="font-size:0.82rem;color:var(--gray-400);margin-top:8px;font-style:italic;">No findings.</div>';
+
+  panel.style.display = '';
+  panel.innerHTML = `
+    <div style="background:var(--gray-800);border-left:4px solid ${c.bar};padding:12px 16px;border-radius:6px;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">
+        <span style="background:${c.bar};color:#fff;font-weight:700;font-size:0.78rem;padding:3px 10px;border-radius:3px;letter-spacing:0.5px;">${c.label}</span>
+        <span style="color:var(--gray-300);font-size:0.9rem;">Claude review — ${escapeHtml(review.asOfMonth || 'most recent period')}</span>
+        <button id="btn-dismiss-review" style="margin-left:auto;background:transparent;border:1px solid var(--gray-600);color:var(--gray-400);font-size:0.75rem;padding:3px 10px;border-radius:3px;cursor:pointer;">dismiss</button>
+      </div>
+      <div style="color:var(--gray-200);font-size:0.88rem;line-height:1.4;">${escapeHtml(review.summary || '')}</div>
+      ${findingsTable}
+    </div>`;
+  document.getElementById('btn-dismiss-review').addEventListener('click', () => renderReviewPanel(null));
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
 
 // Excel import is intentionally hidden from the UI — sync-from-QBO is the canonical
 // source of truth for fixed assets and amortization runs. The /import-excel server

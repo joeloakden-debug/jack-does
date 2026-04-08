@@ -13,6 +13,7 @@ const path = require('path');
 const fs = require('fs');
 const qbo = require('./qbo-service');
 const excelService = require('./excel-service');
+const excelReviewService = require('./excel-review-service');
 
 const app = express();
 const PORT = parseInt(process.env.PORT, 10) || 3000;
@@ -1241,15 +1242,45 @@ app.get('/api/admin/clients/:clientId/fixed-assets/export-excel', requireAdmin, 
 
     const workbook = await excelService.generateWorkbook(clientId, clientName, clientData, continuitySchedule);
 
+    // Run Claude review on the generated workbook (advisory — never blocks the download).
+    // Cache the result on clientData so the UI can fetch it via /last-review after the
+    // file download starts.
+    let review = null;
+    try {
+      review = await excelReviewService.reviewWorkbook(clientId, clientData, continuitySchedule, getAssetPolicy);
+      excelService.addReviewSheet(workbook, review);
+      clientData.lastReview = review;
+      saveFixedAssets(fixedAssetsData);
+    } catch (e) {
+      console.error('[export] review failed:', e.message);
+      review = {
+        status: 'error',
+        summary: `Review could not be completed: ${e.message}`,
+        findings: [],
+        generatedAt: new Date().toISOString(),
+        asOfMonth,
+        reviewError: e.message,
+      };
+      clientData.lastReview = review;
+      saveFixedAssets(fixedAssetsData);
+    }
+
     const fileName = `${clientName} - Fixed Assets.xlsx`.replace(/[<>:"/\\|?*]/g, '_');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('X-Review-Status', review?.status || 'unknown');
     await workbook.xlsx.write(res);
     res.end();
   } catch (error) {
     console.error('Excel export error:', error);
     res.status(500).json({ error: 'Failed to generate Excel file' });
   }
+});
+
+// Get the most recent Claude review result for a client (populated by /export-excel)
+app.get('/api/admin/clients/:clientId/fixed-assets/last-review', requireAdmin, (req, res) => {
+  const clientData = getClientAssets(req.params.clientId);
+  res.json({ review: clientData.lastReview || null });
 });
 
 // Import fixed assets from Excel workbook
