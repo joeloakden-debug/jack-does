@@ -1845,46 +1845,10 @@ document.getElementById('btn-export-excel').addEventListener('click', async () =
   btn.disabled = false;
 });
 
-document.getElementById('btn-import-excel').addEventListener('click', () => {
-  document.getElementById('excel-file-input').click();
-});
-
-document.getElementById('excel-file-input').addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  if (!file || !selectedClientId) return;
-  if (!confirm('import this Excel file? this will replace all current fixed asset data for this client.')) {
-    e.target.value = '';
-    return;
-  }
-  const btn = document.getElementById('btn-import-excel');
-  btn.textContent = 'importing...';
-  btn.disabled = true;
-  const formData = new FormData();
-  formData.append('file', file);
-  try {
-    const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/import-excel`, {
-      method: 'POST',
-      headers: { 'Authorization': getAuth() },
-      body: formData,
-    });
-    const data = await res.json();
-    if (data.error) { alert(data.error); }
-    else {
-      const msg = `imported ${data.assetCount} assets, ${data.classCount} policies, ${data.runCount} amortization runs`;
-      const statusEl = document.getElementById('amortization-status');
-      statusEl.textContent = msg;
-      statusEl.style.display = '';
-      setTimeout(() => { statusEl.style.display = 'none'; }, 5000);
-      if (data.warnings?.length) {
-        console.warn('Import warnings:', data.warnings);
-      }
-      await loadClientFixedAssets();
-    }
-  } catch (err) { alert('import failed: ' + err.message); }
-  btn.textContent = 'import from Excel';
-  btn.disabled = false;
-  e.target.value = '';
-});
+// Excel import is intentionally hidden from the UI — sync-from-QBO is the canonical
+// source of truth for fixed assets and amortization runs. The /import-excel server
+// endpoint is preserved for future onboarding (clients migrating from other systems)
+// and disaster recovery, but can only be reached by calling the endpoint directly.
 
 
 // ========================================
