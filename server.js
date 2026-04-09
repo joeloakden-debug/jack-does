@@ -2474,6 +2474,496 @@ app.post('/api/admin/clients/:clientId/fixed-assets/reconcile', requireAdmin, as
 });
 
 // ========================================
+// PREPAID EXPENSES — per-client, file-backed
+// ========================================
+// Schema per client:
+// {
+//   prepaidAccount: { id, name },       // single balance-sheet Prepaid Expenses GL account
+//   items: [
+//     {
+//       id, vendor, description,
+//       totalAmount,                    // original invoice total being amortized
+//       startDate, endDate,             // inclusive service window (YYYY-MM-DD)
+//       expenseAccountId, expenseAccountName,
+//       openingBalance,                 // un-amortized amount at time of entry (for mid-life imports)
+//       sourceTxnId, sourceTxnType,     // link to QBO txn if created by Part B scanner
+//       createdAt, completedAt,
+//     }
+//   ],
+//   amortizationRuns: [
+//     { month, ranAt, journalEntryId, totalAmount, itemCount, items: [...] }
+//   ]
+// }
+
+const PREPAID_FILE = path.join(__dirname, 'prepaid-expenses.json');
+
+function loadPrepaidExpenses() {
+  try {
+    if (fs.existsSync(PREPAID_FILE)) {
+      return JSON.parse(fs.readFileSync(PREPAID_FILE, 'utf-8'));
+    }
+  } catch (e) {
+    console.error('Failed to load prepaid-expenses.json:', e.message);
+  }
+  return {};
+}
+
+function savePrepaidExpenses(data) {
+  fs.writeFileSync(PREPAID_FILE, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+let prepaidData = loadPrepaidExpenses();
+
+function getClientPrepaid(clientId) {
+  if (!prepaidData[clientId]) {
+    prepaidData[clientId] = { prepaidAccount: null, items: [], amortizationRuns: [] };
+  }
+  const c = prepaidData[clientId];
+  if (!c.items) c.items = [];
+  if (!c.amortizationRuns) c.amortizationRuns = [];
+  if (c.prepaidAccount === undefined) c.prepaidAccount = null;
+  return c;
+}
+
+// Utility: count inclusive calendar months between two YYYY-MM-DD dates
+// (e.g. 2026-01-15 → 2026-06-20 = 6 months). Full-month proration per spec.
+function monthsBetweenInclusive(startDate, endDate) {
+  const s = new Date(startDate + 'T00:00:00');
+  const e = new Date(endDate + 'T00:00:00');
+  return (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth()) + 1;
+}
+
+// Months already recognized for this item as of end of targetMonth (exclusive of target)
+// e.g. item starts 2026-01-01, target is 2026-04 → 3 months recognized prior (Jan/Feb/Mar)
+function monthsRecognizedBefore(item, targetMonth) {
+  const { year: ty, monthIndex: tm } = parseMonthStr(targetMonth);
+  const s = new Date(item.startDate + 'T00:00:00');
+  const startYear = s.getFullYear();
+  const startMonth = s.getMonth();
+  const elapsed = (ty - startYear) * 12 + (tm - startMonth);
+  return Math.max(0, elapsed);
+}
+
+// Given a prepaid item and a target YYYY-MM, return how much to recognize this month.
+// Returns 0 if item is not active in the target month.
+function computePrepaidMonthAmount(item, targetMonth) {
+  const totalMonths = monthsBetweenInclusive(item.startDate, item.endDate);
+  if (totalMonths <= 0) return 0;
+
+  // Use openingBalance if provided (mid-life import), else totalAmount
+  const amortizableAmount = Number(item.openingBalance ?? item.totalAmount) || 0;
+  if (amortizableAmount <= 0) return 0;
+
+  // Is target month within the amortization window?
+  const { year: ty, monthIndex: tm } = parseMonthStr(targetMonth);
+  const s = new Date(item.startDate + 'T00:00:00');
+  const e = new Date(item.endDate + 'T00:00:00');
+  const targetFirst = new Date(ty, tm, 1);
+  const targetLast = new Date(ty, tm + 1, 0);
+  if (targetLast < new Date(s.getFullYear(), s.getMonth(), 1)) return 0;
+  if (targetFirst > new Date(e.getFullYear(), e.getMonth() + 1, 0)) return 0;
+
+  // How many months from opening balance are still to be recognized?
+  // If openingBalance is provided, we treat startDate as the "reference start" for the
+  // remaining balance — caller should set startDate appropriately.
+  const recognizedBefore = monthsRecognizedBefore(item, targetMonth);
+  const remainingMonths = totalMonths - recognizedBefore;
+  if (remainingMonths <= 0) return 0;
+
+  // Straight-line: amortizableAmount / totalMonths, but last month absorbs rounding
+  const perMonth = Math.round((amortizableAmount / totalMonths) * 100) / 100;
+
+  if (remainingMonths === 1) {
+    // Last month — use the exact remainder
+    const alreadyRecognized = perMonth * recognizedBefore;
+    const remainder = Math.round((amortizableAmount - alreadyRecognized) * 100) / 100;
+    return remainder;
+  }
+  return perMonth;
+}
+
+function computePrepaidPreview(clientData, targetMonth) {
+  const lines = [];
+  let total = 0;
+  for (const item of clientData.items || []) {
+    const amount = computePrepaidMonthAmount(item, targetMonth);
+    if (amount > 0) {
+      lines.push({
+        itemId: item.id,
+        vendor: item.vendor,
+        description: item.description || '',
+        expenseAccountId: item.expenseAccountId,
+        expenseAccountName: item.expenseAccountName,
+        startDate: item.startDate,
+        endDate: item.endDate,
+        amount,
+      });
+      total += amount;
+    }
+  }
+  return { lines, totalAmount: Math.round(total * 100) / 100 };
+}
+
+// ---- CRUD ----
+
+// Get prepaid expenses state for a client
+app.get('/api/admin/clients/:clientId/prepaid-expenses', requireAdmin, (req, res) => {
+  res.json(getClientPrepaid(req.params.clientId));
+});
+
+// Set the Prepaid Expenses GL account
+app.put('/api/admin/clients/:clientId/prepaid-expenses/account', requireAdmin, (req, res) => {
+  const { id, name } = req.body || {};
+  if (!id || !name) return res.status(400).json({ error: 'id and name required' });
+  const c = getClientPrepaid(req.params.clientId);
+  c.prepaidAccount = { id: String(id), name: String(name) };
+  savePrepaidExpenses(prepaidData);
+  res.json(c);
+});
+
+// Create a prepaid item
+app.post('/api/admin/clients/:clientId/prepaid-expenses/items', requireAdmin, (req, res) => {
+  const {
+    vendor, description, totalAmount, startDate, endDate,
+    expenseAccountId, expenseAccountName, openingBalance,
+    sourceTxnId, sourceTxnType,
+  } = req.body || {};
+
+  if (!vendor || !totalAmount || !startDate || !endDate || !expenseAccountId) {
+    return res.status(400).json({ error: 'vendor, totalAmount, startDate, endDate, expenseAccountId required' });
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+    return res.status(400).json({ error: 'startDate and endDate must be YYYY-MM-DD' });
+  }
+  if (new Date(endDate) < new Date(startDate)) {
+    return res.status(400).json({ error: 'endDate must be on or after startDate' });
+  }
+
+  const c = getClientPrepaid(req.params.clientId);
+  const item = {
+    id: Date.now().toString() + Math.random().toString(36).slice(2, 7),
+    vendor: String(vendor),
+    description: description || '',
+    totalAmount: Number(totalAmount),
+    openingBalance: openingBalance != null ? Number(openingBalance) : Number(totalAmount),
+    startDate,
+    endDate,
+    expenseAccountId: String(expenseAccountId),
+    expenseAccountName: expenseAccountName || '',
+    sourceTxnId: sourceTxnId || null,
+    sourceTxnType: sourceTxnType || null,
+    createdAt: new Date().toISOString(),
+    completedAt: null,
+  };
+  c.items.push(item);
+  savePrepaidExpenses(prepaidData);
+  res.json(item);
+});
+
+// Update a prepaid item
+app.put('/api/admin/clients/:clientId/prepaid-expenses/items/:id', requireAdmin, (req, res) => {
+  const c = getClientPrepaid(req.params.clientId);
+  const item = c.items.find(i => i.id === req.params.id);
+  if (!item) return res.status(404).json({ error: 'item not found' });
+
+  const allowed = ['vendor', 'description', 'totalAmount', 'openingBalance', 'startDate', 'endDate', 'expenseAccountId', 'expenseAccountName'];
+  for (const key of allowed) {
+    if (req.body[key] !== undefined) {
+      item[key] = ['totalAmount', 'openingBalance'].includes(key) ? Number(req.body[key]) : req.body[key];
+    }
+  }
+  savePrepaidExpenses(prepaidData);
+  res.json(item);
+});
+
+// Delete a prepaid item
+app.delete('/api/admin/clients/:clientId/prepaid-expenses/items/:id', requireAdmin, (req, res) => {
+  const c = getClientPrepaid(req.params.clientId);
+  const before = c.items.length;
+  c.items = c.items.filter(i => i.id !== req.params.id);
+  if (c.items.length === before) return res.status(404).json({ error: 'item not found' });
+  savePrepaidExpenses(prepaidData);
+  res.json({ success: true });
+});
+
+// Preview amortization for the current close period
+app.get('/api/admin/clients/:clientId/prepaid-expenses/preview-amortization', requireAdmin, async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    const clientData = getClientPrepaid(clientId);
+    const fixedAssetClient = getClientAssets(clientId);
+
+    // Reuse the same target-month determination as fixed assets so the two
+    // modules advance in lockstep through the close workflow.
+    const overrideMonth = req.query.month && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : null;
+    let closeDate = null;
+    if (qbo.isConnected(clientId)) {
+      try { closeDate = await qbo.getBookCloseDate(clientId); } catch (e) { /* ignore */ }
+    }
+    const targetMonth = overrideMonth || determineAmortizationMonth(fixedAssetClient, closeDate).month;
+
+    const alreadyRun = clientData.amortizationRuns.find(r => r.month === targetMonth);
+    if (alreadyRun) {
+      return res.json({ alreadyRun: true, runDetails: alreadyRun, month: targetMonth, closeDate });
+    }
+
+    if (!clientData.prepaidAccount) {
+      return res.json({
+        alreadyRun: false,
+        month: targetMonth,
+        closeDate,
+        notConfigured: true,
+        reason: 'Prepaid Expenses GL account not set',
+        eligibleCount: 0,
+        totalAmount: 0,
+        lines: [],
+      });
+    }
+
+    const { lines, totalAmount } = computePrepaidPreview(clientData, targetMonth);
+    res.json({
+      alreadyRun: false,
+      month: targetMonth,
+      closeDate,
+      prepaidAccount: clientData.prepaidAccount,
+      eligibleCount: lines.length,
+      totalAmount,
+      lines,
+    });
+  } catch (e) {
+    console.error('prepaid preview error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Run amortization and post JE to QBO
+app.post('/api/admin/clients/:clientId/prepaid-expenses/run-amortization', requireAdmin, async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    const clientData = getClientPrepaid(clientId);
+    const fixedAssetClient = getClientAssets(clientId);
+
+    if (!qbo.isConnected(clientId)) {
+      return res.status(400).json({ error: 'QuickBooks is not connected for this client.' });
+    }
+    if (!clientData.prepaidAccount) {
+      return res.status(400).json({ error: 'Prepaid Expenses GL account not set. Configure it in settings first.' });
+    }
+
+    const overrideMonth = req.body?.month && /^\d{4}-\d{2}$/.test(req.body.month) ? req.body.month : null;
+
+    let closeDate = null;
+    try { closeDate = await qbo.getBookCloseDate(clientId); } catch (e) { /* ignore */ }
+    const targetMonth = overrideMonth || determineAmortizationMonth(fixedAssetClient, closeDate).month;
+
+    // Guard: closed period
+    if (closeDate) {
+      const { year, monthIndex } = parseMonthStr(targetMonth);
+      const lastDay = lastDayOfMonthDate(year, monthIndex);
+      if (lastDay <= new Date(closeDate)) {
+        return res.status(400).json({ error: `Target month ${targetMonth} falls within closed period (close date ${closeDate})` });
+      }
+    }
+
+    const alreadyRun = clientData.amortizationRuns.find(r => r.month === targetMonth);
+    if (alreadyRun) return res.status(400).json({ error: `Prepaid amortization already run for ${targetMonth}` });
+
+    const { lines, totalAmount } = computePrepaidPreview(clientData, targetMonth);
+    if (lines.length === 0) return res.status(400).json({ error: `No prepaid items to amortize in ${targetMonth}` });
+
+    const { year, monthIndex } = parseMonthStr(targetMonth);
+    const lastDayStr = lastDayOfMonthDate(year, monthIndex).toISOString().split('T')[0];
+
+    // Build the JE: Dr each expense line, Cr Prepaid Expenses for the total
+    const jeLines = [];
+    for (const line of lines) {
+      jeLines.push({
+        accountId: line.expenseAccountId,
+        accountName: line.expenseAccountName,
+        description: `Prepaid amortization - ${line.vendor}${line.description ? ' - ' + line.description : ''}`,
+        amount: line.amount,
+        type: 'debit',
+      });
+    }
+    jeLines.push({
+      accountId: clientData.prepaidAccount.id,
+      accountName: clientData.prepaidAccount.name,
+      description: `Prepaid amortization - ${targetMonth}`,
+      amount: totalAmount,
+      type: 'credit',
+    });
+
+    const clientName = CLIENTS[clientId]?.name || clientId;
+    const result = await qbo.createJournalEntry({
+      date: lastDayStr,
+      memo: `Prepaid expense amortization - ${targetMonth} - ${clientName}`,
+      lines: jeLines,
+    }, clientId);
+
+    // Mark items complete if fully amortized after this run
+    for (const line of lines) {
+      const item = clientData.items.find(i => i.id === line.itemId);
+      if (!item) continue;
+      // If the target month is the last month in the schedule, mark complete
+      const totalMonths = monthsBetweenInclusive(item.startDate, item.endDate);
+      const recognizedBefore = monthsRecognizedBefore(item, targetMonth);
+      if (recognizedBefore + 1 >= totalMonths) {
+        item.completedAt = new Date().toISOString();
+      }
+    }
+
+    const runRecord = {
+      month: targetMonth,
+      ranAt: new Date().toISOString(),
+      journalEntryId: result.Id || null,
+      totalAmount,
+      itemCount: lines.length,
+      items: lines,
+    };
+    clientData.amortizationRuns.push(runRecord);
+    savePrepaidExpenses(prepaidData);
+
+    res.json({ success: true, run: runRecord });
+  } catch (e) {
+    console.error('prepaid run-amortization error:', e);
+    res.status(500).json({ error: `Failed to post journal entry: ${e.message}` });
+  }
+});
+
+// ---- Excel import/export for existing prepaid balances ----
+
+// Download a blank template
+app.get('/api/admin/clients/:clientId/prepaid-expenses/export-template', requireAdmin, async (req, res) => {
+  try {
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Prepaid Expenses');
+
+    ws.columns = [
+      { header: 'Vendor',              key: 'vendor',             width: 25 },
+      { header: 'Description',         key: 'description',        width: 35 },
+      { header: 'Total Amount',        key: 'totalAmount',        width: 14 },
+      { header: 'Opening Balance',     key: 'openingBalance',     width: 16 },
+      { header: 'Start Date',          key: 'startDate',          width: 14 },
+      { header: 'End Date',            key: 'endDate',            width: 14 },
+      { header: 'Expense Account ID',  key: 'expenseAccountId',   width: 20 },
+      { header: 'Expense Account Name',key: 'expenseAccountName', width: 30 },
+    ];
+    ws.getRow(1).font = { bold: true };
+
+    // Example row to show format (comment explains it's safe to delete)
+    ws.addRow({
+      vendor: 'Acme Insurance',
+      description: '12-month policy',
+      totalAmount: 1200,
+      openingBalance: 800,
+      startDate: '2026-01-01',
+      endDate: '2026-12-31',
+      expenseAccountId: '',
+      expenseAccountName: 'Insurance Expense',
+    });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="prepaid-expenses-template.xlsx"');
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Import existing prepaid balances from Excel (replaces the item list)
+app.post('/api/admin/clients/:clientId/prepaid-expenses/import-excel', requireAdmin, excelUpload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(req.file.buffer);
+    const ws = wb.worksheets[0];
+    if (!ws) return res.status(400).json({ error: 'Empty workbook' });
+
+    const c = getClientPrepaid(req.params.clientId);
+    const imported = [];
+    const warnings = [];
+
+    // Header row at row 1; data from row 2
+    // Build a header-to-column-index map tolerant to case/whitespace
+    const headerMap = {};
+    ws.getRow(1).eachCell((cell, col) => {
+      headerMap[String(cell.value || '').trim().toLowerCase()] = col;
+    });
+
+    const idx = {
+      vendor: headerMap['vendor'],
+      description: headerMap['description'],
+      totalAmount: headerMap['total amount'],
+      openingBalance: headerMap['opening balance'],
+      startDate: headerMap['start date'],
+      endDate: headerMap['end date'],
+      expenseAccountId: headerMap['expense account id'],
+      expenseAccountName: headerMap['expense account name'],
+    };
+
+    function cellValue(row, col) {
+      if (!col) return null;
+      const v = row.getCell(col).value;
+      if (v && typeof v === 'object' && 'result' in v) return v.result;
+      if (v instanceof Date) return v.toISOString().slice(0, 10);
+      return v;
+    }
+    function toDateStr(v) {
+      if (!v) return null;
+      if (v instanceof Date) return v.toISOString().slice(0, 10);
+      const s = String(v).trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+      const d = new Date(s);
+      if (!isNaN(d)) return d.toISOString().slice(0, 10);
+      return null;
+    }
+
+    for (let r = 2; r <= ws.rowCount; r++) {
+      const row = ws.getRow(r);
+      const vendor = cellValue(row, idx.vendor);
+      if (!vendor) continue; // skip blank rows
+      const totalAmount = Number(cellValue(row, idx.totalAmount));
+      const openingBalance = idx.openingBalance ? Number(cellValue(row, idx.openingBalance)) : totalAmount;
+      const startDate = toDateStr(cellValue(row, idx.startDate));
+      const endDate = toDateStr(cellValue(row, idx.endDate));
+      const expenseAccountId = cellValue(row, idx.expenseAccountId);
+      const expenseAccountName = cellValue(row, idx.expenseAccountName);
+
+      if (!totalAmount || !startDate || !endDate) {
+        warnings.push(`Row ${r}: missing required fields, skipped`);
+        continue;
+      }
+      imported.push({
+        id: Date.now().toString() + Math.random().toString(36).slice(2, 7),
+        vendor: String(vendor),
+        description: String(cellValue(row, idx.description) || ''),
+        totalAmount,
+        openingBalance: isNaN(openingBalance) ? totalAmount : openingBalance,
+        startDate,
+        endDate,
+        expenseAccountId: expenseAccountId ? String(expenseAccountId) : '',
+        expenseAccountName: expenseAccountName ? String(expenseAccountName) : '',
+        sourceTxnId: null,
+        sourceTxnType: null,
+        createdAt: new Date().toISOString(),
+        completedAt: null,
+      });
+    }
+
+    c.items = imported;
+    savePrepaidExpenses(prepaidData);
+
+    res.json({ success: true, itemCount: imported.length, warnings });
+  } catch (e) {
+    console.error('prepaid import error:', e);
+    res.status(500).json({ error: 'Failed to import Excel file: ' + e.message });
+  }
+});
+
+// ========================================
 // START SERVER
 // ========================================
 app.listen(PORT, '0.0.0.0', () => {

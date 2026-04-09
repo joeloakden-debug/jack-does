@@ -17,6 +17,8 @@ function logout() {
 let currentFilter = 'pending';
 let allAnalyses = [];
 let qboAccounts = []; // Chart of accounts from QuickBooks
+let prepaidState = { prepaidAccount: null, items: [], amortizationRuns: [] };
+let prepaidPreview = null; // cached preview for the current close period
 
 // ========================================
 // LOAD DATA
@@ -997,6 +999,8 @@ async function loadClientFixedAssets() {
     }
 
     renderAssetClasses();
+    // Load prepaid state in parallel — renderCloseSteps depends on both
+    await loadClientPrepaid();
     await renderFixedAssets();
   } catch (e) { console.error('Failed to load fixed assets:', e); }
 }
@@ -1192,17 +1196,43 @@ function buildCloseSteps(period) {
       actionLabel: hasAssets ? 're-sync' : 'sync now',
       meta: '',
     },
-    {
-      id: 'prepaid',
-      num: 2,
-      title: 'prepaid expenses',
-      desc: 'amortize prepaid expenses for the period.',
-      status: 'skipped',
-      statusLabel: 'not configured',
-      action: null,
-      actionLabel: 'coming soon',
-      meta: '',
-    },
+    (() => {
+      // Prepaid expenses — status driven by prepaidPreview + prepaidState
+      const configured = !!prepaidState.prepaidAccount;
+      const hasItems = (prepaidState.items || []).length > 0;
+      const prepaidRun = (prepaidState.amortizationRuns || []).find(r => r.month === month);
+      let status, statusLabel, action, actionLabel, meta;
+      if (!configured || !hasItems) {
+        status = 'skipped';
+        statusLabel = !configured ? 'not configured' : 'no items';
+        action = null;
+        actionLabel = 'configure in settings';
+        meta = '';
+      } else if (prepaidRun) {
+        status = 'complete';
+        statusLabel = `posted $${Number(prepaidRun.totalAmount || 0).toFixed(2)} for ${prepaidRun.itemCount} item${prepaidRun.itemCount !== 1 ? 's' : ''}`;
+        action = 'run-prepaid';
+        actionLabel = 'view run';
+        meta = '';
+      } else {
+        const eligibleCount = prepaidPreview?.eligibleCount || 0;
+        const eligibleTotal = Number(prepaidPreview?.totalAmount || 0);
+        status = 'ready';
+        statusLabel = eligibleCount > 0
+          ? `${eligibleCount} item${eligibleCount !== 1 ? 's' : ''} ready — $${eligibleTotal.toFixed(2)}`
+          : 'nothing to amortize this period';
+        action = 'run-prepaid';
+        actionLabel = 'run amortization';
+        meta = '';
+      }
+      return {
+        id: 'prepaid',
+        num: 2,
+        title: 'prepaid expenses',
+        desc: 'amortize prepaid expenses for the period.',
+        status, statusLabel, action, actionLabel, meta,
+      };
+    })(),
     {
       id: 'accruals',
       num: 3,
@@ -1358,6 +1388,8 @@ document.addEventListener('click', (e) => {
     autoSyncAndImportFromQbo().then(() => { currentClosePeriod = null; renderCloseSteps(); });
   } else if (action === 'run-amort') {
     openRunAmortization();
+  } else if (action === 'run-prepaid') {
+    openRunPrepaid();
   } else if (action === 'export') {
     exportFixedAssetsExcel();
   }
@@ -1395,6 +1427,291 @@ async function exportFixedAssetsExcel() {
     }
   } catch (e) { alert('export failed: ' + e.message); renderReviewPanel(null); }
   if (btn) { btn.textContent = 'export to Excel'; btn.disabled = false; }
+}
+
+// ========================================
+// PREPAID EXPENSES MODULE
+// ========================================
+
+async function loadClientPrepaid() {
+  if (!selectedClientId) return;
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses`, {
+      headers: { 'Authorization': getAuth() },
+    });
+    const data = await res.json();
+    prepaidState = {
+      prepaidAccount: data.prepaidAccount || null,
+      items: data.items || [],
+      amortizationRuns: data.amortizationRuns || [],
+    };
+    // Also fetch preview for current close period so step card can show eligible total
+    try {
+      const pvRes = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/preview-amortization`, {
+        headers: { 'Authorization': getAuth() },
+      });
+      prepaidPreview = await pvRes.json();
+    } catch (e) { prepaidPreview = null; }
+  } catch (e) {
+    console.error('Failed to load prepaid expenses:', e);
+    prepaidState = { prepaidAccount: null, items: [], amortizationRuns: [] };
+    prepaidPreview = null;
+  }
+  renderPrepaidSettings();
+}
+
+function fmtMoney(n) {
+  return '$' + (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function renderPrepaidSettings() {
+  // Account picker
+  const acctSelect = document.getElementById('prepaid-account-select');
+  if (acctSelect) {
+    const eligible = qboAccounts.filter(a =>
+      ['Other Current Asset', 'Other Asset', 'Prepaid Expenses'].includes(a.type) ||
+      (a.name || '').toLowerCase().includes('prepaid')
+    );
+    acctSelect.innerHTML = '<option value="">select prepaid expenses account…</option>' +
+      eligible.map(a =>
+        `<option value="${a.id}" data-name="${(a.name || '').replace(/"/g, '&quot;')}" ${prepaidState.prepaidAccount?.id === a.id ? 'selected' : ''}>${a.name} (${a.type})</option>`
+      ).join('');
+  }
+
+  // Items list
+  const list = document.getElementById('prepaid-items-list');
+  if (!list) return;
+
+  if (!prepaidState.items.length) {
+    list.innerHTML = '<p style="color:var(--gray-400);text-align:center;padding:20px;font-size:0.85rem;">no prepaid items yet — add one manually or import from Excel</p>';
+    return;
+  }
+
+  list.innerHTML = prepaidState.items.map(item => {
+    const completed = !!item.completedAt;
+    const totalMonths = (() => {
+      const s = new Date(item.startDate);
+      const e = new Date(item.endDate);
+      return (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth()) + 1;
+    })();
+    const amortizable = Number(item.openingBalance ?? item.totalAmount) || 0;
+    const perMonth = totalMonths > 0 ? amortizable / totalMonths : 0;
+    return `
+      <div class="asset-class-card ${completed ? 'completed' : ''}">
+        <div class="asset-class-main">
+          <div class="asset-class-header">
+            <span class="asset-class-name">${item.vendor}</span>
+            ${completed ? '<span class="asset-class-method-badge">done</span>' : ''}
+          </div>
+          <div class="asset-class-params">
+            ${item.description ? `<span>${item.description}</span>` : ''}
+            <span>${item.startDate} → ${item.endDate}</span>
+            <span>${totalMonths} month${totalMonths !== 1 ? 's' : ''}</span>
+            ${item.expenseAccountName ? `<span>expense acct: ${item.expenseAccountName}</span>` : ''}
+          </div>
+          <div class="asset-class-totals" style="display:flex;gap:20px;margin-top:8px;padding-top:8px;border-top:1px solid var(--gray-200);font-size:0.82rem;">
+            <span style="color:var(--gray-600);">total: <strong style="color:var(--gray-900);">${fmtMoney(item.totalAmount)}</strong></span>
+            <span style="color:var(--gray-600);">opening bal: <strong style="color:var(--gray-900);">${fmtMoney(amortizable)}</strong></span>
+            <span style="color:var(--gray-600);">per month: <strong style="color:var(--gray-900);">${fmtMoney(perMonth)}</strong></span>
+          </div>
+        </div>
+        <div class="asset-card-actions">
+          <button class="btn-edit-client" onclick="openEditPrepaid('${item.id}')">edit</button>
+          <button class="btn-delete-asset" onclick="deletePrepaid('${item.id}')">delete</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+async function savePrepaidAccount() {
+  const select = document.getElementById('prepaid-account-select');
+  if (!select || !select.value) return;
+  const id = select.value;
+  const name = select.options[select.selectedIndex].dataset.name;
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/account`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ id, name }),
+    });
+    if (!res.ok) { alert('save failed'); return; }
+    await loadClientPrepaid();
+    renderCloseSteps();
+  } catch (e) { alert('save failed: ' + e.message); }
+}
+
+// ---- Add/Edit modal ----
+
+let editingPrepaidId = null;
+
+function openAddPrepaid() {
+  editingPrepaidId = null;
+  document.getElementById('prepaid-modal-title').textContent = 'add prepaid expense';
+  document.getElementById('prepaid-vendor').value = '';
+  document.getElementById('prepaid-description').value = '';
+  document.getElementById('prepaid-total').value = '';
+  document.getElementById('prepaid-opening').value = '';
+  document.getElementById('prepaid-start').value = '';
+  document.getElementById('prepaid-end').value = '';
+  populatePrepaidExpenseAccountSelect('');
+  document.getElementById('prepaid-modal').style.display = 'flex';
+}
+
+function openEditPrepaid(id) {
+  const item = prepaidState.items.find(i => i.id === id);
+  if (!item) return;
+  editingPrepaidId = id;
+  document.getElementById('prepaid-modal-title').textContent = 'edit prepaid expense';
+  document.getElementById('prepaid-vendor').value = item.vendor || '';
+  document.getElementById('prepaid-description').value = item.description || '';
+  document.getElementById('prepaid-total').value = item.totalAmount || '';
+  document.getElementById('prepaid-opening').value = item.openingBalance ?? item.totalAmount ?? '';
+  document.getElementById('prepaid-start').value = item.startDate || '';
+  document.getElementById('prepaid-end').value = item.endDate || '';
+  populatePrepaidExpenseAccountSelect(item.expenseAccountId);
+  document.getElementById('prepaid-modal').style.display = 'flex';
+}
+
+function populatePrepaidExpenseAccountSelect(selectedId) {
+  const select = document.getElementById('prepaid-expense-account');
+  if (!select) return;
+  const expenseAccounts = qboAccounts.filter(a => ['Expense', 'Other Expense', 'Cost of Goods Sold'].includes(a.type));
+  select.innerHTML = '<option value="">select expense account…</option>' +
+    expenseAccounts.map(a =>
+      `<option value="${a.id}" data-name="${(a.name || '').replace(/"/g, '&quot;')}" ${a.id === selectedId ? 'selected' : ''}>${a.name}</option>`
+    ).join('');
+}
+
+function closePrepaidModal() {
+  document.getElementById('prepaid-modal').style.display = 'none';
+  editingPrepaidId = null;
+}
+
+async function savePrepaid() {
+  const vendor = document.getElementById('prepaid-vendor').value.trim();
+  const description = document.getElementById('prepaid-description').value.trim();
+  const totalAmount = parseFloat(document.getElementById('prepaid-total').value);
+  const openingRaw = document.getElementById('prepaid-opening').value;
+  const openingBalance = openingRaw === '' ? totalAmount : parseFloat(openingRaw);
+  const startDate = document.getElementById('prepaid-start').value;
+  const endDate = document.getElementById('prepaid-end').value;
+  const select = document.getElementById('prepaid-expense-account');
+  const expenseAccountId = select.value;
+  const expenseAccountName = select.options[select.selectedIndex]?.dataset.name || '';
+
+  if (!vendor || !totalAmount || !startDate || !endDate || !expenseAccountId) {
+    alert('vendor, amount, start/end dates, and expense account are required');
+    return;
+  }
+
+  const payload = { vendor, description, totalAmount, openingBalance, startDate, endDate, expenseAccountId, expenseAccountName };
+
+  try {
+    const url = editingPrepaidId
+      ? `/api/admin/clients/${selectedClientId}/prepaid-expenses/items/${editingPrepaidId}`
+      : `/api/admin/clients/${selectedClientId}/prepaid-expenses/items`;
+    const method = editingPrepaidId ? 'PUT' : 'POST';
+    const res = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); alert('save failed: ' + (e.error || res.status)); return; }
+    closePrepaidModal();
+    await loadClientPrepaid();
+    renderCloseSteps();
+  } catch (e) { alert('save failed: ' + e.message); }
+}
+
+async function deletePrepaid(id) {
+  if (!confirm('delete this prepaid item?')) return;
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/items/${id}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': getAuth() },
+    });
+    if (!res.ok) { alert('delete failed'); return; }
+    await loadClientPrepaid();
+    renderCloseSteps();
+  } catch (e) { alert('delete failed: ' + e.message); }
+}
+
+// ---- Excel import/export ----
+
+async function downloadPrepaidTemplate() {
+  const res = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/export-template`, {
+    headers: { 'Authorization': getAuth() },
+  });
+  if (!res.ok) { alert('download failed'); return; }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'prepaid-expenses-template.xlsx';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function importPrepaidExcel(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/import-excel`, {
+      method: 'POST',
+      headers: { 'Authorization': getAuth() },
+      body: formData,
+    });
+    const data = await res.json();
+    if (!res.ok) { alert('import failed: ' + (data.error || res.status)); return; }
+    let msg = `imported ${data.itemCount} item${data.itemCount !== 1 ? 's' : ''}`;
+    if (data.warnings?.length) msg += '\n\nwarnings:\n' + data.warnings.join('\n');
+    alert(msg);
+    await loadClientPrepaid();
+    renderCloseSteps();
+  } catch (e) { alert('import failed: ' + e.message); }
+}
+
+// ---- Run amortization ----
+
+async function openRunPrepaid() {
+  if (!selectedClientId) return;
+  try {
+    // Refresh preview
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/preview-amortization`, {
+      headers: { 'Authorization': getAuth() },
+    });
+    const data = await res.json();
+
+    if (data.alreadyRun) {
+      alert(`Prepaid amortization already run for ${data.month}.\n\nTotal: ${fmtMoney(data.runDetails.totalAmount)}\nItems: ${data.runDetails.itemCount}`);
+      return;
+    }
+    if (data.notConfigured) {
+      alert('Prepaid Expenses GL account is not set. Configure it in the settings tab first.');
+      return;
+    }
+    if (!data.lines || data.lines.length === 0) {
+      alert(`No prepaid items to amortize for ${data.month}.`);
+      return;
+    }
+
+    const linesText = data.lines.map(l =>
+      `  ${l.vendor}${l.description ? ' - ' + l.description : ''}: ${fmtMoney(l.amount)} → ${l.expenseAccountName || '(no account)'}`
+    ).join('\n');
+    const confirmMsg = `Post prepaid amortization for ${data.month}?\n\n${linesText}\n\nTotal: ${fmtMoney(data.totalAmount)}\nCredit: ${data.prepaidAccount.name}\n\nThis will post a journal entry to QBO.`;
+    if (!confirm(confirmMsg)) return;
+
+    const postRes = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/run-amortization`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ month: data.month }),
+    });
+    const postData = await postRes.json();
+    if (!postRes.ok) { alert('run failed: ' + (postData.error || postRes.status)); return; }
+    alert(`Posted prepaid amortization for ${postData.run.month}\nTotal: ${fmtMoney(postData.run.totalAmount)}\nJE ID: ${postData.run.journalEntryId || '(unknown)'}`);
+    await loadClientPrepaid();
+    renderCloseSteps();
+  } catch (e) { alert('error: ' + e.message); }
 }
 
 // ========================================
@@ -1591,6 +1908,20 @@ document.getElementById('class-modal-cancel').addEventListener('click', closeCla
 document.getElementById('asset-class-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeClassModal(); });
 document.getElementById('btn-suggest-class-amort').addEventListener('click', suggestClassAmortization);
 document.getElementById('btn-apply-class-ai').addEventListener('click', applyClassAiSuggestion);
+
+// Prepaid expenses settings wiring
+document.getElementById('btn-save-prepaid-account').addEventListener('click', savePrepaidAccount);
+document.getElementById('btn-add-prepaid').addEventListener('click', openAddPrepaid);
+document.getElementById('btn-download-prepaid-template').addEventListener('click', downloadPrepaidTemplate);
+document.getElementById('prepaid-import-file').addEventListener('change', (e) => {
+  if (e.target.files && e.target.files[0]) {
+    importPrepaidExcel(e.target.files[0]);
+    e.target.value = '';
+  }
+});
+document.getElementById('prepaid-modal-save').addEventListener('click', savePrepaid);
+document.getElementById('prepaid-modal-cancel').addEventListener('click', closePrepaidModal);
+document.getElementById('prepaid-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closePrepaidModal(); });
 
 // Temporary: QBO attachment pipeline smoke test
 document.getElementById('btn-test-attachments').addEventListener('click', async () => {

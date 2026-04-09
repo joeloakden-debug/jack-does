@@ -153,10 +153,30 @@
           <div class="settings-module">
             <div class="settings-module-header">
               <h3>prepaid expenses</h3>
-              <p>under construction — QBO attachment pipeline test</p>
+              <p>amortize prepaid balances over their service window. Part B (auto-detect new prepaids from invoices) coming next.</p>
             </div>
-            <button class="btn btn-secondary" id="btn-test-attachments">test QBO attachments</button>
-            <pre id="attachment-test-output" style="display:none;margin-top:12px;padding:12px;background:#0f1115;color:#d8dde6;border-radius:6px;font-size:12px;overflow:auto;max-height:400px;white-space:pre-wrap;"></pre>
+
+            <div class="form-group" style="margin-bottom:12px;">
+              <label style="display:block;font-size:0.82rem;color:var(--gray-600);margin-bottom:4px;">prepaid expenses GL account</label>
+              <div style="display:flex;gap:8px;align-items:center;">
+                <select id="prepaid-account-select" style="flex:1;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;"></select>
+                <button class="btn btn-secondary" id="btn-save-prepaid-account">save</button>
+              </div>
+            </div>
+
+            <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
+              <button class="btn btn-primary" id="btn-add-prepaid">+ add item</button>
+              <button class="btn btn-secondary" id="btn-download-prepaid-template">download template</button>
+              <label class="btn btn-secondary" style="cursor:pointer;margin:0;">
+                import from Excel
+                <input type="file" id="prepaid-import-file" accept=".xlsx" style="display:none;">
+              </label>
+              <span style="flex:1;"></span>
+              <button class="btn btn-secondary" id="btn-test-attachments" title="developer tool">test QBO attachments</button>
+            </div>
+            <pre id="attachment-test-output" style="display:none;padding:12px;background:#0f1115;color:#d8dde6;border-radius:6px;font-size:12px;overflow:auto;max-height:300px;white-space:pre-wrap;"></pre>
+
+            <div id="prepaid-items-list"></div>
           </div>
 
           <div class="settings-module settings-module-disabled">
@@ -258,6 +278,47 @@
           <div class="modal-actions">
             <button class="btn-modal-save" id="class-modal-save">save</button>
             <button class="btn-modal-cancel" id="class-modal-cancel">cancel</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Add/Edit prepaid expense modal -->
+      <div class="modal-overlay" id="prepaid-modal" style="display:none;">
+        <div class="modal-card" style="max-width:520px;">
+          <h3 id="prepaid-modal-title">add prepaid expense</h3>
+          <div class="form-group">
+            <label>vendor</label>
+            <input type="text" id="prepaid-vendor" placeholder="e.g. Acme Insurance">
+          </div>
+          <div class="form-group">
+            <label>description (optional)</label>
+            <input type="text" id="prepaid-description" placeholder="e.g. 12-month policy">
+          </div>
+          <div class="form-group">
+            <label>total invoice amount ($)</label>
+            <input type="number" step="0.01" id="prepaid-total" placeholder="1200.00">
+          </div>
+          <div class="form-group">
+            <label>opening balance ($) <span style="color:var(--gray-500);font-weight:normal;">— defaults to total; set lower for mid-life imports</span></label>
+            <input type="number" step="0.01" id="prepaid-opening" placeholder="auto">
+          </div>
+          <div class="form-group" style="display:flex;gap:12px;">
+            <div style="flex:1;">
+              <label>start date</label>
+              <input type="date" id="prepaid-start">
+            </div>
+            <div style="flex:1;">
+              <label>end date</label>
+              <input type="date" id="prepaid-end">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>expense account (where monthly recognition hits)</label>
+            <select id="prepaid-expense-account"></select>
+          </div>
+          <div class="modal-actions">
+            <button class="btn-modal-save" id="prepaid-modal-save">save</button>
+            <button class="btn-modal-cancel" id="prepaid-modal-cancel">cancel</button>
           </div>
         </div>
       </div>
