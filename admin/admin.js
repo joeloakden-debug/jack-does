@@ -1310,6 +1310,44 @@ document.getElementById('asset-class-modal').addEventListener('click', (e) => { 
 document.getElementById('btn-suggest-class-amort').addEventListener('click', suggestClassAmortization);
 document.getElementById('btn-apply-class-ai').addEventListener('click', applyClassAiSuggestion);
 
+// Silent sync-and-import path used right after a fresh QBO OAuth connect.
+// Skips the review modal entirely — hits the sync endpoint, imports every
+// account it returns via the shared importAssetsFromQboAccounts helper, then
+// refreshes the class summary. Shows a brief status message on the
+// amortization-status banner so the user knows something happened.
+async function autoSyncAndImportFromQbo() {
+  if (!selectedClientId) return;
+  const statusEl = document.getElementById('amortization-status');
+  statusEl.textContent = 'syncing fixed assets from QuickBooks...';
+  statusEl.style.display = '';
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/sync-qbo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+    });
+    const data = await res.json();
+    if (data.error) {
+      statusEl.textContent = `sync failed: ${data.error}`;
+      return;
+    }
+    const accounts = data.accounts || [];
+    if (accounts.length === 0) {
+      statusEl.textContent = 'no new fixed asset accounts found in QBO';
+      await loadClientFixedAssets();
+      return;
+    }
+    const newClassIds = await importAssetsFromQboAccounts(accounts);
+    await loadClientFixedAssets();
+    statusEl.textContent = `imported ${accounts.length} fixed asset${accounts.length !== 1 ? 's' : ''} from QuickBooks`;
+    if (newClassIds.length > 0) {
+      runAISuggestionsForClasses(newClassIds);
+    }
+  } catch (e) {
+    console.error('auto sync failed:', e);
+    statusEl.textContent = 'sync failed — try clicking "sync from QBO" manually';
+  }
+}
+
 // QBO Sync
 async function syncFromQBO() {
   if (!selectedClientId) return;
@@ -2093,12 +2131,13 @@ async function init() {
         document.getElementById('view-clients').style.display = '';
         await loadClients();
         openClientDetail(connectedClientId);
-        // Auto-jump to the fixed-assets tab and trigger a sync so the user
-        // doesn't have to click again — the whole point of connecting is to
-        // pull data, so just do it.
-        setTimeout(() => {
+        // Auto-jump to the fixed-assets tab and silently sync + import everything
+        // from QBO. The whole point of connecting is to pull data — no reason to
+        // make the user click through a modal just to confirm what they already
+        // asked for by clicking "connect quickbooks".
+        setTimeout(async () => {
           switchClientTab('fixed-assets');
-          setTimeout(() => syncFromQBO(), 400);
+          await autoSyncAndImportFromQbo();
         }, 300);
       }, 100);
     }
