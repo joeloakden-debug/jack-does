@@ -657,50 +657,13 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
   return out;
 }
 
-/**
- * Update the QBO book close date. Pass a YYYY-MM-DD string, or null to clear.
- * IMPORTANT: the "Close the books" feature must be enabled in QBO settings
- * (Gear → Account and Settings → Advanced → Accounting → Close the books) for
- * this to work. If the toggle is off, QBO silently no-ops the update.
- */
-async function updateBookCloseDate(clientId = 'default', newDate) {
-  const qb = await getQBClient(clientId);
-  const prefs = await getPreferences(clientId);
-  if (!prefs) throw new Error('Could not load QBO Preferences');
-  if (!prefs.Id || !prefs.SyncToken) {
-    throw new Error('QBO Preferences missing Id or SyncToken — cannot perform sparse update');
-  }
-
-  // Minimal sparse update: Id, SyncToken, sparse flag, and just the
-  // AccountingInfoPrefs block (merged with existing values so we don't wipe
-  // siblings like FirstMonthOfFiscalYear).
-  const existingAcct = prefs.AccountingInfoPrefs || {};
-  const acctPrefs = { ...existingAcct };
-  if (newDate) {
-    acctPrefs.BookCloseDate = newDate;
-  } else {
-    delete acctPrefs.BookCloseDate;
-  }
-
-  const payload = {
-    Id: prefs.Id,
-    SyncToken: prefs.SyncToken,
-    sparse: true,
-    AccountingInfoPrefs: acctPrefs,
-  };
-
-  return new Promise((resolve, reject) => {
-    qb.updatePreferences(payload, (err, result) => {
-      if (err) {
-        console.error('[qbo] updatePreferences error:', err?.fault?.error || err.message || err);
-        return reject(err);
-      }
-      const saved = result?.AccountingInfoPrefs?.BookCloseDate || null;
-      console.log(`[qbo] BookCloseDate update — requested: ${newDate}, saved: ${saved}`);
-      resolve(saved);
-    });
-  });
-}
+// NOTE: there is intentionally no updateBookCloseDate function. QBO's
+// Preferences API silently rejects third-party BookCloseDate writes — it
+// accepts the PUT and returns 200 OK, but the response and the next GET both
+// show the old value. Confirmed via live logging on a company where the
+// "Close the books" feature was enabled. Users must set the close date in
+// QBO's own UI (Gear → Account and Settings → Advanced → Accounting → Close
+// the books).
 
 /**
  * Helper to build date filter criteria for find* methods
@@ -1089,7 +1052,6 @@ module.exports = {
   getCompanyInfo,
   getPreferences,
   getBookCloseDate,
-  updateBookCloseDate,
   getAmortizationRunsFromQBO,
   getFixedAssetAcquisitions,
   getRecentInvoices,

@@ -105,11 +105,11 @@
               <p id="qbo-close-date-display" style="font-size:0.88rem;color:var(--gray-700);margin:0;">loading...</p>
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-              <input type="date" id="qbo-close-date-input" style="padding:6px 10px;border:1px solid var(--gray-300);border-radius:4px;font-size:0.88rem;">
-              <button class="btn-add-client" id="btn-save-close-date" style="background:var(--blue-600);">save to QBO</button>
+              <a id="btn-open-qbo-close-settings" href="https://qbo.intuit.com/app/accountsettings" target="_blank" rel="noopener" style="display:none;padding:6px 12px;background:var(--blue-600);color:white;border-radius:4px;font-size:0.82rem;text-decoration:none;font-weight:500;">set in QuickBooks &rarr;</a>
               <button class="btn-edit-client" id="btn-refresh-close-date" title="re-pull the close date from QBO">refresh</button>
             </div>
           </div>
+          <p style="font-size:0.76rem;color:var(--gray-500);margin:8px 0 0 0;font-style:italic;">QuickBooks doesn't allow third-party apps to change the book close date. Set it in QBO (Settings &#9881; &rarr; Account and settings &rarr; Advanced &rarr; Accounting &rarr; Close the books), then click refresh to pull the updated date.</p>
           <div id="qbo-close-date-status" style="font-size:0.82rem;margin-top:8px;display:none;"></div>
         </div>
 
