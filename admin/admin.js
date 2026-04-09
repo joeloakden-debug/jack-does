@@ -787,7 +787,11 @@ function switchClientTab(tab) {
   document.querySelector(`.sub-nav-btn[data-client-tab="${tab}"]`)?.classList.add('active');
   document.querySelectorAll('.client-tab').forEach(t => t.style.display = 'none');
   document.getElementById(`client-tab-${tab}`).style.display = '';
-  if (tab === 'fixed-assets' && selectedClientId) loadClientFixedAssets();
+  // Both 'close' and 'settings' need the fixed-asset data loaded (close uses
+  // it to build step cards, settings uses it for the asset classes list).
+  if ((tab === 'close' || tab === 'settings') && selectedClientId) {
+    loadClientFixedAssets();
+  }
 }
 
 document.querySelectorAll('.sub-nav-btn').forEach(btn => {
@@ -993,7 +997,7 @@ async function loadClientFixedAssets() {
     }
 
     renderAssetClasses();
-    renderFixedAssets();
+    await renderFixedAssets();
   } catch (e) { console.error('Failed to load fixed assets:', e); }
 }
 
@@ -1100,19 +1104,275 @@ function renderAssetClasses() {
   }).join('');
 }
 
-// Per-asset list was removed from the UI in favor of class-level summaries
-// (renderAssetClasses now shows count + total cost/accum/NBV per class). The
-// detailed asset list still lives in the exported Excel workbook. This function
-// just keeps the "last amortization run" footer line up to date.
+// Rerender anything in the close-workflow tab that depends on fixedAssetRuns
+// or allFixedAssets. Previously this touched a per-asset list; now it just
+// re-renders the step cards so status badges stay in sync. Returns the
+// renderCloseSteps promise so callers can await the DOM update if they need
+// to write into step-owned elements (e.g. the reconciliation panel).
 function renderFixedAssets() {
-  const lastRunEl = document.getElementById('last-amortization-run');
-  if (!lastRunEl) return;
-  if (fixedAssetRuns.length > 0) {
-    const lastRun = fixedAssetRuns[fixedAssetRuns.length - 1];
-    lastRunEl.textContent = `last run: ${lastRun.month} on ${new Date(lastRun.ranAt).toLocaleDateString()} — $${lastRun.totalAmount.toFixed(2)} (${lastRun.assetCount} assets)`;
-  } else {
-    lastRunEl.textContent = 'no amortization runs yet';
+  return renderCloseSteps();
+}
+
+// ========================================
+// MONTH-END CLOSE WORKFLOW
+// ========================================
+//
+// The close workflow is an ordered list of step cards. Each step has a status
+// (complete / ready / locked / skipped / running) and optionally an action.
+// Steps are locked by default if any prior non-skipped step is not complete,
+// so users work through the list in order.
+//
+// Adding a new module later (prepaid, accruals, etc.) = add a new step object
+// to the list in buildCloseSteps() and implement its completion check + action
+// handler. No UI wiring needed.
+
+// Tracks the current closing period so the step cards can reference it.
+let currentClosePeriod = null;
+
+/**
+ * Ask the server what period we should be closing. Uses the existing preview-
+ * amortization endpoint because it already runs the "next month after last
+ * close" logic we need.
+ */
+async function fetchCurrentClosePeriod() {
+  if (!selectedClientId) return null;
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/preview-amortization`, {
+      headers: { 'Authorization': getAuth() },
+    });
+    const data = await res.json();
+    return {
+      month: data.month || null,
+      reason: data.reason || '',
+      closeDate: data.closeDate || null,
+      alreadyRun: !!data.alreadyRun,
+      eligibleCount: data.eligibleCount || 0,
+      totalAmount: data.totalAmount || 0,
+    };
+  } catch (e) {
+    console.error('fetchCurrentClosePeriod failed', e);
+    return null;
   }
+}
+
+function formatPeriodLabel(yyyymm) {
+  if (!yyyymm) return '—';
+  const [y, m] = yyyymm.split('-').map(Number);
+  const d = new Date(y, m - 1, 1);
+  return d.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+}
+
+/**
+ * Build the ordered list of workflow steps with status + lock state.
+ * Each step: { id, num, title, desc, status, statusLabel, action, actionLabel, meta }
+ *
+ *   status values:
+ *     'complete' — done for this period (green ✓)
+ *     'ready'    — can be run right now (blue)
+ *     'locked'   — previous required step not complete (gray)
+ *     'skipped'  — placeholder module, always counts as complete for deps
+ *     'running'  — action in progress (not currently used, reserved)
+ */
+function buildCloseSteps(period) {
+  const month = period?.month;
+  const hasAssets = allFixedAssets.some(a => a.active);
+  const assetCount = allFixedAssets.filter(a => a.active).length;
+  const runForThisMonth = fixedAssetRuns.find(r => r.month === month);
+  const lastRun = fixedAssetRuns[fixedAssetRuns.length - 1];
+
+  const steps = [
+    {
+      id: 'sync',
+      num: 1,
+      title: 'sync from QuickBooks',
+      desc: 'pull the latest fixed-asset accounts from QBO and import any new ones.',
+      status: hasAssets ? 'complete' : 'ready',
+      statusLabel: hasAssets ? `${assetCount} asset${assetCount !== 1 ? 's' : ''} loaded` : 'not synced',
+      action: 'sync',
+      actionLabel: hasAssets ? 're-sync' : 'sync now',
+      meta: '',
+    },
+    {
+      id: 'prepaid',
+      num: 2,
+      title: 'prepaid expenses',
+      desc: 'amortize prepaid expenses for the period.',
+      status: 'skipped',
+      statusLabel: 'not configured',
+      action: null,
+      actionLabel: 'coming soon',
+      meta: '',
+    },
+    {
+      id: 'accruals',
+      num: 3,
+      title: 'accruals',
+      desc: 'post accrual adjustments for the period.',
+      status: 'skipped',
+      statusLabel: 'not configured',
+      action: null,
+      actionLabel: 'coming soon',
+      meta: '',
+    },
+    {
+      id: 'fixed-assets',
+      num: 4,
+      title: 'fixed asset amortization',
+      desc: 'compute monthly amortization, reconcile to QBO, post the journal entry.',
+      status: runForThisMonth ? 'complete' : 'ready',
+      statusLabel: runForThisMonth
+        ? `posted $${runForThisMonth.totalAmount.toFixed(2)} for ${runForThisMonth.assetCount} asset${runForThisMonth.assetCount !== 1 ? 's' : ''}`
+        : 'ready to run',
+      action: 'run-amort',
+      actionLabel: runForThisMonth ? 'view run' : 'run amortization',
+      meta: lastRun && !runForThisMonth ? `last run was ${lastRun.month}` : '',
+    },
+    {
+      id: 'reconciliation',
+      num: 5,
+      title: 'overall reconciliation',
+      desc: 'tie every module schedule back to the QBO trial balance.',
+      status: 'skipped',
+      statusLabel: 'per-module only (for now)',
+      action: null,
+      actionLabel: 'coming soon',
+      meta: '',
+    },
+    {
+      id: 'export',
+      num: 6,
+      title: 'export & review',
+      desc: 'generate the Excel workbook and run a Claude review pass over it.',
+      status: 'ready',
+      statusLabel: 'ready',
+      action: 'export',
+      actionLabel: 'export to Excel',
+      meta: '',
+    },
+  ];
+
+  // Apply dependency locking: once we hit a non-complete, non-skipped step,
+  // every subsequent step with an action gets locked. Skipped steps don't
+  // block progression (they're placeholders).
+  let blocked = false;
+  for (const step of steps) {
+    if (blocked && step.status !== 'skipped') {
+      step.status = 'locked';
+      step.statusLabel = 'locked';
+    }
+    if (step.status === 'ready') blocked = true;
+  }
+
+  return steps;
+}
+
+const STEP_STATUS_STYLES = {
+  complete: { bg: 'var(--green-50)', border: 'var(--green-500)', badgeBg: 'var(--green-500)', badgeFg: '#ffffff', badgeIcon: '✓' },
+  ready:    { bg: 'var(--blue-50)',  border: 'var(--blue-500)',  badgeBg: 'var(--blue-500)',  badgeFg: '#ffffff', badgeIcon: '●' },
+  locked:   { bg: 'var(--gray-50)',  border: 'var(--gray-300)',  badgeBg: 'var(--gray-300)',  badgeFg: 'var(--gray-600)', badgeIcon: '🔒' },
+  skipped:  { bg: 'var(--gray-50)',  border: 'var(--gray-200)',  badgeBg: 'var(--gray-200)',  badgeFg: 'var(--gray-500)', badgeIcon: '—' },
+  running:  { bg: 'var(--blue-50)',  border: 'var(--blue-500)',  badgeBg: 'var(--blue-500)',  badgeFg: '#ffffff', badgeIcon: '…' },
+};
+
+function renderStepCard(step) {
+  const s = STEP_STATUS_STYLES[step.status] || STEP_STATUS_STYLES.skipped;
+  const canAct = step.action && (step.status === 'ready' || step.status === 'complete');
+  const actionBtn = step.action
+    ? `<button class="btn-step-action" data-step-action="${step.action}" ${canAct ? '' : 'disabled'}>${step.actionLabel}</button>`
+    : `<span class="btn-step-action-placeholder">${step.actionLabel}</span>`;
+
+  // The fixed-assets step embeds the reconciliation panel and the export step
+  // embeds the Claude review panel. Both are hidden until their action runs.
+  let extras = '';
+  if (step.id === 'fixed-assets') {
+    extras = `<div id="reconciliation-panel" style="display:none;margin-top:12px;"></div>`;
+  } else if (step.id === 'export') {
+    extras = `<div id="claude-review-panel" style="display:none;margin-top:12px;"></div>`;
+  }
+
+  return `
+    <div class="close-step" data-step-id="${step.id}" style="background:${s.bg};border-left:4px solid ${s.border};">
+      <div class="close-step-num">${step.num}</div>
+      <div class="close-step-body">
+        <div class="close-step-title">${step.title}</div>
+        <div class="close-step-desc">${step.desc}</div>
+        <div class="close-step-status">
+          <span class="close-step-badge" style="background:${s.badgeBg};color:${s.badgeFg};">${s.badgeIcon} ${step.statusLabel}</span>
+          ${step.meta ? `<span class="close-step-meta">${step.meta}</span>` : ''}
+        </div>
+        ${extras}
+      </div>
+      <div class="close-step-action-col">${actionBtn}</div>
+    </div>`;
+}
+
+async function renderCloseSteps() {
+  const container = document.getElementById('close-steps');
+  if (!container || !selectedClientId) return;
+
+  // Resolve current period first (network). Do this once and cache.
+  if (!currentClosePeriod || currentClosePeriod._clientId !== selectedClientId) {
+    const period = await fetchCurrentClosePeriod();
+    if (period) period._clientId = selectedClientId;
+    currentClosePeriod = period;
+  }
+
+  const monthEl = document.getElementById('close-period-month');
+  const reasonEl = document.getElementById('close-period-reason');
+  if (monthEl) monthEl.textContent = formatPeriodLabel(currentClosePeriod?.month);
+  if (reasonEl) reasonEl.textContent = currentClosePeriod?.reason ? `(${currentClosePeriod.reason})` : '';
+
+  const steps = buildCloseSteps(currentClosePeriod);
+  container.innerHTML = steps.map(renderStepCard).join('');
+}
+
+// Event delegation — all step-card action buttons funnel through this one
+// handler, so adding a new step later just needs a new case here.
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-step-action]');
+  if (!btn || btn.disabled) return;
+  const action = btn.dataset.stepAction;
+  if (action === 'sync') {
+    autoSyncAndImportFromQbo().then(() => { currentClosePeriod = null; renderCloseSteps(); });
+  } else if (action === 'run-amort') {
+    openRunAmortization();
+  } else if (action === 'export') {
+    exportFixedAssetsExcel();
+  }
+});
+
+// Named export handler so the step-card button can call it directly (and so
+// it's easier to reason about than an anonymous listener).
+async function exportFixedAssetsExcel() {
+  if (!selectedClientId) return;
+  const btn = document.querySelector('[data-step-action="export"]');
+  if (btn) { btn.textContent = 'exporting & reviewing...'; btn.disabled = true; }
+  renderReviewPanel({ status: 'loading' });
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/export-excel`, {
+      headers: { 'Authorization': getAuth() },
+    });
+    if (!res.ok) { alert('export failed'); renderReviewPanel(null); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const client = allClients.find(c => c.id === selectedClientId);
+    a.download = `${client?.name || selectedClientId} - Fixed Assets.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
+    try {
+      const reviewRes = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/last-review`, {
+        headers: { 'Authorization': getAuth() },
+      });
+      const data = await reviewRes.json();
+      renderReviewPanel(data.review);
+    } catch (e) {
+      console.error('Failed to fetch review:', e);
+      renderReviewPanel({ status: 'error', summary: 'Could not load review result.', findings: [] });
+    }
+  } catch (e) { alert('export failed: ' + e.message); renderReviewPanel(null); }
+  if (btn) { btn.textContent = 'export to Excel'; btn.disabled = false; }
 }
 
 // ========================================
@@ -1837,8 +2097,11 @@ async function confirmRunAmortization() {
     const statusEl = document.getElementById('amortization-status');
     statusEl.textContent = `amortization posted to quickbooks — $${data.run.totalAmount.toFixed(2)} for ${data.run.assetCount} assets`;
     statusEl.style.display = '';
+    // Invalidate the cached close period so the step-card statuses pick up
+    // the freshly-posted run. Re-renders happen via loadClientFixedAssets.
+    currentClosePeriod = null;
+    await loadClientFixedAssets();
     if (data.reconciliation) showReconciliationResult(data.reconciliation);
-    loadClientFixedAssets();
   } catch (e) { errorEl.textContent = 'failed to post amortization'; errorEl.style.display = ''; }
   btn.textContent = 'post to quickbooks'; btn.disabled = false;
 }
@@ -1887,11 +2150,13 @@ function showReconciliationResult(rec) {
   panel.style.display = '';
 }
 
-// Fixed asset event listeners
+// Fixed asset event listeners. The old top-of-tab action buttons
+// (btn-sync-qbo-assets, btn-run-amortization, btn-export-excel) have been
+// replaced by step-card action buttons in the month-end close workflow,
+// wired up via event delegation in the data-step-action handler above.
 document.getElementById('asset-modal-cancel').addEventListener('click', closeAssetModal);
 document.getElementById('asset-modal-save').addEventListener('click', saveAsset);
 document.getElementById('asset-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeAssetModal(); });
-document.getElementById('btn-run-amortization').addEventListener('click', openRunAmortization);
 document.getElementById('btn-refresh-close-date').addEventListener('click', loadQBOCloseDate);
 document.getElementById('amortization-cancel').addEventListener('click', closeAmortizationModal);
 document.getElementById('amortization-confirm').addEventListener('click', confirmRunAmortization);
@@ -1900,50 +2165,10 @@ document.getElementById('amortization-month-input').addEventListener('change', (
   if (val && /^\d{4}-\d{2}$/.test(val)) loadAmortizationPreview(val);
 });
 document.getElementById('amortization-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeAmortizationModal(); });
-document.getElementById('btn-sync-qbo-assets').addEventListener('click', syncFromQBO);
 document.getElementById('qbo-sync-cancel').addEventListener('click', () => { document.getElementById('qbo-sync-modal').style.display = 'none'; });
 document.getElementById('qbo-sync-import').addEventListener('click', importSelectedAssets);
 document.getElementById('qbo-sync-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) document.getElementById('qbo-sync-modal').style.display = 'none'; });
 document.getElementById('btn-suggest-amort').addEventListener('click', suggestAmortization);
-
-// Excel export — runs Claude review server-side and surfaces a traffic-light panel
-// after the file download starts.
-document.getElementById('btn-export-excel').addEventListener('click', async () => {
-  if (!selectedClientId) return;
-  const btn = document.getElementById('btn-export-excel');
-  btn.textContent = 'exporting & reviewing...';
-  btn.disabled = true;
-  // Show a loading state in the review panel right away so the user knows
-  // a review is running in parallel with the file generation.
-  renderReviewPanel({ status: 'loading' });
-  try {
-    const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/export-excel`, {
-      headers: { 'Authorization': getAuth() },
-    });
-    if (!res.ok) { alert('export failed'); renderReviewPanel(null); return; }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    const client = allClients.find(c => c.id === selectedClientId);
-    a.download = `${client?.name || selectedClientId} - Fixed Assets.xlsx`;
-    a.click();
-    URL.revokeObjectURL(url);
-    // Fetch the cached review and render the panel
-    try {
-      const reviewRes = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/last-review`, {
-        headers: { 'Authorization': getAuth() },
-      });
-      const data = await reviewRes.json();
-      renderReviewPanel(data.review);
-    } catch (e) {
-      console.error('Failed to fetch review:', e);
-      renderReviewPanel({ status: 'error', summary: 'Could not load review result.', findings: [] });
-    }
-  } catch (e) { alert('export failed: ' + e.message); renderReviewPanel(null); }
-  btn.textContent = 'export to Excel';
-  btn.disabled = false;
-});
 
 // Render the Claude review traffic-light panel below the export button.
 // Status can be: clean / warnings / errors / error / skipped / loading / null
@@ -2136,7 +2361,7 @@ async function init() {
         // make the user click through a modal just to confirm what they already
         // asked for by clicking "connect quickbooks".
         setTimeout(async () => {
-          switchClientTab('fixed-assets');
+          switchClientTab('close');
           await autoSyncAndImportFromQbo();
         }, 300);
       }, 100);

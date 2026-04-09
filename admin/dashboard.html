@@ -115,7 +115,8 @@
         <!-- Client sub-tabs -->
         <nav class="client-sub-nav">
           <button class="sub-nav-btn active" data-client-tab="info">info</button>
-          <button class="sub-nav-btn" data-client-tab="fixed-assets">fixed assets</button>
+          <button class="sub-nav-btn" data-client-tab="close">month-end close</button>
+          <button class="sub-nav-btn" data-client-tab="settings">settings</button>
         </nav>
 
         <!-- Info sub-tab -->
@@ -123,26 +124,44 @@
           <div id="client-info-content"></div>
         </div>
 
-        <!-- Fixed Assets sub-tab -->
-        <div class="client-tab" id="client-tab-fixed-assets" style="display:none;">
-          <div class="clients-header" style="margin-bottom:12px;">
-            <div style="display:flex;gap:10px;flex-wrap:wrap;">
-              <button class="btn-add-client" id="btn-sync-qbo-assets" style="background:var(--blue-600);">sync from QBO</button>
-              <button class="btn-add-client" id="btn-run-amortization" style="background:var(--green-600);">run amortization</button>
-              <button class="btn-add-client" id="btn-export-excel" style="background:var(--gray-600);">export to Excel</button>
+        <!-- Month-end close sub-tab -->
+        <div class="client-tab" id="client-tab-close" style="display:none;">
+          <div class="close-period-header">
+            <div>
+              <div class="close-period-label">closing period</div>
+              <div class="close-period-month" id="close-period-month">—</div>
+              <div class="close-period-reason" id="close-period-reason"></div>
             </div>
           </div>
 
-          <div id="claude-review-panel" style="display:none;margin-bottom:16px;"></div>
-          <div id="amortization-status" class="settings-success" style="display:none;"></div>
-          <div id="reconciliation-panel" style="display:none;margin-bottom:16px;"></div>
-          <div id="last-amortization-run" style="font-size:0.82rem;color:var(--gray-400);margin-bottom:16px;"></div>
+          <div id="amortization-status" class="settings-success" style="display:none;margin-bottom:16px;"></div>
 
-          <!-- Amortization Policies (by GL account) — also shows class-level totals -->
-          <div id="asset-classes-section" style="margin-bottom:24px;">
-            <h3 style="font-size:0.9rem;font-weight:600;color:var(--gray-500);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px;">asset classes (policy &amp; totals)</h3>
-            <p style="font-size:0.78rem;color:var(--gray-500);margin:-6px 0 12px 0;">Per-asset detail lives in the exported Excel file. The UI summarizes by class only.</p>
+          <!-- Ordered workflow steps. Rendered into .close-steps by renderCloseSteps(). -->
+          <div class="close-steps" id="close-steps"></div>
+        </div>
+
+        <!-- Settings sub-tab — one-time module config -->
+        <div class="client-tab" id="client-tab-settings" style="display:none;">
+          <div class="settings-module">
+            <div class="settings-module-header">
+              <h3>fixed assets</h3>
+              <p>GL accounts and amortization policies. The Excel export contains the per-asset detail.</p>
+            </div>
             <div id="asset-classes-list"></div>
+          </div>
+
+          <div class="settings-module settings-module-disabled">
+            <div class="settings-module-header">
+              <h3>prepaid expenses</h3>
+              <p>coming soon</p>
+            </div>
+          </div>
+
+          <div class="settings-module settings-module-disabled">
+            <div class="settings-module-header">
+              <h3>accruals</h3>
+              <p>coming soon</p>
+            </div>
           </div>
         </div>
       </div>
