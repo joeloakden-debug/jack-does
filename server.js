@@ -2174,6 +2174,113 @@ app.get('/api/admin/clients/:clientId/book-close-date', requireAdmin, async (req
 // test on a company with the "Close the books" feature enabled. The UI shows
 // the current value read-only and links out to QBO for edits.
 
+// List attachments for a transaction
+// GET /api/admin/clients/:clientId/qbo/attachments?txnId=123&txnType=Purchase
+app.get('/api/admin/clients/:clientId/qbo/attachments', requireAdmin, async (req, res) => {
+  try {
+    if (!qbo.isConnected(req.params.clientId)) {
+      return res.status(400).json({ error: 'QBO not connected' });
+    }
+    const { txnId, txnType } = req.query;
+    if (!txnId || !txnType) {
+      return res.status(400).json({ error: 'txnId and txnType required' });
+    }
+    const attachments = await qbo.getTransactionAttachments(txnId, txnType, req.params.clientId);
+    res.json({ attachments });
+  } catch (e) {
+    console.error('[attachments] list error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Download a specific attachment (proxied through the server so the client
+// never sees QBO credentials). Returns the raw file bytes.
+// GET /api/admin/clients/:clientId/qbo/attachments/:attachableId/download
+app.get('/api/admin/clients/:clientId/qbo/attachments/:attachableId/download', requireAdmin, async (req, res) => {
+  try {
+    if (!qbo.isConnected(req.params.clientId)) {
+      return res.status(400).json({ error: 'QBO not connected' });
+    }
+    const file = await qbo.downloadAttachment(req.params.attachableId, req.params.clientId);
+    res.setHeader('Content-Type', file.contentType);
+    res.setHeader('Content-Disposition', `inline; filename="${file.fileName}"`);
+    res.setHeader('Content-Length', file.size);
+    res.send(file.buffer);
+  } catch (e) {
+    console.error('[attachments] download error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Smoke test: pick the most recent bill/expense for a client that has an
+// attachment, download it, and return a summary. Lets us verify the whole
+// attachment pipeline end-to-end before building on top of it.
+// GET /api/admin/clients/:clientId/qbo/attachments/test
+app.get('/api/admin/clients/:clientId/qbo/attachments/test', requireAdmin, async (req, res) => {
+  try {
+    if (!qbo.isConnected(req.params.clientId)) {
+      return res.status(400).json({ error: 'QBO not connected' });
+    }
+    const clientId = req.params.clientId;
+
+    // Pull a handful of recent bills and purchases and find the first one with an attachment
+    const [bills, purchases] = await Promise.all([
+      qbo.getBills('2020-01-01', new Date().toISOString().slice(0, 10), 50, clientId).catch(() => []),
+      qbo.getExpenseTransactions('2020-01-01', new Date().toISOString().slice(0, 10), 50, clientId).catch(() => []),
+    ]);
+
+    const candidates = [
+      ...(bills || []).map((b) => ({ id: b.Id, type: 'Bill', date: b.TxnDate, amount: b.TotalAmt, vendor: b.VendorRef?.name })),
+      ...(purchases || []).map((p) => ({ id: p.Id, type: 'Purchase', date: p.TxnDate, amount: p.TotalAmt, vendor: p.EntityRef?.name })),
+    ].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+    const scanned = [];
+    let hit = null;
+    for (const txn of candidates.slice(0, 30)) {
+      const attachments = await qbo.getTransactionAttachments(txn.id, txn.type, clientId).catch(() => []);
+      scanned.push({ ...txn, attachmentCount: attachments.length });
+      if (attachments.length > 0) {
+        hit = { txn, attachments };
+        break;
+      }
+    }
+
+    if (!hit) {
+      return res.json({
+        ok: false,
+        message: 'No attachments found on the 30 most recent bills/purchases',
+        scanned,
+      });
+    }
+
+    // Try downloading the first attachment to confirm end-to-end works
+    const first = hit.attachments[0];
+    let downloadResult = null;
+    try {
+      const file = await qbo.downloadAttachment(first.id, clientId);
+      downloadResult = {
+        ok: true,
+        fileName: file.fileName,
+        contentType: file.contentType,
+        sizeBytes: file.size,
+      };
+    } catch (e) {
+      downloadResult = { ok: false, error: e.message };
+    }
+
+    res.json({
+      ok: true,
+      transaction: hit.txn,
+      attachments: hit.attachments,
+      download: downloadResult,
+      scannedCount: scanned.length,
+    });
+  } catch (e) {
+    console.error('[attachments] test error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Preview amortization for a client
 app.get('/api/admin/clients/:clientId/fixed-assets/preview-amortization', requireAdmin, async (req, res) => {
   const clientData = getClientAssets(req.params.clientId);

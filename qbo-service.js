@@ -1031,6 +1031,121 @@ async function createInvoice(invoice, clientId = 'default') {
   return qbPromise(qb, 'createInvoice', invoiceObj);
 }
 
+/**
+ * Return the QBO API base URL for the current environment
+ */
+function qboApiBase() {
+  const useSandbox = (process.env.QBO_ENVIRONMENT || 'sandbox') === 'sandbox';
+  return useSandbox
+    ? 'https://sandbox-quickbooks.api.intuit.com'
+    : 'https://quickbooks.api.intuit.com';
+}
+
+/**
+ * List attachments for a given transaction.
+ * txnType should be one of: Purchase, Bill, Invoice, JournalEntry, SalesReceipt,
+ * VendorCredit, CreditMemo, RefundReceipt, etc.
+ * Returns an array of Attachable metadata objects.
+ */
+async function getTransactionAttachments(txnId, txnType, clientId = 'default') {
+  const tokenData = await refreshTokenIfNeeded(clientId);
+  const realmId = tokenData.realmId;
+  const query = `select * from Attachable where AttachableRef.EntityRef.value = '${txnId}' and AttachableRef.EntityRef.type = '${txnType}'`;
+  const url = `${qboApiBase()}/v3/company/${realmId}/query?query=${encodeURIComponent(query)}&minorversion=65`;
+
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${tokenData.accessToken}`,
+      Accept: 'application/json',
+    },
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`QBO attachable query failed (${res.status}): ${text}`);
+  }
+
+  const body = await res.json();
+  const rows = body?.QueryResponse?.Attachable || [];
+  return rows.map((a) => ({
+    id: a.Id,
+    fileName: a.FileName,
+    contentType: a.ContentType,
+    size: a.Size,
+    category: a.Category,
+    note: a.Note,
+    tempDownloadUri: a.TempDownloadUri || null,
+  }));
+}
+
+/**
+ * Download an attachment by id. Returns { buffer, contentType, fileName, size }.
+ * Uses the /download/{id} endpoint which returns a short-lived signed URL,
+ * then fetches the actual file bytes from that URL.
+ */
+async function downloadAttachment(attachableId, clientId = 'default') {
+  const tokenData = await refreshTokenIfNeeded(clientId);
+  const realmId = tokenData.realmId;
+
+  // Step 1: ask QBO for a temp download URI
+  const downloadUrl = `${qboApiBase()}/v3/company/${realmId}/download/${attachableId}?minorversion=65`;
+  const res = await fetch(downloadUrl, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${tokenData.accessToken}`,
+      Accept: 'application/json, text/plain',
+    },
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`QBO download request failed (${res.status}): ${text}`);
+  }
+
+  // QBO returns a plain-text URL (sometimes quoted) that's valid for ~15 min
+  const rawUri = (await res.text()).trim().replace(/^"|"$/g, '');
+  if (!rawUri.startsWith('http')) {
+    throw new Error(`Unexpected QBO download response: ${rawUri.slice(0, 200)}`);
+  }
+
+  // Step 2: fetch the bytes (no auth header — URI is pre-signed)
+  const fileRes = await fetch(rawUri);
+  if (!fileRes.ok) {
+    throw new Error(`Attachment fetch failed (${fileRes.status}) for ${attachableId}`);
+  }
+
+  const arrayBuffer = await fileRes.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+  const contentType =
+    fileRes.headers.get('content-type') || 'application/octet-stream';
+
+  // Also grab metadata for the file name
+  let fileName = `attachment-${attachableId}`;
+  try {
+    const metaUrl = `${qboApiBase()}/v3/company/${realmId}/attachable/${attachableId}?minorversion=65`;
+    const metaRes = await fetch(metaUrl, {
+      headers: {
+        Authorization: `Bearer ${tokenData.accessToken}`,
+        Accept: 'application/json',
+      },
+    });
+    if (metaRes.ok) {
+      const meta = await metaRes.json();
+      fileName = meta?.Attachable?.FileName || fileName;
+    }
+  } catch (_) {
+    // non-fatal
+  }
+
+  return {
+    buffer,
+    contentType,
+    fileName,
+    size: buffer.length,
+  };
+}
+
 module.exports = {
   getAuthUri,
   handleCallback,
@@ -1069,4 +1184,6 @@ module.exports = {
   createJournalEntry,
   createBill,
   createInvoice,
+  getTransactionAttachments,
+  downloadAttachment,
 };
