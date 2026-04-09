@@ -1592,6 +1592,30 @@ document.getElementById('asset-class-modal').addEventListener('click', (e) => { 
 document.getElementById('btn-suggest-class-amort').addEventListener('click', suggestClassAmortization);
 document.getElementById('btn-apply-class-ai').addEventListener('click', applyClassAiSuggestion);
 
+// Temporary: QBO attachment pipeline smoke test
+document.getElementById('btn-test-attachments').addEventListener('click', async () => {
+  if (!selectedClientId) {
+    alert('select a client first');
+    return;
+  }
+  const btn = document.getElementById('btn-test-attachments');
+  const output = document.getElementById('attachment-test-output');
+  btn.disabled = true;
+  btn.textContent = 'testing…';
+  output.style.display = 'block';
+  output.textContent = 'scanning recent bills/purchases for an attachment…';
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/qbo/attachments/test`);
+    const data = await res.json();
+    output.textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    output.textContent = 'error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'test QBO attachments';
+  }
+});
+
 // Silent sync-and-import path used right after a fresh QBO OAuth connect.
 // Skips the review modal entirely — hits the sync endpoint, imports every
 // account it returns via the shared importAssetsFromQboAccounts helper, then
