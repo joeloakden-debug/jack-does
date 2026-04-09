@@ -2223,15 +2223,20 @@ app.get('/api/admin/clients/:clientId/qbo/attachments/test', requireAdmin, async
     }
     const clientId = req.params.clientId;
 
-    // Pull a handful of recent bills and purchases and find the first one with an attachment
-    const [bills, purchases] = await Promise.all([
-      qbo.getBills('2020-01-01', new Date().toISOString().slice(0, 10), 50, clientId).catch(() => []),
-      qbo.getExpenseTransactions('2020-01-01', new Date().toISOString().slice(0, 10), 50, clientId).catch(() => []),
+    // Pull a handful of recent bills and purchases and find the first one with an attachment.
+    // QBO helpers return { QueryResponse: { Bill|Purchase: [...] } } so we unwrap here.
+    const today = new Date().toISOString().slice(0, 10);
+    const [billsRes, purchasesRes] = await Promise.all([
+      qbo.getBills('2020-01-01', today, 50, clientId).catch(() => null),
+      qbo.getExpenseTransactions('2020-01-01', today, 50, clientId).catch(() => null),
     ]);
 
+    const bills = billsRes?.QueryResponse?.Bill || [];
+    const purchases = purchasesRes?.QueryResponse?.Purchase || [];
+
     const candidates = [
-      ...(bills || []).map((b) => ({ id: b.Id, type: 'Bill', date: b.TxnDate, amount: b.TotalAmt, vendor: b.VendorRef?.name })),
-      ...(purchases || []).map((p) => ({ id: p.Id, type: 'Purchase', date: p.TxnDate, amount: p.TotalAmt, vendor: p.EntityRef?.name })),
+      ...bills.map((b) => ({ id: b.Id, type: 'Bill', date: b.TxnDate, amount: b.TotalAmt, vendor: b.VendorRef?.name })),
+      ...purchases.map((p) => ({ id: p.Id, type: 'Purchase', date: p.TxnDate, amount: p.TotalAmt, vendor: p.EntityRef?.name })),
     ].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
     const scanned = [];
