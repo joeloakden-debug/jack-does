@@ -22,6 +22,23 @@ let prepaidPreview = null; // cached preview for the current close period
 let accruedLiabState = { accruedLiabilitiesAccount: null, analysisRuns: [], materialityThreshold: 10 };
 let accruedLiabAnalysis = null; // latest analysis result for the panel
 
+/**
+ * Show a brief "settings saved ✓" confirmation next to a button.
+ */
+function showSettingsSaved(btnId) {
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.textContent = '✓ saved';
+  btn.style.background = 'var(--green-600)';
+  btn.style.color = '#fff';
+  setTimeout(() => {
+    btn.textContent = orig;
+    btn.style.background = '';
+    btn.style.color = '';
+  }, 2000);
+}
+
 // ========================================
 // LOAD DATA
 // ========================================
@@ -683,7 +700,7 @@ function showClientsList() {
   selectedClientId = null;
 }
 
-function openClientDetail(clientId) {
+async function openClientDetail(clientId) {
   selectedClientId = clientId;
   const client = allClients.find(c => c.id === clientId);
   if (!client) return;
@@ -699,8 +716,8 @@ function openClientDetail(clientId) {
   loadClientQboStatus(clientId);
   loadQBOCloseDate();
 
-  // Load accounts for this client's QBO connection
-  loadAccounts(clientId);
+  // Load accounts for this client's QBO connection (await so dropdowns populate before settings render)
+  await loadAccounts(clientId);
 
   // Render client info
   const fyeDisplay = formatFiscalYearEnd(client.fiscalYearEnd);
@@ -1608,6 +1625,7 @@ async function savePrepaidSettings() {
 
     await loadClientPrepaid();
     renderCloseSteps();
+    showSettingsSaved('btn-save-prepaid-settings');
   } catch (e) { alert('save failed: ' + e.message); }
 }
 
@@ -1851,6 +1869,7 @@ async function saveAccruedLiabSettings() {
     }
     await loadClientAccruedLiab();
     renderCloseSteps();
+    showSettingsSaved('btn-save-accrued-liab-settings');
   } catch (e) { alert('save failed: ' + e.message); }
 }
 
