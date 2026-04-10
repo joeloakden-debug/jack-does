@@ -3264,6 +3264,428 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan/accept', requireAdm
 });
 
 // ========================================
+// ACCRUED LIABILITIES — per-client, file-backed
+// ========================================
+const ACCRUED_LIABILITIES_FILE = path.join(__dirname, 'accrued-liabilities.json');
+
+function loadAccruedLiabilities() {
+  try {
+    if (fs.existsSync(ACCRUED_LIABILITIES_FILE)) {
+      return JSON.parse(fs.readFileSync(ACCRUED_LIABILITIES_FILE, 'utf-8'));
+    }
+  } catch (e) { console.error('Failed to load accrued-liabilities.json:', e.message); }
+  return {};
+}
+function saveAccruedLiabilities(data) {
+  fs.writeFileSync(ACCRUED_LIABILITIES_FILE, JSON.stringify(data, null, 2), 'utf-8');
+}
+let accruedLiabData = loadAccruedLiabilities();
+
+function getClientAccruedLiab(clientId) {
+  if (!accruedLiabData[clientId]) {
+    accruedLiabData[clientId] = {
+      accruedLiabilitiesAccount: null,
+      materialityThreshold: 10,
+      excludedAccountIds: [],
+      analysisRuns: [],
+    };
+  }
+  const c = accruedLiabData[clientId];
+  if (!c.analysisRuns) c.analysisRuns = [];
+  if (c.materialityThreshold === undefined) c.materialityThreshold = 10;
+  if (!c.excludedAccountIds) c.excludedAccountIds = [];
+  return c;
+}
+
+// ---- CRUD / settings ----
+
+app.get('/api/admin/clients/:clientId/accrued-liabilities', requireAdmin, (req, res) => {
+  res.json(getClientAccruedLiab(req.params.clientId));
+});
+
+app.put('/api/admin/clients/:clientId/accrued-liabilities/settings', requireAdmin, (req, res) => {
+  const c = getClientAccruedLiab(req.params.clientId);
+  if (req.body.materialityThreshold !== undefined) c.materialityThreshold = Math.max(0, Number(req.body.materialityThreshold) || 10);
+  if (Array.isArray(req.body.excludedAccountIds)) c.excludedAccountIds = req.body.excludedAccountIds.map(String);
+  saveAccruedLiabilities(accruedLiabData);
+  res.json(c);
+});
+
+app.put('/api/admin/clients/:clientId/accrued-liabilities/account', requireAdmin, (req, res) => {
+  const { id, name } = req.body || {};
+  if (!id || !name) return res.status(400).json({ error: 'id and name required' });
+  const c = getClientAccruedLiab(req.params.clientId);
+  c.accruedLiabilitiesAccount = { id: String(id), name: String(name) };
+  saveAccruedLiabilities(accruedLiabData);
+  res.json(c);
+});
+
+// ---- P&L monthly report parser ----
+
+/**
+ * Parse the QBO P&L monthly report into per-account monthly totals.
+ * Returns { months: ['2024-10', ...], accounts: [{ accountId, accountName, monthlyTotals: { 'YYYY-MM': amt } }] }
+ */
+function parsePnlMonthlyReport(report) {
+  // The Columns header gives us the month labels
+  const columns = report?.Columns?.Column || [];
+  // First column is the account name, rest are months + total
+  const monthLabels = [];
+  for (let i = 1; i < columns.length; i++) {
+    const colTitle = columns[i].ColTitle || '';
+    // Month columns look like "Jan 2025", "Feb 2025", etc. or sometimes "YYYY-MM"
+    // The last column is often "Total" — skip it
+    if (colTitle.toLowerCase() === 'total') continue;
+    // Parse month name to YYYY-MM
+    const d = new Date(colTitle + ' 1');
+    if (!isNaN(d)) {
+      monthLabels.push({
+        idx: i,
+        month: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+      });
+    }
+  }
+
+  const accounts = [];
+
+  function walkRows(rows) {
+    if (!rows) return;
+    for (const row of rows) {
+      if (row.type === 'Section' && row.Rows?.Row) {
+        walkRows(row.Rows.Row);
+      } else if (row.type === 'Data' && row.ColData) {
+        // ColData[0] = account name, rest = monthly values
+        const nameCol = row.ColData[0] || {};
+        const accountId = nameCol.id || '';
+        const accountName = nameCol.value || '';
+        if (!accountId) continue;
+        const monthlyTotals = {};
+        for (const ml of monthLabels) {
+          const val = parseFloat(row.ColData[ml.idx]?.value) || 0;
+          if (val !== 0) monthlyTotals[ml.month] = val;
+        }
+        accounts.push({ accountId, accountName, monthlyTotals });
+      }
+    }
+  }
+
+  walkRows(report?.Rows?.Row || []);
+  return { months: monthLabels.map(m => m.month), accounts };
+}
+
+// ---- Analysis endpoint ----
+
+app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmin, async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    if (!qbo.isConnected(clientId)) {
+      return res.status(400).json({ error: 'QBO not connected' });
+    }
+    const c = getClientAccruedLiab(clientId);
+    if (!c.accruedLiabilitiesAccount) {
+      return res.status(400).json({ error: 'Accrued Liabilities GL account not set. Configure it in settings.' });
+    }
+
+    // Determine close month
+    const fixedAssetClient = getClientAssets(clientId);
+    let closeDate = null;
+    try { closeDate = await qbo.getBookCloseDate(clientId); } catch (_) {}
+    const targetMonth = (req.body?.month && /^\d{4}-\d{2}$/.test(req.body.month))
+      ? req.body.month
+      : determineAmortizationMonth(fixedAssetClient, closeDate).month;
+
+    const { year, monthIndex } = parseMonthStr(targetMonth);
+    const periodEnd = lastDayOfMonthDate(year, monthIndex).toISOString().split('T')[0];
+
+    // ---- Part A: historical pattern analysis ----
+    // 18 months back from start of close month
+    const lookbackStart = new Date(year, monthIndex - 18, 1);
+    const lookbackStartStr = lookbackStart.toISOString().split('T')[0];
+
+    console.log(`[accrued-liab] Part A: P&L monthly ${lookbackStartStr} → ${periodEnd} for ${clientId}`);
+    const pnlReport = await qbo.getProfitAndLossMonthly(lookbackStartStr, periodEnd, clientId);
+    const parsed = parsePnlMonthlyReport(pnlReport);
+
+    const excludeSet = new Set(c.excludedAccountIds || []);
+    const partAAccounts = [];
+    const priorMonths = parsed.months.filter(m => m < targetMonth);
+
+    for (const acct of parsed.accounts) {
+      if (excludeSet.has(acct.accountId)) continue;
+      let sumPrior = 0, countPrior = 0;
+      for (const m of priorMonths) {
+        const val = acct.monthlyTotals[m] || 0;
+        if (val !== 0) { sumPrior += val; countPrior++; }
+      }
+      const average = priorMonths.length > 0 ? sumPrior / priorMonths.length : 0;
+      const frequency = countPrior; // how many of the prior months had activity
+      const currentMonth = acct.monthlyTotals[targetMonth] || 0;
+
+      // Skip accounts with negligible history
+      if (average < 1 && currentMonth < 1) continue;
+
+      const gap = Math.round((average - currentMonth) * 100) / 100;
+      const thresholdPct = c.materialityThreshold / 100;
+      let flagged = false;
+      let reason = '';
+
+      if (currentMonth === 0 && average >= 1 && frequency >= 3) {
+        flagged = true;
+        reason = 'missing';
+      } else if (average > 0 && currentMonth < average * (1 - thresholdPct) && frequency >= 3) {
+        flagged = true;
+        reason = 'below_average';
+      }
+
+      if (flagged) {
+        partAAccounts.push({
+          accountId: acct.accountId,
+          accountName: acct.accountName,
+          monthlyTotals: acct.monthlyTotals,
+          average: Math.round(average * 100) / 100,
+          frequency,
+          currentMonth: Math.round(currentMonth * 100) / 100,
+          gap,
+          flagged: true,
+          reason,
+          accrualAmount: gap,
+          status: 'pending',
+        });
+      }
+    }
+
+    // Sort by gap descending
+    partAAccounts.sort((a, b) => b.gap - a.gap);
+
+    // ---- Part B: subsequent events ----
+    const nextMonthFirst = new Date(year, monthIndex + 1, 1);
+    const windowStart = nextMonthFirst.toISOString().split('T')[0];
+    const windowEnd = new Date().toISOString().split('T')[0];
+
+    console.log(`[accrued-liab] Part B: subsequent events ${windowStart} → ${windowEnd}`);
+
+    const [billsRes, purchasesRes] = await Promise.all([
+      qbo.getBills(windowStart, windowEnd, 500, clientId).catch(() => null),
+      qbo.getExpenseTransactions(windowStart, windowEnd, 500, clientId).catch(() => null),
+    ]);
+
+    const bills = (billsRes?.QueryResponse?.Bill || []).map(b => ({
+      txnId: b.Id, txnType: 'Bill', date: b.TxnDate,
+      amount: Number(b.TotalAmt || 0),
+      vendor: b.VendorRef?.name || 'Unknown',
+      memo: b.PrivateNote || b.Memo || '',
+      accountId: b.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.value || '',
+      accountName: b.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.name || '',
+    }));
+    const purchases = (purchasesRes?.QueryResponse?.Purchase || []).map(p => ({
+      txnId: p.Id, txnType: 'Purchase', date: p.TxnDate,
+      amount: Number(p.TotalAmt || 0),
+      vendor: p.EntityRef?.name || 'Unknown',
+      memo: p.PrivateNote || p.Memo || '',
+      accountId: p.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.value || '',
+      accountName: p.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.name || '',
+    }));
+
+    const subsequentTxns = [...bills, ...purchases]
+      .filter(t => !excludeSet.has(t.accountId) && t.amount > 0)
+      .sort((a, b) => b.amount - a.amount)
+      .map(t => ({
+        ...t,
+        flagged: true,
+        accrualAmount: t.amount,
+        status: 'pending',
+        // Note overlap with Part A
+        overlapWithPartA: partAAccounts.some(a => a.accountId === t.accountId),
+      }));
+
+    // Store the run
+    const run = {
+      month: targetMonth,
+      ranAt: new Date().toISOString(),
+      partA: {
+        lookbackMonths: priorMonths.length,
+        accounts: partAAccounts,
+      },
+      partB: {
+        windowStart,
+        windowEnd,
+        transactions: subsequentTxns,
+      },
+      accrualJE: null,
+      reversalJE: null,
+    };
+
+    // Replace existing run for this month or push new one
+    const existingIdx = c.analysisRuns.findIndex(r => r.month === targetMonth);
+    if (existingIdx >= 0) {
+      // Preserve JE data if already posted
+      run.accrualJE = c.analysisRuns[existingIdx].accrualJE;
+      run.reversalJE = c.analysisRuns[existingIdx].reversalJE;
+      c.analysisRuns[existingIdx] = run;
+    } else {
+      c.analysisRuns.push(run);
+    }
+    saveAccruedLiabilities(accruedLiabData);
+
+    res.json({
+      month: targetMonth,
+      periodEnd,
+      partA: run.partA,
+      partB: run.partB,
+      alreadyPosted: !!run.accrualJE,
+    });
+  } catch (e) {
+    console.error('[accrued-liab] analyze error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Update a flagged item (dismiss, change amount, etc.)
+app.put('/api/admin/clients/:clientId/accrued-liabilities/runs/:month/items', requireAdmin, (req, res) => {
+  const c = getClientAccruedLiab(req.params.clientId);
+  const run = c.analysisRuns.find(r => r.month === req.params.month);
+  if (!run) return res.status(404).json({ error: 'no analysis run for this month' });
+
+  const { part, index, status, accrualAmount } = req.body;
+  let item;
+  if (part === 'A') {
+    item = run.partA.accounts[index];
+  } else if (part === 'B') {
+    item = run.partB.transactions[index];
+  }
+  if (!item) return res.status(404).json({ error: 'item not found' });
+
+  if (status !== undefined) item.status = status; // 'pending' | 'accrued' | 'dismissed'
+  if (accrualAmount !== undefined) item.accrualAmount = Number(accrualAmount);
+
+  saveAccruedLiabilities(accruedLiabData);
+  res.json({ success: true, item });
+});
+
+// ---- Post accrual JE + auto-reversal ----
+
+app.post('/api/admin/clients/:clientId/accrued-liabilities/post', requireAdmin, async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    if (!qbo.isConnected(clientId)) {
+      return res.status(400).json({ error: 'QBO not connected' });
+    }
+    const c = getClientAccruedLiab(clientId);
+    if (!c.accruedLiabilitiesAccount) {
+      return res.status(400).json({ error: 'Accrued Liabilities GL account not set' });
+    }
+
+    const month = req.body?.month;
+    if (!month) return res.status(400).json({ error: 'month required' });
+    const run = c.analysisRuns.find(r => r.month === month);
+    if (!run) return res.status(400).json({ error: `no analysis run for ${month}` });
+    if (run.accrualJE) return res.status(400).json({ error: `accrual JE already posted for ${month}` });
+
+    // Collect all non-dismissed items
+    const lines = [];
+    for (const a of (run.partA?.accounts || [])) {
+      if (a.status === 'dismissed' || !a.accrualAmount || a.accrualAmount <= 0) continue;
+      lines.push({
+        source: 'pattern',
+        accountId: a.accountId,
+        accountName: a.accountName,
+        description: `Accrued liabilities - ${a.reason === 'missing' ? 'missing' : 'below average'} - ${a.accountName}`,
+        amount: Math.round(a.accrualAmount * 100) / 100,
+      });
+    }
+    for (const t of (run.partB?.transactions || [])) {
+      if (t.status === 'dismissed' || !t.accrualAmount || t.accrualAmount <= 0) continue;
+      // Skip if Part A already covers this account (avoid double-count)
+      if (t.overlapWithPartA && lines.some(l => l.accountId === t.accountId)) continue;
+      lines.push({
+        source: 'subsequent',
+        accountId: t.accountId,
+        accountName: t.accountName,
+        description: `Accrued liabilities - ${t.vendor} (${t.date})`,
+        amount: Math.round(t.accrualAmount * 100) / 100,
+      });
+    }
+
+    if (lines.length === 0) {
+      return res.status(400).json({ error: 'No accrual items to post (all dismissed or zero)' });
+    }
+
+    const totalAmount = Math.round(lines.reduce((s, l) => s + l.amount, 0) * 100) / 100;
+    const { year, monthIndex } = parseMonthStr(month);
+    const accrualDate = lastDayOfMonthDate(year, monthIndex).toISOString().split('T')[0];
+    const reversalDate = new Date(year, monthIndex + 1, 1).toISOString().split('T')[0];
+    const clientName = CLIENTS[clientId]?.name || clientId;
+
+    // Build accrual JE: Dr expenses, Cr accrued liabilities
+    const accrualJELines = [];
+    for (const l of lines) {
+      accrualJELines.push({ accountId: l.accountId, accountName: l.accountName, description: l.description, amount: l.amount, type: 'debit' });
+    }
+    accrualJELines.push({
+      accountId: c.accruedLiabilitiesAccount.id,
+      accountName: c.accruedLiabilitiesAccount.name,
+      description: `Accrued liabilities - ${month}`,
+      amount: totalAmount,
+      type: 'credit',
+    });
+
+    const accrualResult = await qbo.createJournalEntry({
+      date: accrualDate,
+      memo: `Accrued liabilities - ${month} - ${clientName}`,
+      lines: accrualJELines,
+    }, clientId);
+
+    // Build reversal JE: Cr expenses, Dr accrued liabilities (exact mirror)
+    const reversalJELines = [];
+    for (const l of lines) {
+      reversalJELines.push({ accountId: l.accountId, accountName: l.accountName, description: `Reversal - ${l.description}`, amount: l.amount, type: 'credit' });
+    }
+    reversalJELines.push({
+      accountId: c.accruedLiabilitiesAccount.id,
+      accountName: c.accruedLiabilitiesAccount.name,
+      description: `Reversal - accrued liabilities - ${month}`,
+      amount: totalAmount,
+      type: 'debit',
+    });
+
+    const reversalResult = await qbo.createJournalEntry({
+      date: reversalDate,
+      memo: `Reversal of accrued liabilities - ${month} - ${clientName}`,
+      lines: reversalJELines,
+    }, clientId);
+
+    // Store results
+    run.accrualJE = {
+      journalEntryId: accrualResult.Id || null,
+      date: accrualDate,
+      totalAmount,
+      lineCount: lines.length,
+      lines,
+    };
+    run.reversalJE = {
+      journalEntryId: reversalResult.Id || null,
+      date: reversalDate,
+      totalAmount,
+    };
+
+    // Mark all posted items as 'accrued'
+    for (const a of (run.partA?.accounts || [])) { if (a.status === 'pending') a.status = 'accrued'; }
+    for (const t of (run.partB?.transactions || [])) { if (t.status === 'pending') t.status = 'accrued'; }
+
+    saveAccruedLiabilities(accruedLiabData);
+
+    res.json({
+      success: true,
+      accrualJE: run.accrualJE,
+      reversalJE: run.reversalJE,
+    });
+  } catch (e) {
+    console.error('[accrued-liab] post error:', e);
+    res.status(500).json({ error: `Failed to post: ${e.message}` });
+  }
+});
+
+// ========================================
 // START SERVER
 // ========================================
 app.listen(PORT, '0.0.0.0', () => {

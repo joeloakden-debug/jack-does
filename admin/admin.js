@@ -19,6 +19,8 @@ let allAnalyses = [];
 let qboAccounts = []; // Chart of accounts from QuickBooks
 let prepaidState = { prepaidAccount: null, items: [], amortizationRuns: [], scanThreshold: 500 };
 let prepaidPreview = null; // cached preview for the current close period
+let accruedLiabState = { accruedLiabilitiesAccount: null, analysisRuns: [], materialityThreshold: 10 };
+let accruedLiabAnalysis = null; // latest analysis result for the panel
 
 // ========================================
 // LOAD DATA
@@ -999,8 +1001,8 @@ async function loadClientFixedAssets() {
     }
 
     renderAssetClasses();
-    // Load prepaid state in parallel — renderCloseSteps depends on both
-    await loadClientPrepaid();
+    // Load prepaid + accrued liabilities state — renderCloseSteps depends on both
+    await Promise.all([loadClientPrepaid(), loadClientAccruedLiab()]);
     await renderFixedAssets();
   } catch (e) { console.error('Failed to load fixed assets:', e); }
 }
@@ -1126,7 +1128,7 @@ function renderFixedAssets() {
 // Steps are locked by default if any prior non-skipped step is not complete,
 // so users work through the list in order.
 //
-// Adding a new module later (prepaid, accruals, etc.) = add a new step object
+// Adding a new module later (prepaid, accrued liabilities, etc.) = add a new step object
 // to the list in buildCloseSteps() and implement its completion check + action
 // handler. No UI wiring needed.
 
@@ -1233,17 +1235,38 @@ function buildCloseSteps(period) {
         status, statusLabel, action, actionLabel, meta,
       };
     })(),
-    {
-      id: 'accruals',
-      num: 3,
-      title: 'accruals',
-      desc: 'post accrual adjustments for the period.',
-      status: 'skipped',
-      statusLabel: 'not configured',
-      action: null,
-      actionLabel: 'coming soon',
-      meta: '',
-    },
+    (() => {
+      const configured = !!accruedLiabState.accruedLiabilitiesAccount;
+      const alRun = (accruedLiabState.analysisRuns || []).find(r => r.month === month);
+      const posted = !!alRun?.accrualJE;
+      let status, statusLabel, action, actionLabel, meta;
+      if (!configured) {
+        status = 'skipped';
+        statusLabel = 'not configured';
+        action = null;
+        actionLabel = 'configure in settings';
+        meta = '';
+      } else if (posted) {
+        status = 'complete';
+        statusLabel = `posted ${fmtMoney(alRun.accrualJE.totalAmount)} (${alRun.accrualJE.lineCount} line${alRun.accrualJE.lineCount !== 1 ? 's' : ''})`;
+        action = 'analyze-accrued-liab';
+        actionLabel = 'view analysis';
+        meta = alRun.reversalJE ? `reversal JE dated ${alRun.reversalJE.date}` : '';
+      } else {
+        status = 'ready';
+        statusLabel = alRun ? 'analysis complete — review & post' : 'ready to analyze';
+        action = 'analyze-accrued-liab';
+        actionLabel = alRun ? 're-analyze' : 'analyze';
+        meta = '';
+      }
+      return {
+        id: 'accrued-liabilities',
+        num: 3,
+        title: 'accrued liabilities',
+        desc: 'analyze expense patterns and subsequent transactions to identify missing accruals.',
+        status, statusLabel, action, actionLabel, meta,
+      };
+    })(),
     {
       id: 'receivables',
       num: 4,
@@ -1348,6 +1371,8 @@ function renderStepCard(step) {
   let extras = '';
   if (step.id === 'prepaid') {
     extras = `<div id="prepaid-scan-panel" style="margin-top:12px;"></div>`;
+  } else if (step.id === 'accrued-liabilities') {
+    extras = `<div id="accrued-liab-panel" style="margin-top:12px;"></div>`;
   } else if (step.id === 'fixed-assets') {
     extras = `<div id="reconciliation-panel" style="display:none;margin-top:12px;"></div>`;
   } else if (step.id === 'export') {
@@ -1400,6 +1425,10 @@ document.addEventListener('click', (e) => {
     autoSyncAndImportFromQbo().then(() => { currentClosePeriod = null; renderCloseSteps(); });
   } else if (action === 'run-amort') {
     openRunAmortization();
+  } else if (action === 'analyze-accrued-liab') {
+    runAccruedLiabAnalysis();
+  } else if (action === 'post-accrued-liab') {
+    postAccruedLiabilities();
   } else if (action === 'scan-prepaids') {
     runPrepaidScan();
   } else if (action === 'run-prepaid') {
@@ -1755,6 +1784,294 @@ async function openRunPrepaid() {
     renderCloseSteps();
   } catch (e) { alert('error: ' + e.message); }
 }
+
+// ========================================
+// ACCRUED LIABILITIES MODULE
+// ========================================
+
+async function loadClientAccruedLiab() {
+  if (!selectedClientId) return;
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/accrued-liabilities`, {
+      headers: { 'Authorization': getAuth() },
+    });
+    const data = await res.json();
+    accruedLiabState = {
+      accruedLiabilitiesAccount: data.accruedLiabilitiesAccount || null,
+      analysisRuns: data.analysisRuns || [],
+      materialityThreshold: data.materialityThreshold ?? 10,
+      excludedAccountIds: data.excludedAccountIds || [],
+    };
+  } catch (e) {
+    console.error('Failed to load accrued liabilities:', e);
+    accruedLiabState = { accruedLiabilitiesAccount: null, analysisRuns: [], materialityThreshold: 10 };
+  }
+  renderAccruedLiabSettings();
+}
+
+function renderAccruedLiabSettings() {
+  const acctSelect = document.getElementById('accrued-liab-account-select');
+  if (acctSelect) {
+    const savedId = accruedLiabState.accruedLiabilitiesAccount?.id;
+    const eligible = qboAccounts.filter(a =>
+      ['Other Current Liability', 'Long Term Liability', 'Accounts Payable', 'Other Liability'].includes(a.type) ||
+      (a.name || '').toLowerCase().includes('accrued')
+    );
+    if (savedId && !eligible.find(a => a.id === savedId)) {
+      const saved = qboAccounts.find(a => a.id === savedId);
+      if (saved) eligible.unshift(saved);
+      else eligible.unshift({ id: savedId, name: accruedLiabState.accruedLiabilitiesAccount.name || '(saved)', type: '?' });
+    }
+    acctSelect.innerHTML = '<option value="">select accrued liabilities account…</option>' +
+      eligible.map(a =>
+        `<option value="${a.id}" data-name="${(a.name || '').replace(/"/g, '&quot;')}" ${a.id === savedId ? 'selected' : ''}>${a.name} (${a.type})</option>`
+      ).join('');
+  }
+  const thresholdInput = document.getElementById('accrued-liab-threshold');
+  if (thresholdInput) thresholdInput.value = accruedLiabState.materialityThreshold ?? 10;
+}
+
+async function saveAccruedLiabSettings() {
+  const select = document.getElementById('accrued-liab-account-select');
+  const thresholdInput = document.getElementById('accrued-liab-threshold');
+  const threshold = thresholdInput ? (parseFloat(thresholdInput.value) || 10) : 10;
+
+  try {
+    await fetch(`/api/admin/clients/${selectedClientId}/accrued-liabilities/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ materialityThreshold: threshold }),
+    });
+    if (select && select.value) {
+      await fetch(`/api/admin/clients/${selectedClientId}/accrued-liabilities/account`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+        body: JSON.stringify({ id: select.value, name: select.options[select.selectedIndex].dataset.name }),
+      });
+    }
+    await loadClientAccruedLiab();
+    renderCloseSteps();
+  } catch (e) { alert('save failed: ' + e.message); }
+}
+
+// ---- Analysis ----
+
+async function runAccruedLiabAnalysis() {
+  if (!selectedClientId) return;
+  const panel = document.getElementById('accrued-liab-panel');
+  if (!panel) return;
+
+  const analyzeBtn = document.querySelector('[data-step-action="analyze-accrued-liab"]');
+  if (analyzeBtn) { analyzeBtn.textContent = 'analyzing…'; analyzeBtn.disabled = true; }
+  panel.innerHTML = `
+    <div style="padding:16px;background:var(--blue-50);border-radius:8px;font-size:0.85rem;color:var(--gray-700);">
+      <strong>analyzing expense patterns…</strong><br>
+      pulling 18-month P&L from QBO and scanning subsequent transactions. this may take 10–20 seconds.
+    </div>`;
+
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/accrued-liabilities/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'analysis failed');
+    accruedLiabAnalysis = data;
+    renderAccruedLiabResults(panel, data);
+    await loadClientAccruedLiab();
+    renderCloseSteps();
+  } catch (e) {
+    panel.innerHTML = `<div style="padding:12px;background:var(--red-50);border-radius:8px;color:var(--red-600);">analysis failed: ${e.message}</div>`;
+  }
+  if (analyzeBtn) { analyzeBtn.textContent = 'analyze'; analyzeBtn.disabled = false; }
+}
+
+function renderAccruedLiabResults(panel, data) {
+  const partA = data.partA || { accounts: [] };
+  const partB = data.partB || { transactions: [] };
+  const flaggedA = partA.accounts.filter(a => a.status !== 'dismissed');
+  const flaggedB = partB.transactions.filter(t => t.status !== 'dismissed');
+
+  let html = `
+    <div style="padding:12px;background:var(--gray-50);border-radius:8px;margin-bottom:10px;font-size:0.85rem;">
+      <strong>analysis for ${data.month}</strong> —
+      Part A: ${partA.accounts.length} expense account${partA.accounts.length !== 1 ? 's' : ''} flagged (${partA.lookbackMonths}-month lookback) |
+      Part B: ${partB.transactions.length} subsequent transaction${partB.transactions.length !== 1 ? 's' : ''} (${partB.windowStart} → ${partB.windowEnd})
+      ${data.alreadyPosted ? '<br><span style="color:var(--green-600);">✓ accrual JE already posted</span>' : ''}
+    </div>`;
+
+  // Part A table
+  if (partA.accounts.length > 0) {
+    html += `<div style="margin-bottom:6px;font-size:0.85rem;font-weight:600;">part A — expense pattern gaps</div>`;
+    html += `<div style="overflow-x:auto;margin-bottom:12px;">
+      <table style="width:100%;border-collapse:collapse;font-size:0.8rem;">
+        <thead>
+          <tr style="border-bottom:2px solid var(--gray-300);text-align:left;">
+            <th style="padding:6px 8px;">account</th>
+            <th style="padding:6px 8px;text-align:right;">18-mo avg</th>
+            <th style="padding:6px 8px;text-align:right;">this month</th>
+            <th style="padding:6px 8px;text-align:right;">gap</th>
+            <th style="padding:6px 8px;">reason</th>
+            <th style="padding:6px 8px;text-align:right;">accrual amt</th>
+            <th style="padding:6px 8px;text-align:center;">action</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${partA.accounts.map((a, i) => {
+            const dismissed = a.status === 'dismissed';
+            const rowStyle = dismissed ? 'opacity:0.4;text-decoration:line-through;' : '';
+            return `<tr style="border-bottom:1px solid var(--gray-200);${rowStyle}">
+              <td style="padding:6px 8px;">${a.accountName}</td>
+              <td style="padding:6px 8px;text-align:right;">${fmtMoney(a.average)}</td>
+              <td style="padding:6px 8px;text-align:right;">${fmtMoney(a.currentMonth)}</td>
+              <td style="padding:6px 8px;text-align:right;color:var(--red-600);">${fmtMoney(a.gap)}</td>
+              <td style="padding:6px 8px;"><span style="font-size:0.72rem;padding:1px 6px;border-radius:4px;background:${a.reason === 'missing' ? '#fef2f2' : '#fef9c3'};color:${a.reason === 'missing' ? '#991b1b' : '#854d0e'};">${a.reason}</span></td>
+              <td style="padding:6px 8px;text-align:right;"><input type="number" step="0.01" value="${a.accrualAmount}" style="width:90px;padding:2px 4px;text-align:right;border:1px solid var(--gray-300);border-radius:3px;" data-al-part="A" data-al-index="${i}" onchange="updateAccruedLiabItem(this)" ${dismissed ? 'disabled' : ''}></td>
+              <td style="padding:6px 8px;text-align:center;">
+                ${dismissed
+                  ? `<button class="btn btn-secondary" style="font-size:0.72rem;padding:2px 8px;" onclick="toggleAccruedLiabDismiss('A',${i},false)">restore</button>`
+                  : `<button class="btn btn-secondary" style="font-size:0.72rem;padding:2px 8px;" onclick="toggleAccruedLiabDismiss('A',${i},true)">dismiss</button>`
+                }
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+  }
+
+  // Part B table
+  if (partB.transactions.length > 0) {
+    html += `<div style="margin-bottom:6px;font-size:0.85rem;font-weight:600;">part B — subsequent transactions</div>`;
+    html += `<div style="overflow-x:auto;margin-bottom:12px;">
+      <table style="width:100%;border-collapse:collapse;font-size:0.8rem;">
+        <thead>
+          <tr style="border-bottom:2px solid var(--gray-300);text-align:left;">
+            <th style="padding:6px 8px;">date</th>
+            <th style="padding:6px 8px;">vendor</th>
+            <th style="padding:6px 8px;text-align:right;">amount</th>
+            <th style="padding:6px 8px;">account</th>
+            <th style="padding:6px 8px;">memo</th>
+            <th style="padding:6px 8px;text-align:right;">accrual amt</th>
+            <th style="padding:6px 8px;text-align:center;">action</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${partB.transactions.map((t, i) => {
+            const dismissed = t.status === 'dismissed';
+            const rowStyle = dismissed ? 'opacity:0.4;text-decoration:line-through;' : '';
+            const overlap = t.overlapWithPartA ? '<span title="Also flagged in Part A" style="color:var(--blue-500);font-size:0.72rem;">↑A</span> ' : '';
+            return `<tr style="border-bottom:1px solid var(--gray-200);${rowStyle}">
+              <td style="padding:6px 8px;white-space:nowrap;">${t.date}</td>
+              <td style="padding:6px 8px;">${overlap}${t.vendor}</td>
+              <td style="padding:6px 8px;text-align:right;">${fmtMoney(t.amount)}</td>
+              <td style="padding:6px 8px;font-size:0.78rem;">${t.accountName}</td>
+              <td style="padding:6px 8px;font-size:0.78rem;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${(t.memo || '').replace(/"/g, '&quot;')}">${t.memo || '—'}</td>
+              <td style="padding:6px 8px;text-align:right;"><input type="number" step="0.01" value="${t.accrualAmount}" style="width:90px;padding:2px 4px;text-align:right;border:1px solid var(--gray-300);border-radius:3px;" data-al-part="B" data-al-index="${i}" onchange="updateAccruedLiabItem(this)" ${dismissed ? 'disabled' : ''}></td>
+              <td style="padding:6px 8px;text-align:center;">
+                ${dismissed
+                  ? `<button class="btn btn-secondary" style="font-size:0.72rem;padding:2px 8px;" onclick="toggleAccruedLiabDismiss('B',${i},false)">restore</button>`
+                  : `<button class="btn btn-secondary" style="font-size:0.72rem;padding:2px 8px;" onclick="toggleAccruedLiabDismiss('B',${i},true)">dismiss</button>`
+                }
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+  }
+
+  // Summary + post button
+  const totalA = flaggedA.reduce((s, a) => s + (Number(a.accrualAmount) || 0), 0);
+  const totalB = flaggedB.filter(t => !t.overlapWithPartA || !flaggedA.some(a => a.accountId === t.accountId)).reduce((s, t) => s + (Number(t.accrualAmount) || 0), 0);
+  const grandTotal = Math.round((totalA + totalB) * 100) / 100;
+
+  if (!data.alreadyPosted) {
+    html += `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px;background:var(--blue-50);border-radius:8px;font-size:0.85rem;">
+        <div>
+          <strong>total accrual: ${fmtMoney(grandTotal)}</strong>
+          <span style="color:var(--gray-500);margin-left:8px;">(Part A: ${fmtMoney(totalA)} + Part B: ${fmtMoney(totalB)})</span>
+        </div>
+        <button class="btn btn-primary" data-step-action="post-accrued-liab" ${grandTotal <= 0 ? 'disabled' : ''}>post accrual JE + reversal</button>
+      </div>`;
+  }
+
+  panel.innerHTML = html;
+}
+
+async function updateAccruedLiabItem(input) {
+  const part = input.dataset.alPart;
+  const index = parseInt(input.dataset.alIndex);
+  const amount = parseFloat(input.value) || 0;
+  const month = accruedLiabAnalysis?.month;
+  if (!month) return;
+
+  try {
+    await fetch(`/api/admin/clients/${selectedClientId}/accrued-liabilities/runs/${month}/items`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ part, index, accrualAmount: amount }),
+    });
+    // Update local state
+    if (part === 'A' && accruedLiabAnalysis.partA?.accounts[index]) {
+      accruedLiabAnalysis.partA.accounts[index].accrualAmount = amount;
+    } else if (part === 'B' && accruedLiabAnalysis.partB?.transactions[index]) {
+      accruedLiabAnalysis.partB.transactions[index].accrualAmount = amount;
+    }
+  } catch (e) { console.error('update failed:', e); }
+}
+
+async function toggleAccruedLiabDismiss(part, index, dismiss) {
+  const month = accruedLiabAnalysis?.month;
+  if (!month) return;
+
+  try {
+    await fetch(`/api/admin/clients/${selectedClientId}/accrued-liabilities/runs/${month}/items`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ part, index, status: dismiss ? 'dismissed' : 'pending' }),
+    });
+    // Update local + re-render
+    if (part === 'A' && accruedLiabAnalysis.partA?.accounts[index]) {
+      accruedLiabAnalysis.partA.accounts[index].status = dismiss ? 'dismissed' : 'pending';
+    } else if (part === 'B' && accruedLiabAnalysis.partB?.transactions[index]) {
+      accruedLiabAnalysis.partB.transactions[index].status = dismiss ? 'dismissed' : 'pending';
+    }
+    const panel = document.getElementById('accrued-liab-panel');
+    if (panel) renderAccruedLiabResults(panel, accruedLiabAnalysis);
+  } catch (e) { alert('update failed: ' + e.message); }
+}
+
+async function postAccruedLiabilities() {
+  if (!selectedClientId || !accruedLiabAnalysis?.month) return;
+  const month = accruedLiabAnalysis.month;
+
+  if (!confirm(`Post accrual JE for ${month}?\n\nThis will create two journal entries in QBO:\n1. Accrual JE dated ${month} last day (Dr expenses / Cr Accrued Liabilities)\n2. Auto-reversal JE dated first day of next month\n\nContinue?`)) return;
+
+  const btn = document.querySelector('[data-step-action="post-accrued-liab"]');
+  if (btn) { btn.textContent = 'posting…'; btn.disabled = true; }
+
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/accrued-liabilities/post`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ month }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'post failed');
+
+    alert(`Posted accrual JE for ${month}\n\nAccrual: ${fmtMoney(data.accrualJE.totalAmount)} (JE #${data.accrualJE.journalEntryId})\nReversal dated ${data.reversalJE.date} (JE #${data.reversalJE.journalEntryId})`);
+    await loadClientAccruedLiab();
+    currentClosePeriod = null;
+    renderCloseSteps();
+  } catch (e) { alert('post failed: ' + e.message); }
+  if (btn) { btn.textContent = 'post accrual JE + reversal'; btn.disabled = false; }
+}
+
+// Wire settings save button
+document.getElementById('btn-save-accrued-liab-settings').addEventListener('click', saveAccruedLiabSettings);
 
 // ========================================
 // PREPAID EXPENSE SCANNER (Part B)

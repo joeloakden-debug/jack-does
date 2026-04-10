@@ -185,10 +185,24 @@
             <div id="prepaid-items-list"></div>
           </div>
 
-          <div class="settings-module settings-module-disabled">
+          <div class="settings-module">
             <div class="settings-module-header">
-              <h3>accruals</h3>
-              <p>coming soon</p>
+              <h3>accrued liabilities</h3>
+              <p>analyze expense patterns and subsequent transactions to identify missing accruals. Auto-reverses on day 1 of the next month.</p>
+            </div>
+
+            <div class="form-group" style="margin-bottom:12px;">
+              <label style="display:block;font-size:0.82rem;color:var(--gray-600);margin-bottom:4px;">accrued liabilities GL account</label>
+              <select id="accrued-liab-account-select" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;"></select>
+            </div>
+
+            <div class="form-group" style="margin-bottom:12px;">
+              <label style="display:block;font-size:0.82rem;color:var(--gray-600);margin-bottom:4px;">materiality threshold (%) <span style="font-weight:normal;">— flag if current month is more than this % below average</span></label>
+              <input type="number" id="accrued-liab-threshold" value="10" min="0" max="100" step="5" style="width:120px;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;">
+            </div>
+
+            <div style="margin-bottom:12px;">
+              <button class="btn btn-primary" id="btn-save-accrued-liab-settings">save settings</button>
             </div>
           </div>
 

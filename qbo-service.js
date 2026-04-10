@@ -264,6 +264,19 @@ async function getProfitAndLoss(startDate, endDate, clientId = 'default') {
 }
 
 /**
+ * Get Profit & Loss report with monthly column breakdown.
+ * Each expense account row has one value per month in the range.
+ */
+async function getProfitAndLossMonthly(startDate, endDate, clientId = 'default') {
+  const qb = await getQBClient(clientId);
+  return qbPromise(qb, 'reportProfitAndLoss', {
+    start_date: startDate,
+    end_date: endDate,
+    summarize_columns_by: 'Month',
+  });
+}
+
+/**
  * Get Balance Sheet report
  */
 async function getBalanceSheet(asOfDate, clientId = 'default') {
@@ -1186,4 +1199,5 @@ module.exports = {
   createInvoice,
   getTransactionAttachments,
   downloadAttachment,
+  getProfitAndLossMonthly,
 };
