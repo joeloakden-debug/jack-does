@@ -2964,6 +2964,295 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/import-excel', requireAd
 });
 
 // ========================================
+// PREPAID EXPENSE SCANNER (Part B)
+// ========================================
+// Scans recent expense transactions in QBO, downloads attached invoices,
+// and uses Claude to detect prepaid components (service periods that extend
+// beyond the close month). Results are returned for user review — nothing
+// is posted automatically.
+
+const PREPAID_SCAN_PROMPT = `You are a senior accountant reviewing an invoice/receipt to determine if any portion represents a PREPAID EXPENSE — meaning the payment covers a service period that extends beyond the current accounting period.
+
+Current close month: {CLOSE_MONTH}
+Period end date: {PERIOD_END}
+
+Transaction details:
+- Vendor: {VENDOR}
+- Date: {TXN_DATE}
+- Total amount: ${'{AMOUNT}'}
+- Description/memo: {MEMO}
+
+Review the attached document and determine:
+1. Does this invoice cover a specific service period? If so, what are the start and end dates?
+2. Does any portion of this invoice cover services AFTER {PERIOD_END}?
+3. If yes, how much should be prepaid (deferred) vs. expensed in the current period?
+
+IMPORTANT GUIDELINES:
+- Monthly subscriptions where the service period = the billing period are NOT prepaids (e.g. a March invoice for March service)
+- Only flag items where the service period clearly extends beyond {PERIOD_END}
+- Insurance policies, annual licenses, multi-month contracts, and retainers are common prepaids
+- If the document is unclear or you cannot determine the service period, say so — do NOT guess
+
+Respond with ONLY a JSON object (no markdown, no explanation):
+{
+  "isPrepaid": true/false,
+  "confidence": "high" | "medium" | "low",
+  "reasoning": "brief explanation",
+  "servicePeriodStart": "YYYY-MM-DD or null if unknown",
+  "servicePeriodEnd": "YYYY-MM-DD or null if unknown",
+  "totalAmount": number,
+  "prepaidAmount": number or null,
+  "currentPeriodAmount": number or null,
+  "description": "what this invoice is for"
+}`;
+
+// Map QBO transaction types (from findPurchases/findBills/etc.) to the
+// Attachable EntityRef.type values the QBO API expects.
+const TXN_TYPE_MAP = {
+  Purchase: 'Purchase',
+  Bill: 'Bill',
+  JournalEntry: 'JournalEntry',
+  Invoice: 'Invoice',
+  Expense: 'Purchase',  // QBO UI calls them "Expenses" but API type is Purchase
+};
+
+// POST /api/admin/clients/:clientId/prepaid-expenses/scan
+// Body: { month?, threshold?, maxTransactions?, expenseAccountIds? }
+app.post('/api/admin/clients/:clientId/prepaid-expenses/scan', requireAdmin, async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    if (!qbo.isConnected(clientId)) {
+      return res.status(400).json({ error: 'QBO not connected' });
+    }
+
+    // Determine the close period
+    const fixedAssetClient = getClientAssets(clientId);
+    let closeDate = null;
+    try { closeDate = await qbo.getBookCloseDate(clientId); } catch (_) {}
+    const targetMonth = (req.body?.month && /^\d{4}-\d{2}$/.test(req.body.month))
+      ? req.body.month
+      : determineAmortizationMonth(fixedAssetClient, closeDate).month;
+
+    const { year, monthIndex } = parseMonthStr(targetMonth);
+    const periodStart = `${year}-${String(monthIndex + 1).padStart(2, '0')}-01`;
+    const periodEnd = lastDayOfMonthDate(year, monthIndex).toISOString().split('T')[0];
+
+    const threshold = Number(req.body?.threshold) || 500;
+    const maxTxns = Math.min(Number(req.body?.maxTransactions) || 30, 50);
+
+    console.log(`[prepaid-scan] scanning ${targetMonth} for client ${clientId}, threshold $${threshold}, max ${maxTxns}`);
+
+    // Pull expense transactions for the period
+    const [billsRes, purchasesRes] = await Promise.all([
+      qbo.getBills(periodStart, periodEnd, 200, clientId).catch(() => null),
+      qbo.getExpenseTransactions(periodStart, periodEnd, 200, clientId).catch(() => null),
+    ]);
+
+    const bills = (billsRes?.QueryResponse?.Bill || []).map(b => ({
+      id: b.Id, type: 'Bill', date: b.TxnDate, amount: Number(b.TotalAmt || 0),
+      vendor: b.VendorRef?.name || 'Unknown', memo: b.PrivateNote || b.Memo || '',
+      accountName: b.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.name || '',
+      accountId: b.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.value || '',
+    }));
+    const purchases = (purchasesRes?.QueryResponse?.Purchase || []).map(p => ({
+      id: p.Id, type: 'Purchase', date: p.TxnDate, amount: Number(p.TotalAmt || 0),
+      vendor: p.EntityRef?.name || 'Unknown', memo: p.PrivateNote || p.Memo || '',
+      accountName: p.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.name || '',
+      accountId: p.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.value || '',
+    }));
+
+    let candidates = [...bills, ...purchases]
+      .filter(t => t.amount >= threshold)
+      .sort((a, b) => b.amount - a.amount)
+      .slice(0, maxTxns);
+
+    // Optional: filter to specific expense accounts
+    if (req.body?.expenseAccountIds?.length) {
+      const allowedIds = new Set(req.body.expenseAccountIds.map(String));
+      candidates = candidates.filter(t => allowedIds.has(t.accountId));
+    }
+
+    console.log(`[prepaid-scan] found ${candidates.length} candidate transactions above $${threshold}`);
+
+    if (candidates.length === 0) {
+      return res.json({
+        month: targetMonth,
+        periodStart,
+        periodEnd,
+        threshold,
+        candidates: [],
+        results: [],
+        summary: 'No expense transactions above the threshold for this period.',
+      });
+    }
+
+    // For each candidate, check for attachments and review with Claude
+    const results = [];
+    for (const txn of candidates) {
+      const result = {
+        txn,
+        hasAttachment: false,
+        attachment: null,
+        claudeReview: null,
+        error: null,
+      };
+
+      try {
+        // Check for attachments
+        const attachments = await qbo.getTransactionAttachments(
+          txn.id, TXN_TYPE_MAP[txn.type] || txn.type, clientId
+        ).catch(() => []);
+
+        if (attachments.length > 0) {
+          result.hasAttachment = true;
+          result.attachment = { id: attachments[0].id, fileName: attachments[0].fileName, contentType: attachments[0].contentType };
+
+          // Download the attachment
+          const file = await qbo.downloadAttachment(attachments[0].id, clientId);
+
+          // Determine if Claude can read this file type
+          const supportedTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+          const canReview = supportedTypes.some(t => file.contentType.includes(t));
+
+          if (canReview) {
+            // Build the prompt
+            const prompt = PREPAID_SCAN_PROMPT
+              .replace('{CLOSE_MONTH}', targetMonth)
+              .replace(/{PERIOD_END}/g, periodEnd)
+              .replace('{VENDOR}', txn.vendor)
+              .replace('{TXN_DATE}', txn.date)
+              .replace('{AMOUNT}', txn.amount.toFixed(2))
+              .replace('{MEMO}', txn.memo || '(none)');
+
+            // Determine the media type for Claude
+            let mediaType = file.contentType;
+            if (mediaType.includes('pdf')) mediaType = 'application/pdf';
+            else if (mediaType.includes('png')) mediaType = 'image/png';
+            else if (mediaType.includes('jpeg') || mediaType.includes('jpg')) mediaType = 'image/jpeg';
+            else if (mediaType.includes('gif')) mediaType = 'image/gif';
+            else if (mediaType.includes('webp')) mediaType = 'image/webp';
+
+            const response = await anthropic.messages.create({
+              model: 'claude-sonnet-4-20250514',
+              max_tokens: 1024,
+              messages: [{
+                role: 'user',
+                content: [
+                  {
+                    type: mediaType === 'application/pdf' ? 'document' : 'image',
+                    source: {
+                      type: 'base64',
+                      media_type: mediaType,
+                      data: file.buffer.toString('base64'),
+                    },
+                  },
+                  { type: 'text', text: prompt },
+                ],
+              }],
+            });
+
+            const rawText = response.content[0]?.text || '';
+            try {
+              const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+              result.claudeReview = JSON.parse(jsonMatch ? jsonMatch[0] : rawText);
+            } catch (_) {
+              result.claudeReview = { isPrepaid: false, confidence: 'low', reasoning: rawText.slice(0, 500), error: 'parse_failed' };
+            }
+          } else {
+            result.claudeReview = { isPrepaid: false, confidence: 'low', reasoning: `Unsupported file type: ${file.contentType}. Manual review needed.` };
+          }
+        } else {
+          // No attachment — do a text-only review based on description + amount
+          const prompt = PREPAID_SCAN_PROMPT
+            .replace('{CLOSE_MONTH}', targetMonth)
+            .replace(/{PERIOD_END}/g, periodEnd)
+            .replace('{VENDOR}', txn.vendor)
+            .replace('{TXN_DATE}', txn.date)
+            .replace('{AMOUNT}', txn.amount.toFixed(2))
+            .replace('{MEMO}', txn.memo || '(none)');
+
+          const response = await anthropic.messages.create({
+            model: 'claude-sonnet-4-20250514',
+            max_tokens: 1024,
+            messages: [{
+              role: 'user',
+              content: prompt + '\n\nNOTE: No invoice/receipt document is available. Base your assessment only on the vendor name, amount, date, and memo above. If you cannot determine the service period without a document, set isPrepaid to false with reasoning explaining that manual review is recommended.',
+            }],
+          });
+
+          const rawText = response.content[0]?.text || '';
+          try {
+            const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+            result.claudeReview = JSON.parse(jsonMatch ? jsonMatch[0] : rawText);
+          } catch (_) {
+            result.claudeReview = { isPrepaid: false, confidence: 'low', reasoning: rawText.slice(0, 500), error: 'parse_failed' };
+          }
+        }
+      } catch (e) {
+        console.error(`[prepaid-scan] error scanning txn ${txn.id}:`, e.message);
+        result.error = e.message;
+      }
+
+      results.push(result);
+    }
+
+    const flagged = results.filter(r => r.claudeReview?.isPrepaid === true);
+
+    res.json({
+      month: targetMonth,
+      periodStart,
+      periodEnd,
+      threshold,
+      candidateCount: candidates.length,
+      results,
+      flaggedCount: flagged.length,
+      summary: flagged.length > 0
+        ? `Found ${flagged.length} potential prepaid expense${flagged.length !== 1 ? 's' : ''} out of ${candidates.length} transactions scanned.`
+        : `No prepaid expenses detected among ${candidates.length} transactions scanned.`,
+    });
+  } catch (e) {
+    console.error('[prepaid-scan] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/admin/clients/:clientId/prepaid-expenses/scan/accept
+// Takes a scan result and adds it as a prepaid item to the schedule
+app.post('/api/admin/clients/:clientId/prepaid-expenses/scan/accept', requireAdmin, (req, res) => {
+  try {
+    const { vendor, description, totalAmount, prepaidAmount, startDate, endDate,
+            expenseAccountId, expenseAccountName, sourceTxnId, sourceTxnType } = req.body || {};
+
+    if (!vendor || !totalAmount || !startDate || !endDate || !expenseAccountId) {
+      return res.status(400).json({ error: 'vendor, totalAmount, startDate, endDate, expenseAccountId required' });
+    }
+
+    const c = getClientPrepaid(req.params.clientId);
+    const item = {
+      id: Date.now().toString() + Math.random().toString(36).slice(2, 7),
+      vendor: String(vendor),
+      description: description || '',
+      totalAmount: Number(totalAmount),
+      openingBalance: Number(prepaidAmount || totalAmount),
+      startDate,
+      endDate,
+      expenseAccountId: String(expenseAccountId),
+      expenseAccountName: expenseAccountName || '',
+      sourceTxnId: sourceTxnId || null,
+      sourceTxnType: sourceTxnType || null,
+      createdAt: new Date().toISOString(),
+      completedAt: null,
+    };
+    c.items.push(item);
+    savePrepaidExpenses(prepaidData);
+
+    res.json({ success: true, item });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ========================================
 // START SERVER
 // ========================================
 app.listen(PORT, '0.0.0.0', () => {

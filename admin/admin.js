@@ -1329,14 +1329,26 @@ const STEP_STATUS_STYLES = {
 function renderStepCard(step) {
   const s = STEP_STATUS_STYLES[step.status] || STEP_STATUS_STYLES.skipped;
   const canAct = step.action && (step.status === 'ready' || step.status === 'complete');
-  const actionBtn = step.action
-    ? `<button class="btn-step-action" data-step-action="${step.action}" ${canAct ? '' : 'disabled'}>${step.actionLabel}</button>`
-    : `<span class="btn-step-action-placeholder">${step.actionLabel}</span>`;
+  let actionBtn;
+  if (step.id === 'prepaid') {
+    // Prepaid step gets two buttons: scan + run amortization
+    const scanDisabled = step.status === 'locked' ? 'disabled' : '';
+    const runDisabled = canAct ? '' : 'disabled';
+    actionBtn = `
+      <button class="btn-step-action" data-step-action="scan-prepaids" ${scanDisabled} style="margin-bottom:6px;">scan expenses</button>
+      ${step.action ? `<button class="btn-step-action" data-step-action="${step.action}" ${runDisabled}>${step.actionLabel}</button>` : `<span class="btn-step-action-placeholder">${step.actionLabel}</span>`}`;
+  } else {
+    actionBtn = step.action
+      ? `<button class="btn-step-action" data-step-action="${step.action}" ${canAct ? '' : 'disabled'}>${step.actionLabel}</button>`
+      : `<span class="btn-step-action-placeholder">${step.actionLabel}</span>`;
+  }
 
   // The fixed-assets step embeds the reconciliation panel and the export step
   // embeds the Claude review panel. Both are hidden until their action runs.
   let extras = '';
-  if (step.id === 'fixed-assets') {
+  if (step.id === 'prepaid') {
+    extras = `<div id="prepaid-scan-panel" style="margin-top:12px;"></div>`;
+  } else if (step.id === 'fixed-assets') {
     extras = `<div id="reconciliation-panel" style="display:none;margin-top:12px;"></div>`;
   } else if (step.id === 'export') {
     extras = `<div id="claude-review-panel" style="display:none;margin-top:12px;"></div>`;
@@ -1388,6 +1400,8 @@ document.addEventListener('click', (e) => {
     autoSyncAndImportFromQbo().then(() => { currentClosePeriod = null; renderCloseSteps(); });
   } else if (action === 'run-amort') {
     openRunAmortization();
+  } else if (action === 'scan-prepaids') {
+    runPrepaidScan();
   } else if (action === 'run-prepaid') {
     openRunPrepaid();
   } else if (action === 'export') {
@@ -1709,6 +1723,172 @@ async function openRunPrepaid() {
     const postData = await postRes.json();
     if (!postRes.ok) { alert('run failed: ' + (postData.error || postRes.status)); return; }
     alert(`Posted prepaid amortization for ${postData.run.month}\nTotal: ${fmtMoney(postData.run.totalAmount)}\nJE ID: ${postData.run.journalEntryId || '(unknown)'}`);
+    await loadClientPrepaid();
+    renderCloseSteps();
+  } catch (e) { alert('error: ' + e.message); }
+}
+
+// ========================================
+// PREPAID EXPENSE SCANNER (Part B)
+// ========================================
+
+let lastScanResults = null;
+
+async function runPrepaidScan() {
+  if (!selectedClientId) return;
+  const panel = document.getElementById('prepaid-scan-panel');
+  if (!panel) return;
+
+  // Show loading state
+  const scanBtn = document.querySelector('[data-step-action="scan-prepaids"]');
+  if (scanBtn) { scanBtn.textContent = 'scanning…'; scanBtn.disabled = true; }
+  panel.innerHTML = `
+    <div style="padding:16px;background:var(--blue-50);border-radius:8px;font-size:0.85rem;color:var(--gray-700);">
+      <strong>scanning expense transactions…</strong><br>
+      pulling transactions from QBO, checking for invoice attachments, and sending each to Claude for review. this may take 30–60 seconds depending on the number of transactions.
+    </div>`;
+
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/scan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ threshold: 250 }),
+    });
+    const data = await res.json();
+    if (!res.ok) { throw new Error(data.error || 'scan failed'); }
+    lastScanResults = data;
+    renderScanResults(panel, data);
+  } catch (e) {
+    panel.innerHTML = `<div style="padding:12px;background:var(--red-50);border-radius:8px;color:var(--red-600);">scan failed: ${e.message}</div>`;
+  }
+  if (scanBtn) { scanBtn.textContent = 'scan expenses'; scanBtn.disabled = false; }
+}
+
+function renderScanResults(panel, data) {
+  if (!data.results || data.results.length === 0) {
+    panel.innerHTML = `
+      <div style="padding:12px;background:var(--gray-50);border-radius:8px;font-size:0.85rem;">
+        <strong>no transactions found</strong> above $${data.threshold} for ${data.month}.
+      </div>`;
+    return;
+  }
+
+  const flagged = data.results.filter(r => r.claudeReview?.isPrepaid === true);
+  const clean = data.results.filter(r => r.claudeReview?.isPrepaid === false);
+  const errors = data.results.filter(r => r.error || r.claudeReview?.error);
+
+  let html = `
+    <div style="padding:12px;background:var(--gray-50);border-radius:8px;margin-bottom:8px;font-size:0.85rem;">
+      <strong>scan complete for ${data.month}</strong> —
+      ${data.candidateCount} transaction${data.candidateCount !== 1 ? 's' : ''} scanned (≥ $${data.threshold}),
+      <span style="color:${flagged.length > 0 ? 'var(--red-600)' : 'var(--green-600)'};">
+        ${flagged.length} potential prepaid${flagged.length !== 1 ? 's' : ''} detected
+      </span>
+    </div>`;
+
+  // Show flagged items first (these need action)
+  if (flagged.length > 0) {
+    html += `<div style="margin-bottom:8px;"><strong style="color:var(--red-600);font-size:0.85rem;">⚠ potential prepaids found:</strong></div>`;
+    html += flagged.map(r => renderScanResultCard(r, data, 'flagged')).join('');
+  }
+
+  // Show clean items (collapsed)
+  if (clean.length > 0) {
+    html += `
+      <details style="margin-top:8px;">
+        <summary style="cursor:pointer;font-size:0.85rem;color:var(--gray-600);padding:4px 0;">
+          ✓ ${clean.length} clean transaction${clean.length !== 1 ? 's' : ''} (click to expand)
+        </summary>
+        <div style="margin-top:4px;">
+          ${clean.map(r => renderScanResultCard(r, data, 'clean')).join('')}
+        </div>
+      </details>`;
+  }
+
+  // Errors
+  if (errors.length > 0) {
+    html += `
+      <details style="margin-top:8px;">
+        <summary style="cursor:pointer;font-size:0.85rem;color:var(--gray-400);">
+          ${errors.length} error${errors.length !== 1 ? 's' : ''}
+        </summary>
+        <div style="margin-top:4px;">${errors.map(r => `<div style="font-size:0.8rem;padding:4px;color:var(--gray-500);">${r.txn.vendor} — ${r.error || 'parse error'}</div>`).join('')}</div>
+      </details>`;
+  }
+
+  panel.innerHTML = html;
+}
+
+function renderScanResultCard(result, scanData, type) {
+  const t = result.txn;
+  const r = result.claudeReview || {};
+  const isFlagged = type === 'flagged';
+  const borderColor = isFlagged ? 'var(--red-400)' : 'var(--green-400)';
+  const bgColor = isFlagged ? '#fef2f2' : '#f0fdf4';
+
+  const confidenceBadge = r.confidence
+    ? `<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:0.72rem;background:${r.confidence === 'high' ? '#dcfce7' : r.confidence === 'medium' ? '#fef9c3' : '#f3f4f6'};color:${r.confidence === 'high' ? '#166534' : r.confidence === 'medium' ? '#854d0e' : '#6b7280'};">${r.confidence} confidence</span>`
+    : '';
+
+  const attachBadge = result.hasAttachment
+    ? `<span style="font-size:0.72rem;color:var(--blue-500);">📎 ${result.attachment?.fileName || 'attachment'}</span>`
+    : `<span style="font-size:0.72rem;color:var(--gray-400);">no attachment</span>`;
+
+  let actionHtml = '';
+  if (isFlagged) {
+    // "Accept as prepaid" button — adds to the schedule
+    const encoded = encodeURIComponent(JSON.stringify({
+      vendor: t.vendor,
+      description: r.description || '',
+      totalAmount: r.totalAmount || t.amount,
+      prepaidAmount: r.prepaidAmount || r.totalAmount || t.amount,
+      startDate: r.servicePeriodStart || t.date,
+      endDate: r.servicePeriodEnd || '',
+      expenseAccountId: t.accountId,
+      expenseAccountName: t.accountName,
+      sourceTxnId: t.id,
+      sourceTxnType: t.type,
+    }));
+    actionHtml = `
+      <div style="margin-top:6px;display:flex;gap:8px;">
+        <button class="btn btn-primary" style="font-size:0.78rem;padding:4px 10px;" onclick="acceptScanResult(decodeURIComponent('${encoded}'))">add to prepaid schedule</button>
+        <button class="btn btn-secondary" style="font-size:0.78rem;padding:4px 10px;" onclick="this.closest('.scan-result-card').style.display='none'">dismiss</button>
+      </div>`;
+  }
+
+  return `
+    <div class="scan-result-card" style="border-left:3px solid ${borderColor};background:${bgColor};padding:10px 12px;margin-bottom:6px;border-radius:4px;font-size:0.82rem;">
+      <div style="display:flex;justify-content:space-between;align-items:start;">
+        <div>
+          <strong>${t.vendor}</strong> — ${fmtMoney(t.amount)} — ${t.date}
+          ${t.accountName ? `<span style="color:var(--gray-500);margin-left:6px;">${t.accountName}</span>` : ''}
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          ${confidenceBadge} ${attachBadge}
+        </div>
+      </div>
+      <div style="margin-top:4px;color:var(--gray-600);font-size:0.8rem;">${r.reasoning || ''}</div>
+      ${r.servicePeriodStart && r.servicePeriodEnd ? `<div style="margin-top:2px;font-size:0.78rem;color:var(--gray-500);">service period: ${r.servicePeriodStart} → ${r.servicePeriodEnd}${r.prepaidAmount ? ` | prepaid portion: ${fmtMoney(r.prepaidAmount)}` : ''}</div>` : ''}
+      ${actionHtml}
+    </div>`;
+}
+
+async function acceptScanResult(encodedJson) {
+  try {
+    const data = JSON.parse(encodedJson);
+    if (!data.endDate) {
+      const endDate = prompt('Service period end date not detected.\nPlease enter the end date (YYYY-MM-DD):');
+      if (!endDate) return;
+      data.endDate = endDate;
+    }
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/scan/accept`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify(data),
+    });
+    const result = await res.json();
+    if (!res.ok) { alert('failed: ' + (result.error || res.status)); return; }
+    alert(`Added "${data.vendor}" to the prepaid schedule.\n\nIt will be amortized ${fmtMoney(data.prepaidAmount)} from ${data.startDate} to ${data.endDate}.`);
     await loadClientPrepaid();
     renderCloseSteps();
   } catch (e) { alert('error: ' + e.message); }
