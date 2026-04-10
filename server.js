@@ -2516,12 +2516,13 @@ let prepaidData = loadPrepaidExpenses();
 
 function getClientPrepaid(clientId) {
   if (!prepaidData[clientId]) {
-    prepaidData[clientId] = { prepaidAccount: null, items: [], amortizationRuns: [] };
+    prepaidData[clientId] = { prepaidAccount: null, items: [], amortizationRuns: [], scanThreshold: 500 };
   }
   const c = prepaidData[clientId];
   if (!c.items) c.items = [];
   if (!c.amortizationRuns) c.amortizationRuns = [];
   if (c.prepaidAccount === undefined) c.prepaidAccount = null;
+  if (c.scanThreshold === undefined) c.scanThreshold = 500;
   return c;
 }
 
@@ -2609,6 +2610,16 @@ function computePrepaidPreview(clientData, targetMonth) {
 // Get prepaid expenses state for a client
 app.get('/api/admin/clients/:clientId/prepaid-expenses', requireAdmin, (req, res) => {
   res.json(getClientPrepaid(req.params.clientId));
+});
+
+// Save prepaid module settings (threshold, etc.)
+app.put('/api/admin/clients/:clientId/prepaid-expenses/settings', requireAdmin, (req, res) => {
+  const c = getClientPrepaid(req.params.clientId);
+  if (req.body.scanThreshold !== undefined) {
+    c.scanThreshold = Math.max(0, Number(req.body.scanThreshold) || 500);
+  }
+  savePrepaidExpenses(prepaidData);
+  res.json(c);
 });
 
 // Set the Prepaid Expenses GL account

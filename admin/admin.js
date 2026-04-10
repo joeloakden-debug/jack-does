@@ -17,7 +17,7 @@ function logout() {
 let currentFilter = 'pending';
 let allAnalyses = [];
 let qboAccounts = []; // Chart of accounts from QuickBooks
-let prepaidState = { prepaidAccount: null, items: [], amortizationRuns: [] };
+let prepaidState = { prepaidAccount: null, items: [], amortizationRuns: [], scanThreshold: 500 };
 let prepaidPreview = null; // cached preview for the current close period
 
 // ========================================
@@ -1458,6 +1458,7 @@ async function loadClientPrepaid() {
       prepaidAccount: data.prepaidAccount || null,
       items: data.items || [],
       amortizationRuns: data.amortizationRuns || [],
+      scanThreshold: data.scanThreshold ?? 500,
     };
     // Also fetch preview for current close period so step card can show eligible total
     try {
@@ -1479,17 +1480,31 @@ function fmtMoney(n) {
 }
 
 function renderPrepaidSettings() {
-  // Account picker
+  // Account picker — show asset-type accounts plus anything with "prepaid" in the name.
+  // Always include the currently-saved account even if it doesn't match the filter.
   const acctSelect = document.getElementById('prepaid-account-select');
   if (acctSelect) {
+    const savedId = prepaidState.prepaidAccount?.id;
     const eligible = qboAccounts.filter(a =>
-      ['Other Current Asset', 'Other Asset', 'Prepaid Expenses'].includes(a.type) ||
+      ['Other Current Asset', 'Other Asset', 'Fixed Asset'].includes(a.type) ||
       (a.name || '').toLowerCase().includes('prepaid')
     );
+    // Ensure the saved account is in the list
+    if (savedId && !eligible.find(a => a.id === savedId)) {
+      const saved = qboAccounts.find(a => a.id === savedId);
+      if (saved) eligible.unshift(saved);
+      else eligible.unshift({ id: savedId, name: prepaidState.prepaidAccount.name || '(saved account)', type: '?' });
+    }
     acctSelect.innerHTML = '<option value="">select prepaid expenses account…</option>' +
       eligible.map(a =>
-        `<option value="${a.id}" data-name="${(a.name || '').replace(/"/g, '&quot;')}" ${prepaidState.prepaidAccount?.id === a.id ? 'selected' : ''}>${a.name} (${a.type})</option>`
+        `<option value="${a.id}" data-name="${(a.name || '').replace(/"/g, '&quot;')}" ${a.id === savedId ? 'selected' : ''}>${a.name} (${a.type})</option>`
       ).join('');
+  }
+
+  // Threshold field
+  const thresholdInput = document.getElementById('prepaid-scan-threshold');
+  if (thresholdInput) {
+    thresholdInput.value = prepaidState.scanThreshold ?? 500;
   }
 
   // Items list
@@ -1537,18 +1552,31 @@ function renderPrepaidSettings() {
   }).join('');
 }
 
-async function savePrepaidAccount() {
+async function savePrepaidSettings() {
   const select = document.getElementById('prepaid-account-select');
-  if (!select || !select.value) return;
-  const id = select.value;
-  const name = select.options[select.selectedIndex].dataset.name;
+  const thresholdInput = document.getElementById('prepaid-scan-threshold');
+  const threshold = thresholdInput ? (parseFloat(thresholdInput.value) || 500) : 500;
+
   try {
-    const res = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/account`, {
+    // Save threshold
+    await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/settings`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
-      body: JSON.stringify({ id, name }),
+      body: JSON.stringify({ scanThreshold: threshold }),
     });
-    if (!res.ok) { alert('save failed'); return; }
+
+    // Save account if selected
+    if (select && select.value) {
+      const id = select.value;
+      const name = select.options[select.selectedIndex].dataset.name;
+      const res = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/account`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+        body: JSON.stringify({ id, name }),
+      });
+      if (!res.ok) { alert('save failed'); return; }
+    }
+
     await loadClientPrepaid();
     renderCloseSteps();
   } catch (e) { alert('save failed: ' + e.message); }
@@ -1752,7 +1780,7 @@ async function runPrepaidScan() {
     const res = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/scan`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
-      body: JSON.stringify({ threshold: 250 }),
+      body: JSON.stringify({ threshold: prepaidState.scanThreshold || 500 }),
     });
     const data = await res.json();
     if (!res.ok) { throw new Error(data.error || 'scan failed'); }
@@ -2090,7 +2118,7 @@ document.getElementById('btn-suggest-class-amort').addEventListener('click', sug
 document.getElementById('btn-apply-class-ai').addEventListener('click', applyClassAiSuggestion);
 
 // Prepaid expenses settings wiring
-document.getElementById('btn-save-prepaid-account').addEventListener('click', savePrepaidAccount);
+document.getElementById('btn-save-prepaid-settings').addEventListener('click', savePrepaidSettings);
 document.getElementById('btn-add-prepaid').addEventListener('click', openAddPrepaid);
 document.getElementById('btn-download-prepaid-template').addEventListener('click', downloadPrepaidTemplate);
 document.getElementById('prepaid-import-file').addEventListener('change', (e) => {
