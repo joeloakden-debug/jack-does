@@ -3078,7 +3078,17 @@ function showReconciliationResult(rec) {
 document.getElementById('asset-modal-cancel').addEventListener('click', closeAssetModal);
 document.getElementById('asset-modal-save').addEventListener('click', saveAsset);
 document.getElementById('asset-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeAssetModal(); });
-document.getElementById('btn-refresh-close-date').addEventListener('click', loadQBOCloseDate);
+document.getElementById('btn-refresh-close-date').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-refresh-close-date');
+  const display = document.getElementById('qbo-close-date-display');
+  if (btn) btn.textContent = 'refreshing…';
+  if (display) display.textContent = 'refreshing from QBO…';
+  await loadQBOCloseDate();
+  // Also invalidate the close period cache so the workflow picks up the new date
+  currentClosePeriod = null;
+  await renderCloseSteps();
+  if (btn) { btn.textContent = '✓ refreshed'; setTimeout(() => { btn.textContent = 'refresh'; }, 2000); }
+});
 document.getElementById('amortization-cancel').addEventListener('click', closeAmortizationModal);
 document.getElementById('amortization-confirm').addEventListener('click', confirmRunAmortization);
 document.getElementById('amortization-month-input').addEventListener('change', (e) => {

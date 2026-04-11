@@ -363,20 +363,27 @@ async function getCompanyInfo(clientId = 'default') {
  *   preferences.AccountingInfoPrefs.BookCloseDate (YYYY-MM-DD string, or undefined)
  */
 async function getPreferences(clientId = 'default') {
-  const qb = await getQBClient(clientId);
-  return new Promise((resolve, reject) => {
-    qb.findPreferenceses({}, (err, result) => {
-      if (err) return reject(err);
-      // Preferences is a singleton per company; return the first (or the object itself)
-      if (result?.QueryResponse?.Preferences?.[0]) {
-        resolve(result.QueryResponse.Preferences[0]);
-      } else if (Array.isArray(result) && result[0]) {
-        resolve(result[0]);
-      } else {
-        resolve(result);
-      }
-    });
+  // Use direct REST call instead of node-quickbooks' findPreferenceses
+  // to avoid potential caching and ensure fresh data.
+  const tokenData = await refreshTokenIfNeeded(clientId);
+  const realmId = tokenData.realmId;
+  const url = `${qboApiBase()}/v3/company/${realmId}/preferences?minorversion=65`;
+
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${tokenData.accessToken}`,
+      Accept: 'application/json',
+    },
   });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`QBO preferences fetch failed (${res.status}): ${text}`);
+  }
+
+  const body = await res.json();
+  return body?.Preferences || body?.QueryResponse?.Preferences?.[0] || body;
 }
 
 /**
@@ -386,7 +393,10 @@ async function getPreferences(clientId = 'default') {
 async function getBookCloseDate(clientId = 'default') {
   try {
     const prefs = await getPreferences(clientId);
-    return prefs?.AccountingInfoPrefs?.BookCloseDate || null;
+    const closeDate = prefs?.AccountingInfoPrefs?.BookCloseDate || null;
+    const classifyMoneyAsIn = prefs?.AccountingInfoPrefs?.ClassTrackingPerTxnLine;
+    console.log(`[qbo] getBookCloseDate for ${clientId}: BookCloseDate=${closeDate}, raw AccountingInfoPrefs keys=${Object.keys(prefs?.AccountingInfoPrefs || {}).join(',')}`);
+    return closeDate;
   } catch (e) {
     console.error('Failed to fetch book close date:', e.message);
     return null;
