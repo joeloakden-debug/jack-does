@@ -13,6 +13,15 @@ const path = require('path');
 const fs = require('fs');
 const qbo = require('./qbo-service');
 const excelService = require('./excel-service');
+
+// Persistent data directory — set DATA_DIR env var to a Railway volume mount
+// (e.g. /data) so files survive deploys. Falls back to __dirname for local dev.
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+if (DATA_DIR !== __dirname) {
+  console.log(`[data] using persistent data directory: ${DATA_DIR}`);
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+function dataPath(filename) { return path.join(DATA_DIR, filename); }
 const excelReviewService = require('./excel-review-service');
 
 const app = express();
@@ -29,7 +38,7 @@ app.use('/portal', express.static(path.join(__dirname, 'portal')));
 // ========================================
 // CLIENT REGISTRY (file-backed persistence)
 // ========================================
-const CLIENTS_FILE = path.join(__dirname, 'clients.json');
+const CLIENTS_FILE = dataPath('clients.json');
 
 function loadClients() {
   try {
@@ -70,7 +79,7 @@ function resolveClient(req, res, next) {
 }
 
 // Admin auth — file-backed, falls back to env variable
-const ADMIN_SETTINGS_FILE = path.join(__dirname, '.admin-settings.json');
+const ADMIN_SETTINGS_FILE = dataPath('.admin-settings.json');
 
 function getAdminPassword() {
   try {
@@ -1104,7 +1113,7 @@ app.put('/api/admin/clients/:id', requireAdmin, (req, res) => {
 // ========================================
 // FIXED ASSETS — per-client, file-backed
 // ========================================
-const FIXED_ASSETS_FILE = path.join(__dirname, 'fixed-assets.json');
+const FIXED_ASSETS_FILE = dataPath('fixed-assets.json');
 
 function loadFixedAssets() {
   try {
@@ -2495,7 +2504,7 @@ app.post('/api/admin/clients/:clientId/fixed-assets/reconcile', requireAdmin, as
 //   ]
 // }
 
-const PREPAID_FILE = path.join(__dirname, 'prepaid-expenses.json');
+const PREPAID_FILE = dataPath('prepaid-expenses.json');
 
 function loadPrepaidExpenses() {
   try {
@@ -3266,7 +3275,7 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan/accept', requireAdm
 // ========================================
 // ACCRUED LIABILITIES — per-client, file-backed
 // ========================================
-const ACCRUED_LIABILITIES_FILE = path.join(__dirname, 'accrued-liabilities.json');
+const ACCRUED_LIABILITIES_FILE = dataPath('accrued-liabilities.json');
 
 function loadAccruedLiabilities() {
   try {

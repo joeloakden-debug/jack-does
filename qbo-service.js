@@ -15,7 +15,9 @@ const oauthClient = new OAuthClient({
 
 // Token store keyed by clientId (e.g. "demo-client", "acme-corp")
 const tokenStore = new Map();
-const TOKEN_FILE = path.join(__dirname, '.qbo-tokens.json');
+// Persistent data directory — set DATA_DIR env var to a Railway volume mount
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+const TOKEN_FILE = path.join(DATA_DIR, '.qbo-tokens.json');
 
 // Load tokens on startup (env var first, then disk file)
 function loadTokensFromDisk() {
