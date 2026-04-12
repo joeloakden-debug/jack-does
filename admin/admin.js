@@ -1340,16 +1340,21 @@ function buildCloseSteps(period) {
     },
   ];
 
-  // Apply dependency locking: once we hit a non-complete, non-skipped step,
-  // every subsequent step with an action gets locked. Skipped steps don't
-  // block progression (they're placeholders).
-  let blocked = false;
+  // Dependency locking: the export/reconciliation steps at the end should
+  // wait until the module steps above are complete (or skipped). Individual
+  // module steps (prepaid, accrued liabilities, fixed assets) are independent
+  // of each other and can be run in any order.
+  const moduleStepIds = new Set(['sync', 'prepaid', 'accrued-liabilities', 'receivables', 'fixed-assets', 'income-taxes']);
+  const allModulesDone = steps
+    .filter(s => moduleStepIds.has(s.id))
+    .every(s => s.status === 'complete' || s.status === 'skipped');
+
   for (const step of steps) {
-    if (blocked && step.status !== 'skipped') {
+    if (!moduleStepIds.has(step.id) && step.id !== 'export' && step.id !== 'reconciliation') continue;
+    if ((step.id === 'export' || step.id === 'reconciliation') && !allModulesDone && step.status !== 'skipped') {
       step.status = 'locked';
-      step.statusLabel = 'locked';
+      step.statusLabel = 'complete all modules first';
     }
-    if (step.status === 'ready') blocked = true;
   }
 
   return steps;
