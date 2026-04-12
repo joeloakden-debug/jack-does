@@ -1375,6 +1375,31 @@ body {
 
 .close-calendar {
   margin-bottom: 24px;
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.close-calendar-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+  background: var(--gray-50, #f9fafb);
+  transition: background 0.15s;
+}
+.close-calendar-header:hover {
+  background: var(--gray-100);
+}
+.close-calendar-toggle {
+  font-size: 0.6rem;
+  color: var(--gray-400);
+  transition: transform 0.2s;
+  display: inline-block;
+}
+.close-calendar-toggle.open {
+  transform: rotate(90deg);
 }
 .close-calendar-title {
   font-size: 0.78rem;
@@ -1382,7 +1407,20 @@ body {
   color: var(--gray-500);
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  margin-bottom: 10px;
+}
+.close-calendar-summary {
+  margin-left: auto;
+  font-size: 0.74rem;
+  color: var(--gray-400);
+  font-style: italic;
+}
+.close-calendar-body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease;
+}
+.close-calendar-body.open {
+  max-height: 600px;
 }
 .close-calendar table {
   width: 100%;

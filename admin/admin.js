@@ -1478,25 +1478,50 @@ async function renderCloseCalendar() {
         </tr>`;
     }).join('');
 
+    // Count completed modules for summary
+    const completedMonths = data.months.filter(m =>
+      m.modules.fixedAssets === 'complete' ||
+      m.modules.prepaidExpenses === 'complete' ||
+      m.modules.accruedLiabilities === 'complete'
+    ).length;
+    const summary = completedMonths > 0
+      ? `${completedMonths} of 12 months with activity`
+      : 'no months completed yet';
+
+    const isOpen = container.querySelector('.close-calendar-body.open') ? true : false;
+
     container.innerHTML = `
       <div class="close-calendar">
-        <div class="close-calendar-title">fiscal year overview — ${formatLabel(data.months[0].month)} to ${formatLabel(data.months[data.months.length - 1].month)}</div>
-        <table>
-          <thead>
-            <tr>
-              <th>period</th>
-              <th style="text-align:center;">fixed assets</th>
-              <th style="text-align:center;">prepaid expenses</th>
-              <th style="text-align:center;">accrued liabilities</th>
-            </tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
+        <div class="close-calendar-header" onclick="toggleCloseCalendar()">
+          <span class="close-calendar-toggle ${isOpen ? 'open' : ''}">&#9654;</span>
+          <span class="close-calendar-title">fiscal year overview — ${formatLabel(data.months[0].month)} to ${formatLabel(data.months[data.months.length - 1].month)}</span>
+          <span class="close-calendar-summary">${summary}</span>
+        </div>
+        <div class="close-calendar-body ${isOpen ? 'open' : ''}">
+          <table>
+            <thead>
+              <tr>
+                <th>period</th>
+                <th style="text-align:center;">fixed assets</th>
+                <th style="text-align:center;">prepaid expenses</th>
+                <th style="text-align:center;">accrued liabilities</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
       </div>`;
   } catch (e) {
     console.error('renderCloseCalendar error:', e);
     container.innerHTML = '';
   }
+}
+
+function toggleCloseCalendar() {
+  const body = document.querySelector('.close-calendar-body');
+  const arrow = document.querySelector('.close-calendar-toggle');
+  if (body) body.classList.toggle('open');
+  if (arrow) arrow.classList.toggle('open');
 }
 
 // Event delegation — all step-card action buttons funnel through this one
