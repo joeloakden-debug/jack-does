@@ -2944,12 +2944,23 @@ async function loadAmortizationPreview(monthOverride) {
 
     currentAmortMonth = data.month;
     monthInput.value = data.month;
+    monthInput.disabled = false;
     closeEl.textContent = data.closeDate ? `qbo books closed through: ${data.closeDate}` : 'no qbo close date set';
     reasonEl.textContent = data.reason ? `(${data.reason})` : '';
 
     if (data.alreadyRun) {
-      previewEl.innerHTML =
-        `<p style="color:var(--amber-600);">amortization was already run for ${data.month}${data.runDetails ? ` on ${new Date(data.runDetails.ranAt).toLocaleDateString()}.<br>total: $${data.runDetails.totalAmount.toFixed(2)} (${data.runDetails.assetCount} assets)` : ''}</p>`;
+      monthInput.disabled = true;
+      const rd = data.runDetails;
+      previewEl.innerHTML = `
+        <div style="padding:12px;background:var(--green-50);border-radius:8px;border-left:4px solid var(--green-500);">
+          <strong style="color:var(--green-700);">✓ amortization already posted for ${data.month}</strong>
+          ${rd ? `<div style="margin-top:8px;font-size:0.85rem;color:var(--gray-700);">
+            <div>posted: ${new Date(rd.ranAt).toLocaleDateString()}</div>
+            <div>total: $${rd.totalAmount.toFixed(2)} (${rd.assetCount} asset${rd.assetCount !== 1 ? 's' : ''})</div>
+            ${rd.journalEntryId ? `<div>JE #${rd.journalEntryId}</div>` : ''}
+          </div>` : ''}
+          <p style="margin-top:8px;font-size:0.82rem;color:var(--gray-500);">the closing period must advance (by updating the close date in QBO) before amortization can be run for the next month.</p>
+        </div>`;
       confirmBtn.style.display = 'none';
       return;
     }
@@ -2975,7 +2986,9 @@ async function loadAmortizationPreview(monthOverride) {
 
 async function openRunAmortization() {
   document.getElementById('amortization-modal').style.display = 'flex';
-  await loadAmortizationPreview(null);
+  // Always use the current closing period so we don't jump ahead to a future month
+  const closingMonth = currentClosePeriod?.month || null;
+  await loadAmortizationPreview(closingMonth);
 }
 
 function closeAmortizationModal() { document.getElementById('amortization-modal').style.display = 'none'; }
