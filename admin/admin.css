@@ -1371,6 +1371,78 @@ body {
   padding: 8px 16px;
 }
 
+/* ======== CLOSE CALENDAR (fiscal year overview) ======== */
+
+.close-calendar {
+  margin-bottom: 24px;
+}
+.close-calendar-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--gray-500);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 10px;
+}
+.close-calendar table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+.close-calendar th {
+  text-align: left;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--gray-500);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 8px 12px;
+  border-bottom: 2px solid var(--gray-200);
+}
+.close-calendar td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--gray-100);
+  color: var(--gray-700);
+}
+.close-calendar tr.cal-current {
+  background: var(--blue-50, #eff6ff);
+}
+.close-calendar tr.cal-current td:first-child {
+  font-weight: 700;
+  color: var(--blue-700, #1d4ed8);
+}
+.close-calendar tr.cal-future td {
+  color: var(--gray-400);
+}
+.close-calendar .cal-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-size: 0.75rem;
+}
+.close-calendar .cal-complete {
+  background: var(--green-100, #dcfce7);
+  color: var(--green-700, #15803d);
+}
+.close-calendar .cal-closed {
+  background: var(--gray-100);
+  color: var(--gray-400);
+}
+.close-calendar .cal-pending {
+  background: var(--yellow-100, #fef9c3);
+  color: var(--yellow-700, #a16207);
+}
+.close-calendar .cal-skipped {
+  color: var(--gray-300);
+  font-size: 0.72rem;
+}
+.close-calendar .cal-future-dot {
+  color: var(--gray-300);
+}
+
 /* ======== SETTINGS TAB (per-module config) ======== */
 
 .settings-module {

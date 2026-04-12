@@ -2205,6 +2205,108 @@ app.get('/api/admin/clients/:clientId/close-period', requireAdmin, async (req, r
   }
 });
 
+// Fiscal year close calendar — returns per-month status for each module
+app.get('/api/admin/clients/:clientId/close-calendar', requireAdmin, async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    const client = CLIENTS[clientId];
+    if (!client) return res.status(404).json({ error: 'client not found' });
+
+    // Determine fiscal year months
+    // fiscalYearEnd is "MM-DD" (e.g. "02-28" for Feb 28 year-end)
+    const fye = client.fiscalYearEnd || '12-31';
+    const [fyeMonth, fyeDay] = fye.split('-').map(Number);
+    const today = new Date();
+
+    // Fiscal year that contains "today": starts month after FYE of previous calendar year
+    // e.g. FYE = 02-28 → FY starts March. If today is Jan 2027, current FY started Mar 2026.
+    let fyStartYear, fyStartMonth;
+    if (fyeMonth === 12) {
+      // Calendar year-end: FY = Jan to Dec of current year
+      fyStartYear = today.getFullYear();
+      fyStartMonth = 0; // January
+    } else {
+      // FY starts the month after FYE month
+      fyStartMonth = fyeMonth; // fyeMonth is 0-based after subtracting... no, it's 1-based from MM
+      // fyeMonth is 1-based (02 = February). FY starts month fyeMonth (0-based = fyeMonth)
+      // e.g. FYE = Feb (02) → FY starts March (month index 2)
+      const fyStartMonthIdx = fyeMonth; // fyeMonth=2 → March = index 2 ✓
+      if (today.getMonth() >= fyStartMonthIdx) {
+        fyStartYear = today.getFullYear();
+      } else {
+        fyStartYear = today.getFullYear() - 1;
+      }
+      fyStartMonth = fyStartMonthIdx;
+    }
+
+    // Build 12 months
+    const months = [];
+    for (let i = 0; i < 12; i++) {
+      const m = (fyStartMonth + i) % 12;
+      const y = fyStartYear + Math.floor((fyStartMonth + i) / 12);
+      months.push(formatMonthStr(y, m));
+    }
+
+    // Gather run data from each module
+    const faData = getClientAssets(clientId);
+    const faRuns = new Set((faData.amortizationRuns || []).map(r => r.month));
+
+    const ppData = getClientPrepaid(clientId);
+    const ppConfigured = !!ppData.prepaidAccount;
+    const ppRuns = new Set((ppData.amortizationRuns || []).map(r => r.month));
+
+    const alData = getClientAccruedLiab(clientId);
+    const alConfigured = !!alData.accruedLiabilitiesAccount;
+    const alPosted = new Set(
+      (alData.analysisRuns || []).filter(r => r.accrualJE).map(r => r.month)
+    );
+
+    // Determine closing month
+    let closeDate = null;
+    if (qbo.isConnected(clientId)) {
+      try { closeDate = await qbo.getBookCloseDate(clientId); } catch (_) {}
+    }
+    let closingMonth = null;
+    if (closeDate) {
+      const cd = new Date(closeDate + 'T00:00:00');
+      const nm = new Date(cd.getFullYear(), cd.getMonth() + 1, 1);
+      closingMonth = formatMonthStr(nm.getFullYear(), nm.getMonth());
+    } else {
+      // Fallback: default to last month (same logic as close-period endpoint)
+      const now = new Date();
+      const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      closingMonth = formatMonthStr(lastMonth.getFullYear(), lastMonth.getMonth());
+    }
+
+    const calendar = months.map(month => {
+      const isFuture = closingMonth ? month > closingMonth : false;
+      const isCurrent = month === closingMonth;
+      const isClosed = closeDate ? (() => {
+        const { year, monthIndex } = parseMonthStr(month);
+        const lastDay = lastDayOfMonthDate(year, monthIndex);
+        return lastDay <= new Date(closeDate + 'T00:00:00');
+      })() : false;
+
+      return {
+        month,
+        isCurrent,
+        isClosed,
+        isFuture: !isClosed && !isCurrent,
+        modules: {
+          fixedAssets: faRuns.has(month) ? 'complete' : (isClosed ? 'closed' : 'pending'),
+          prepaidExpenses: !ppConfigured ? 'skipped' : (ppRuns.has(month) ? 'complete' : (isClosed ? 'closed' : 'pending')),
+          accruedLiabilities: !alConfigured ? 'skipped' : (alPosted.has(month) ? 'complete' : (isClosed ? 'closed' : 'pending')),
+        },
+      };
+    });
+
+    res.json({ fiscalYear: `${months[0]} to ${months[11]}`, months: calendar, closingMonth, closeDate });
+  } catch (e) {
+    console.error('[close-calendar] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Get QBO book close date
 app.get('/api/admin/clients/:clientId/book-close-date', requireAdmin, async (req, res) => {
   try {

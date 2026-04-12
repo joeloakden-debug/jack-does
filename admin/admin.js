@@ -1432,6 +1432,71 @@ async function renderCloseSteps() {
 
   const steps = buildCloseSteps(currentClosePeriod);
   container.innerHTML = steps.map(renderStepCard).join('');
+
+  // Render fiscal year calendar (non-blocking)
+  renderCloseCalendar();
+}
+
+// ── Close Calendar (fiscal year overview table) ──────────────────────
+async function renderCloseCalendar() {
+  const container = document.getElementById('close-calendar');
+  if (!container || !selectedClientId) return;
+
+  container.innerHTML = '<div style="color:var(--gray-400);font-size:0.82rem;">loading calendar...</div>';
+
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/close-calendar`, {
+      headers: { 'Authorization': getAuth() },
+    });
+    if (!res.ok) { container.innerHTML = ''; return; }
+    const data = await res.json();
+
+    const statusIcon = (status) => {
+      if (status === 'complete') return '<span class="cal-status cal-complete">✓</span>';
+      if (status === 'closed')   return '<span class="cal-status cal-closed">—</span>';
+      if (status === 'pending')  return '<span class="cal-status cal-pending">○</span>';
+      if (status === 'skipped')  return '<span class="cal-skipped">n/a</span>';
+      return '<span class="cal-future-dot">·</span>';
+    };
+
+    const formatLabel = (monthStr) => {
+      // monthStr is "YYYY-MM", convert to "Mar 2026"
+      const [y, m] = monthStr.split('-').map(Number);
+      const d = new Date(y, m - 1, 1);
+      return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    };
+
+    const rows = data.months.map(m => {
+      const rowClass = m.isCurrent ? 'cal-current' : (m.isFuture ? 'cal-future' : '');
+      const label = formatLabel(m.month) + (m.isCurrent ? ' ← current' : '');
+      return `
+        <tr class="${rowClass}">
+          <td>${label}</td>
+          <td style="text-align:center;">${statusIcon(m.modules.fixedAssets)}</td>
+          <td style="text-align:center;">${statusIcon(m.modules.prepaidExpenses)}</td>
+          <td style="text-align:center;">${statusIcon(m.modules.accruedLiabilities)}</td>
+        </tr>`;
+    }).join('');
+
+    container.innerHTML = `
+      <div class="close-calendar">
+        <div class="close-calendar-title">fiscal year overview — ${formatLabel(data.months[0].month)} to ${formatLabel(data.months[data.months.length - 1].month)}</div>
+        <table>
+          <thead>
+            <tr>
+              <th>period</th>
+              <th style="text-align:center;">fixed assets</th>
+              <th style="text-align:center;">prepaid expenses</th>
+              <th style="text-align:center;">accrued liabilities</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  } catch (e) {
+    console.error('renderCloseCalendar error:', e);
+    container.innerHTML = '';
+  }
 }
 
 // Event delegation — all step-card action buttons funnel through this one
