@@ -20,6 +20,17 @@ const DATA_DIR = process.env.DATA_DIR || __dirname;
 if (DATA_DIR !== __dirname) {
   console.log(`[data] using persistent data directory: ${DATA_DIR}`);
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+  // Seed: copy any committed data files into the volume if they don't exist there yet
+  const seedFiles = ['clients.json', 'fixed-assets.json', 'prepaid-expenses.json', 'accrued-liabilities.json'];
+  for (const f of seedFiles) {
+    const dest = path.join(DATA_DIR, f);
+    const src = path.join(__dirname, f);
+    if (!fs.existsSync(dest) && fs.existsSync(src)) {
+      fs.copyFileSync(src, dest);
+      console.log(`[data] seeded ${f} from repo into ${DATA_DIR}`);
+    }
+  }
 }
 function dataPath(filename) { return path.join(DATA_DIR, filename); }
 const excelReviewService = require('./excel-review-service');
