@@ -2175,6 +2175,36 @@ function computeAmortizationPreview(clientData, targetMonth) {
   return { lines, totalAmount };
 }
 
+// Determine the current closing period based purely on the QBO close date.
+// The closing period is always the month immediately after the close date.
+// If no close date is set, defaults to last month.
+app.get('/api/admin/clients/:clientId/close-period', requireAdmin, async (req, res) => {
+  try {
+    let closeDate = null;
+    if (qbo.isConnected(req.params.clientId)) {
+      try { closeDate = await qbo.getBookCloseDate(req.params.clientId); } catch (_) {}
+    }
+    const today = new Date();
+    let closingMonth;
+    let reason;
+    if (closeDate) {
+      const cd = new Date(closeDate + 'T00:00:00');
+      // Closing period = month after close date
+      const nextMonth = new Date(cd.getFullYear(), cd.getMonth() + 1, 1);
+      closingMonth = formatMonthStr(nextMonth.getFullYear(), nextMonth.getMonth());
+      reason = `first open month after close date (${closeDate})`;
+    } else {
+      // No close date — default to previous month
+      const prev = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+      closingMonth = formatMonthStr(prev.getFullYear(), prev.getMonth());
+      reason = 'no close date set — defaulting to last month';
+    }
+    res.json({ month: closingMonth, closeDate, reason });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Get QBO book close date
 app.get('/api/admin/clients/:clientId/book-close-date', requireAdmin, async (req, res) => {
   try {

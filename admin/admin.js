@@ -1160,7 +1160,7 @@ let currentClosePeriod = null;
 async function fetchCurrentClosePeriod() {
   if (!selectedClientId) return null;
   try {
-    const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/preview-amortization`, {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/close-period`, {
       headers: { 'Authorization': getAuth() },
     });
     const data = await res.json();
@@ -1168,9 +1168,6 @@ async function fetchCurrentClosePeriod() {
       month: data.month || null,
       reason: data.reason || '',
       closeDate: data.closeDate || null,
-      alreadyRun: !!data.alreadyRun,
-      eligibleCount: data.eligibleCount || 0,
-      totalAmount: data.totalAmount || 0,
     };
   } catch (e) {
     console.error('fetchCurrentClosePeriod failed', e);
