@@ -3883,19 +3883,25 @@ The journal entry pattern is:
 
 Current close month: {CLOSE_MONTH}
 
+The company's chart of accounts includes these expense/asset accounts:
+{ACCOUNT_LIST}
+
 Review the attached document carefully and determine:
 1. What is the vendor name?
 2. What is the invoice date?
 3. What is the total amount (including taxes)?
 4. What is this invoice for? (description)
-5. What GL account category should be debited? (e.g., office supplies, professional fees, software, insurance, equipment/fixed asset, meals & entertainment, travel, advertising, rent, repairs & maintenance, utilities, other)
+5. Which GL account from the list above best fits each line item?
 6. If there are multiple line items that should go to different accounts, list each separately.
 
+CRITICAL: The sum of all line amounts MUST equal the totalAmount exactly. If the invoice includes taxes (GST/HST/PST/VAT), add a separate line for the tax amount. Every dollar on the invoice must be accounted for in the lines.
+
 IMPORTANT GUIDELINES:
-- If the invoice includes tax (GST/HST/PST/VAT), include the gross amount as the total
+- Include tax as a separate line item (e.g. "GST", "HST", "PST") so lines sum to the total
 - If there are clearly distinct line items for different expense categories, break them out
 - If the document is unclear, describe what you can see and flag for manual review
 - Capital items (equipment, furniture, vehicles over $500) should be categorized as fixed assets
+- For suggestedAccount, pick the best match from the chart of accounts list above. Use the exact account name.
 - Be specific about the expense category — don't just say "expense"
 
 Respond with ONLY a JSON object (no markdown, no explanation):
@@ -3912,6 +3918,7 @@ Respond with ONLY a JSON object (no markdown, no explanation):
       "description": "line item description",
       "amount": number,
       "suggestedCategory": "expense category",
+      "suggestedAccount": "exact account name from chart of accounts",
       "isCapital": false
     }
   ]
@@ -3979,7 +3986,21 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/upload', requireAdmi
     else if (mediaType.includes('gif')) mediaType = 'image/gif';
     else if (mediaType.includes('webp')) mediaType = 'image/webp';
 
-    const prompt = SHAREHOLDER_INVOICE_PROMPT.replace('{CLOSE_MONTH}', closeMonth);
+    // Build chart of accounts list for the prompt
+    let accountList = '(chart of accounts not available — suggest generic categories)';
+    if (qbo.isConnected(clientId)) {
+      try {
+        const accounts = await qbo.getAccounts(clientId);
+        const relevant = accounts.filter(a =>
+          ['Expense', 'Other Expense', 'Cost of Goods Sold', 'Fixed Asset', 'Other Current Asset'].includes(a.AccountType)
+        );
+        accountList = relevant.map(a => `- ${a.Name} (${a.AccountType})`).join('\n');
+      } catch (_) {}
+    }
+
+    const prompt = SHAREHOLDER_INVOICE_PROMPT
+      .replace('{CLOSE_MONTH}', closeMonth)
+      .replace('{ACCOUNT_LIST}', accountList);
 
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',

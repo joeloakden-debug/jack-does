@@ -2385,27 +2385,53 @@ function renderShiInvoiceCard(inv) {
   };
   const cc = confidenceColors[a.confidence] || confidenceColors.low;
 
-  const linesHtml = (a.lines || []).map((line, idx) => `
+  const eligibleAccounts = qboAccounts.filter(ac =>
+    ['Expense', 'Other Expense', 'Cost of Goods Sold', 'Fixed Asset', 'Other Current Asset'].includes(ac.type)
+  );
+
+  // Fuzzy-match AI suggested account name to actual QBO accounts
+  function matchAccount(line) {
+    const suggested = (line.suggestedAccount || line.suggestedCategory || '').toLowerCase();
+    if (!suggested) return '';
+    // Try exact name match first
+    const exact = eligibleAccounts.find(ac => (ac.name || '').toLowerCase() === suggested);
+    if (exact) return exact.id;
+    // Try contains match
+    const contains = eligibleAccounts.find(ac => (ac.name || '').toLowerCase().includes(suggested) || suggested.includes((ac.name || '').toLowerCase()));
+    if (contains) return contains.id;
+    // Try word overlap
+    const words = suggested.split(/[\s/&,]+/).filter(w => w.length > 2);
+    let bestMatch = null, bestScore = 0;
+    for (const ac of eligibleAccounts) {
+      const acName = (ac.name || '').toLowerCase();
+      const score = words.filter(w => acName.includes(w)).length;
+      if (score > bestScore) { bestScore = score; bestMatch = ac; }
+    }
+    return bestScore > 0 ? bestMatch.id : '';
+  }
+
+  const linesHtml = (a.lines || []).map((line, idx) => {
+    const matchedId = !isPosted && !isDismissed ? matchAccount(line) : '';
+    return `
     <div class="shi-je-line" style="display:flex;gap:8px;align-items:center;margin-bottom:4px;font-size:0.8rem;">
       <span style="flex:0 0 20px;color:var(--gray-400);">${idx + 1}.</span>
       <span style="flex:1;">${line.description}</span>
-      <span style="flex:0 0 100px;color:var(--gray-500);">${line.suggestedCategory}${line.isCapital ? ' (capital)' : ''}</span>
       <span style="flex:0 0 80px;text-align:right;font-weight:500;">$${Number(line.amount).toFixed(2)}</span>
       ${!isPosted && !isDismissed ? `
-        <select class="shi-acct-select" data-line-idx="${idx}" style="flex:0 0 200px;padding:3px 6px;border:1px solid var(--gray-300);border-radius:4px;font-size:0.78rem;">
+        <select class="shi-acct-select" data-line-idx="${idx}" style="flex:0 0 220px;padding:3px 6px;border:1px solid var(--gray-300);border-radius:4px;font-size:0.78rem;">
           <option value="">select GL account…</option>
-          ${qboAccounts.filter(ac => ['Expense', 'Other Expense', 'Cost of Goods Sold', 'Fixed Asset', 'Other Current Asset'].includes(ac.type))
-            .map(ac => `<option value="${ac.id}" data-name="${(ac.name || '').replace(/"/g, '&quot;')}">${ac.name}</option>`).join('')}
+          ${eligibleAccounts
+            .map(ac => `<option value="${ac.id}" data-name="${(ac.name || '').replace(/"/g, '&quot;')}" ${ac.id === matchedId ? 'selected' : ''}>${ac.name}</option>`).join('')}
         </select>
       ` : ''}
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 
   const actions = !isPosted && !isDismissed ? `
     <div style="display:flex;gap:8px;margin-top:8px;">
       <button class="btn btn-primary" onclick="postShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:5px 12px;">post journal entry</button>
-      <button class="btn btn-secondary" onclick="dismissShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:5px 10px;">dismiss</button>
-      <button class="btn btn-secondary" onclick="deleteShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:5px 10px;color:var(--red-600);">delete</button>
+      <button class="btn btn-secondary" onclick="dismissShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:5px 10px;">skip for now</button>
+      <button class="btn btn-secondary" onclick="deleteShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:5px 10px;color:var(--red-600);">remove</button>
     </div>
   ` : (isDismissed ? `
     <div style="margin-top:6px;">
@@ -2433,8 +2459,13 @@ function renderShiInvoiceCard(inv) {
       <div style="margin-top:4px;color:var(--gray-600);">${a.description || ''}</div>
       ${a.reasoning ? `<div style="margin-top:4px;font-style:italic;color:var(--gray-500);font-size:0.78rem;">${a.reasoning}</div>` : ''}
       <div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(0,0,0,0.06);">
-        <div style="font-size:0.74rem;font-weight:600;color:var(--gray-500);margin-bottom:4px;">SUGGESTED JOURNAL ENTRY — Dr Expense/Asset, Cr Shareholder Loan</div>
         ${linesHtml}
+        ${!isPosted && !isDismissed ? `
+          <div style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:0.8rem;">
+            <label style="color:var(--gray-500);">date:</label>
+            <input type="date" class="shi-date-input" value="${a.invoiceDate || ''}" style="padding:3px 6px;border:1px solid var(--gray-300);border-radius:4px;font-size:0.78rem;">
+          </div>
+        ` : ''}
       </div>
       ${actions}
     </div>`;
@@ -2465,14 +2496,18 @@ async function postShiInvoice(invoiceId) {
     });
   }
 
+  // Read the editable date from the card
+  const dateInput = card.querySelector('.shi-date-input');
+  const jeDate = dateInput?.value || inv.analysis.invoiceDate;
+
   const totalAmt = lines.reduce((s, l) => s + l.amount, 0);
-  if (!confirm(`Post JE for $${totalAmt.toFixed(2)}?\n\nDr: ${lines.map(l => `${l.accountName} $${l.amount.toFixed(2)}`).join(', ')}\nCr: ${shiState.shareholderLoanAccount?.name || 'Shareholder Loan'} $${totalAmt.toFixed(2)}`)) return;
+  if (!confirm(`Post JE for $${totalAmt.toFixed(2)} dated ${jeDate}?\n\nDr: ${lines.map(l => `${l.accountName} $${l.amount.toFixed(2)}`).join(', ')}\nCr: ${shiState.shareholderLoanAccount?.name || 'Shareholder Loan'} $${totalAmt.toFixed(2)}`)) return;
 
   try {
     const res = await fetch(`/api/admin/clients/${selectedClientId}/shareholder-invoices/${invoiceId}/post`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
-      body: JSON.stringify({ lines, date: inv.analysis.invoiceDate }),
+      body: JSON.stringify({ lines, date: jeDate }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'post failed');
