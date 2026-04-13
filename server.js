@@ -4257,6 +4257,42 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
         }
       }
 
+      // Consolidate lines with the same GL account into a single line
+      // to reduce noise in the GL (e.g. 4 lines all to "6100 Legal" → 1 line)
+      const consolidated = new Map();
+      for (const line of expenseLines) {
+        const key = String(line.accountId);
+        if (consolidated.has(key)) {
+          const existing = consolidated.get(key);
+          existing.amount = Math.round((existing.amount + line.amount) * 100) / 100;
+          // Combine descriptions — use the overall invoice description if merging multiple
+          if (line.description && !existing.descriptions.includes(line.description)) {
+            existing.descriptions.push(line.description);
+          }
+        } else {
+          consolidated.set(key, {
+            ...line,
+            descriptions: [line.description || ''],
+          });
+        }
+      }
+      // Replace expenseLines with consolidated version
+      expenseLines.length = 0;
+      for (const entry of consolidated.values()) {
+        // Use invoice-level description when multiple lines are merged
+        const desc = entry.descriptions.length > 1
+          ? (invoice.analysis.description || entry.descriptions[0])
+          : entry.descriptions[0];
+        expenseLines.push({
+          accountId: entry.accountId,
+          accountName: entry.accountName,
+          description: desc,
+          amount: entry.amount,
+          taxCodeId: entry.taxCodeId || undefined,
+        });
+      }
+      console.log(`[shareholder-invoice] consolidated to ${expenseLines.length} line(s)`);
+
       // Find or create the vendor in QBO
       let vendorRef = null;
       const vendorName = invoice.analysis.vendor;
