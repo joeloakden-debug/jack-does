@@ -2383,7 +2383,7 @@ function renderShiInvoiceCard(inv) {
   const cc = confidenceColors[a.confidence] || confidenceColors.low;
 
   const eligibleAccounts = qboAccounts.filter(ac =>
-    ['Expense', 'Other Expense', 'Cost of Goods Sold', 'Fixed Asset', 'Other Current Asset'].includes(ac.type)
+    ['Expense', 'Other Expense', 'Cost of Goods Sold', 'Fixed Asset', 'Other Current Asset', 'Other Current Liability', 'Long Term Liability', 'Accounts Payable'].includes(ac.type)
   );
 
   // Fuzzy-match AI suggested account name to actual QBO accounts
