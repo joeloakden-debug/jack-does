@@ -2274,6 +2274,7 @@ app.get('/api/admin/clients/:clientId/close-calendar', requireAdmin, async (req,
     const ppData = getClientPrepaid(clientId);
     const ppConfigured = !!ppData.prepaidAccount;
     const ppRuns = new Set((ppData.amortizationRuns || []).map(r => r.month));
+    const ppScanned = new Set(ppData.scannedMonths || []);
 
     const alData = getClientAccruedLiab(clientId);
     const alConfigured = !!alData.accruedLiabilitiesAccount;
@@ -2322,7 +2323,7 @@ app.get('/api/admin/clients/:clientId/close-calendar', requireAdmin, async (req,
         modules: {
           shareholderInvoices: !shiConfigured ? 'skipped' : (shiPostedMonths.has(month) ? 'complete' : (isClosed ? 'closed' : 'pending')),
           fixedAssets: faRuns.has(month) ? 'complete' : (isClosed ? 'closed' : 'pending'),
-          prepaidExpenses: !ppConfigured ? 'skipped' : (ppRuns.has(month) ? 'complete' : (isClosed ? 'closed' : 'pending')),
+          prepaidExpenses: !ppConfigured ? 'skipped' : ((ppRuns.has(month) || ppScanned.has(month)) ? 'complete' : (isClosed ? 'closed' : 'pending')),
           accruedLiabilities: !alConfigured ? 'skipped' : (alPosted.has(month) ? 'complete' : (isClosed ? 'closed' : 'pending')),
         },
       };
@@ -2701,6 +2702,7 @@ function getClientPrepaid(clientId) {
   const c = prepaidData[clientId];
   if (!c.items) c.items = [];
   if (!c.amortizationRuns) c.amortizationRuns = [];
+  if (!c.scannedMonths) c.scannedMonths = [];
   if (c.prepaidAccount === undefined) c.prepaidAccount = null;
   if (c.scanThreshold === undefined) c.scanThreshold = 500;
   return c;
@@ -3266,6 +3268,12 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan', requireAdmin, asy
     console.log(`[prepaid-scan] found ${candidates.length} candidate transactions above $${threshold}`);
 
     if (candidates.length === 0) {
+      // Record that this month was scanned (even with no results) so calendar shows complete
+      const ppClient = getClientPrepaid(clientId);
+      if (!ppClient.scannedMonths.includes(targetMonth)) {
+        ppClient.scannedMonths.push(targetMonth);
+        savePrepaidExpenses(prepaidData);
+      }
       return res.json({
         month: targetMonth,
         periodStart,
@@ -3388,6 +3396,13 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan', requireAdmin, asy
     }
 
     const flagged = results.filter(r => r.claudeReview?.isPrepaid === true);
+
+    // Record that this month was scanned so calendar shows complete
+    const ppClient = getClientPrepaid(clientId);
+    if (!ppClient.scannedMonths.includes(targetMonth)) {
+      ppClient.scannedMonths.push(targetMonth);
+      savePrepaidExpenses(prepaidData);
+    }
 
     res.json({
       month: targetMonth,
