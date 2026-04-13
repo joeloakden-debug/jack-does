@@ -1044,11 +1044,10 @@ async function createPurchase(purchase, clientId = 'default') {
   }));
 
   // Determine PaymentType based on the paying account's classification.
-  // Bank → Cash, Credit Card → CreditCard, anything else (e.g. liability) → Check
+  // Credit Card → CreditCard, everything else (Bank, Asset, etc.) → Cash (shows as "Expense" in QBO)
   const acctType = (purchase.accountType || '').toLowerCase();
-  let paymentType = 'Check';
+  let paymentType = 'Cash';
   if (acctType.includes('credit card')) paymentType = 'CreditCard';
-  else if (acctType === 'bank') paymentType = 'Cash';
 
   const purchaseObj = {
     PaymentType: paymentType,
