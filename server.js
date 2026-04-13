@@ -4132,22 +4132,94 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
     const jeDate = req.body.date || invoice.analysis.invoiceDate;
     const totalAmount = Math.round(jeLines.reduce((s, l) => s + Number(l.amount), 0) * 100) / 100;
 
-    // Build expense lines (each line = an account-based expense line on the Purchase)
-    const expenseLines = [];
-    for (const line of jeLines) {
-      expenseLines.push({
-        accountId: line.accountId,
-        accountName: line.accountName,
-        description: line.description || invoice.analysis.description,
-        amount: Math.round(Number(line.amount) * 100) / 100,
-      });
-    }
-
     const clientName = CLIENTS[clientId]?.name || clientId;
     const memo = `Shareholder-paid invoice: ${invoice.analysis.vendor || invoice.fileName} — ${clientName}`;
 
     if (qbo.isConnected(clientId)) {
-      // Find or create the vendor in QBO so the expense is properly attributed
+      // Look up full account list to detect tax liability accounts
+      let allAccounts = [];
+      try {
+        const acctData = await qbo.getAccounts(clientId);
+        allAccounts = acctData?.QueryResponse?.Account || [];
+      } catch (e) { /* non-critical */ }
+
+      const taxLiabilityIds = new Set(
+        allAccounts
+          .filter(a => {
+            const sub = (a.AccountSubType || '').toLowerCase();
+            const name = (a.Name || '').toLowerCase();
+            return sub.includes('tax') || name.includes('gst') || name.includes('hst')
+              || name.includes('pst') || name.includes('tax payable');
+          })
+          .map(a => String(a.Id))
+      );
+      console.log('[shareholder-invoice] tax liability account IDs:', Array.from(taxLiabilityIds));
+
+      // Separate expense lines from tax lines
+      const expenseLines = [];
+      let taxAmount = 0;
+      for (const line of jeLines) {
+        const amt = Math.round(Number(line.amount) * 100) / 100;
+        if (taxLiabilityIds.has(String(line.accountId))) {
+          taxAmount += amt;
+          console.log(`[shareholder-invoice] tax line detected: ${line.accountName} $${amt}`);
+        } else {
+          expenseLines.push({
+            accountId: line.accountId,
+            accountName: line.accountName,
+            description: line.description || invoice.analysis.description,
+            amount: amt,
+          });
+        }
+      }
+
+      // If there are tax lines, find the appropriate QBO TaxCode to apply to expense lines
+      let taxCodeId = null;
+      if (taxAmount > 0 && expenseLines.length > 0) {
+        try {
+          const tcData = await qbo.getTaxCodes(clientId);
+          const taxCodes = tcData?.QueryResponse?.TaxCode || [];
+          console.log('[shareholder-invoice] available tax codes:', taxCodes.map(tc => `${tc.Id}:${tc.Name}`).join(', '));
+          // Pick the first active, non-exempt tax code (typically GST, HST, or GST/PST)
+          const activeTaxCode = taxCodes.find(tc => tc.Active !== false && tc.Name !== 'NON' && tc.Name !== 'Exempt');
+          if (activeTaxCode) {
+            taxCodeId = String(activeTaxCode.Id);
+            console.log(`[shareholder-invoice] using tax code: ${activeTaxCode.Name} (${taxCodeId})`);
+          }
+        } catch (e) {
+          console.error('[shareholder-invoice] failed to fetch tax codes:', e.message);
+        }
+
+        // Apply tax code to each expense line
+        if (taxCodeId) {
+          for (const line of expenseLines) {
+            line.taxCodeId = taxCodeId;
+          }
+        } else {
+          // No tax code found — absorb tax into expense lines proportionally
+          console.log('[shareholder-invoice] no tax code found, absorbing tax into expense lines');
+          const expTotal = expenseLines.reduce((s, l) => s + l.amount, 0);
+          for (const line of expenseLines) {
+            const share = expTotal > 0 ? line.amount / expTotal : 1 / expenseLines.length;
+            line.amount = Math.round((line.amount + taxAmount * share) * 100) / 100;
+          }
+          taxAmount = 0; // absorbed
+        }
+      }
+
+      // If no expense lines at all (shouldn't happen), include all lines
+      if (expenseLines.length === 0) {
+        for (const line of jeLines) {
+          expenseLines.push({
+            accountId: line.accountId,
+            accountName: line.accountName,
+            description: line.description || invoice.analysis.description,
+            amount: Math.round(Number(line.amount) * 100) / 100,
+          });
+        }
+      }
+
+      // Find or create the vendor in QBO
       let vendorRef = null;
       const vendorName = invoice.analysis.vendor;
       if (vendorName) {
@@ -4155,41 +4227,21 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
           vendorRef = await qbo.findOrCreateVendor(vendorName, clientId);
         } catch (vendorErr) {
           console.error(`[shareholder-invoice] vendor lookup/create failed for "${vendorName}":`, vendorErr.message);
-          // Continue without vendor — expense will still post
         }
       }
 
       // Create a Purchase (Expense) transaction — paid from shareholder loan account
-      console.log('[shareholder-invoice] SH loan account:', JSON.stringify(c.shareholderLoanAccount));
-      console.log('[shareholder-invoice] vendorRef:', JSON.stringify(vendorRef));
-      console.log('[shareholder-invoice] expenseLines:', JSON.stringify(expenseLines));
-
-      let purchaseResult;
-      try {
-        purchaseResult = await qbo.createPurchase({
-          date: jeDate,
-          memo,
-          accountId: c.shareholderLoanAccount.id,
-          accountName: c.shareholderLoanAccount.name,
-          accountType: c.shareholderLoanAccount.type || '',
-          vendorId: vendorRef?.Id || null,
-          vendorName: vendorRef?.DisplayName || vendorName || '',
-          lines: expenseLines,
-        }, clientId);
-      } catch (purchErr) {
-        // Dig into every possible error structure from node-quickbooks / axios
-        const respData = purchErr?.response?.data || purchErr?.response?.body || null;
-        const errBody = respData?.Fault?.Error?.[0] || null;
-        const directFault = purchErr?.Fault?.Error?.[0] || null;
-        const detail = errBody?.Detail || errBody?.Message
-          || directFault?.Detail || directFault?.Message
-          || (respData ? JSON.stringify(respData) : null)
-          || purchErr?.message || 'Unknown error';
-        console.error('[shareholder-invoice] createPurchase FAILED:', detail);
-        console.error('[shareholder-invoice] full error keys:', Object.keys(purchErr || {}));
-        console.error('[shareholder-invoice] full error:', JSON.stringify(purchErr, Object.getOwnPropertyNames(purchErr || {}), 2));
-        throw new Error(detail);
-      }
+      const purchaseResult = await qbo.createPurchase({
+        date: jeDate,
+        memo,
+        accountId: c.shareholderLoanAccount.id,
+        accountName: c.shareholderLoanAccount.name,
+        accountType: c.shareholderLoanAccount.type || '',
+        vendorId: vendorRef?.Id || null,
+        vendorName: vendorRef?.DisplayName || vendorName || '',
+        lines: expenseLines,
+        globalTaxCalc: taxCodeId ? 'TaxExcluded' : 'NotApplicable',
+      }, clientId);
       const txnId = purchaseResult.Id;
 
       // Attach the original invoice PDF/image to the expense in QBO
