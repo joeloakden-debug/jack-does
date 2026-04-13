@@ -4177,15 +4177,18 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
           lines: expenseLines,
         }, clientId);
       } catch (purchErr) {
-        // Extract full QBO error detail for diagnostics
-        const errStr = typeof purchErr === 'object' ? JSON.stringify(purchErr, null, 2) : String(purchErr);
-        console.error('[shareholder-invoice] createPurchase FAILED:', errStr);
-        const fault = purchErr?.Fault?.Error?.[0]?.Detail
-          || purchErr?.Fault?.Error?.[0]?.Message
-          || purchErr?.error?.Fault?.Error?.[0]?.Detail
-          || purchErr?.message
-          || errStr;
-        throw new Error(`QBO Expense creation failed: ${fault}`);
+        // Dig into every possible error structure from node-quickbooks / axios
+        const respData = purchErr?.response?.data || purchErr?.response?.body || null;
+        const errBody = respData?.Fault?.Error?.[0] || null;
+        const directFault = purchErr?.Fault?.Error?.[0] || null;
+        const detail = errBody?.Detail || errBody?.Message
+          || directFault?.Detail || directFault?.Message
+          || (respData ? JSON.stringify(respData) : null)
+          || purchErr?.message || 'Unknown error';
+        console.error('[shareholder-invoice] createPurchase FAILED:', detail);
+        console.error('[shareholder-invoice] full error keys:', Object.keys(purchErr || {}));
+        console.error('[shareholder-invoice] full error:', JSON.stringify(purchErr, Object.getOwnPropertyNames(purchErr || {}), 2));
+        throw new Error(detail);
       }
       const txnId = purchaseResult.Id;
 

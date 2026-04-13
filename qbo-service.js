@@ -248,8 +248,21 @@ async function getQBClient(clientId = 'default') {
 function qbPromise(qb, method, ...args) {
   return new Promise((resolve, reject) => {
     qb[method](...args, (err, data) => {
-      if (err) reject(err);
-      else resolve(data);
+      if (err) {
+        // node-quickbooks often passes QBO response body as `err` directly
+        // Wrap it in an Error with the detail extracted
+        if (err instanceof Error) {
+          reject(err);
+        } else {
+          const fault = err?.Fault?.Error?.[0];
+          const msg = fault?.Detail || fault?.Message || JSON.stringify(err);
+          const wrapped = new Error(msg);
+          wrapped.qboResponse = err;
+          reject(wrapped);
+        }
+      } else {
+        resolve(data);
+      }
     });
   });
 }
