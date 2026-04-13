@@ -1259,7 +1259,7 @@ function buildCloseSteps(period) {
         id: 'shareholder-invoices',
         num: 2,
         title: 'shareholder-paid invoices',
-        desc: 'upload invoices paid by the shareholder personally. AI reads each invoice and suggests a journal entry.',
+        desc: 'upload invoices paid by the shareholder personally. AI reads each invoice and suggests an expense.',
         status, statusLabel, action, actionLabel, meta,
       };
     })(),
@@ -2445,12 +2445,12 @@ function renderShiInvoiceCard(inv) {
 
   const actions = !isPosted ? `
     <div style="display:flex;gap:8px;margin-top:8px;">
-      <button class="btn btn-primary" onclick="postShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:5px 12px;">post journal entry</button>
+      <button class="btn btn-primary" onclick="postShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:5px 12px;">post expense</button>
       <button class="btn btn-secondary" onclick="deleteShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:5px 10px;color:var(--red-600);">delete</button>
     </div>
   ` : `
     <div style="margin-top:6px;font-size:0.78rem;color:var(--green-600);">
-      ✓ posted ${inv.journalEntry?.date || ''} — $${Number(inv.journalEntry?.totalAmount || 0).toFixed(2)}${inv.journalEntry?.jeId ? ` (JE #${inv.journalEntry.jeId})` : ''}
+      ✓ posted ${inv.journalEntry?.date || ''} — $${Number(inv.journalEntry?.totalAmount || 0).toFixed(2)}${inv.journalEntry?.jeId ? ` (Expense #${inv.journalEntry.jeId})` : ''}
     </div>
   `;
 
@@ -2526,7 +2526,7 @@ async function postShiInvoice(invoiceId) {
   const jeDate = dateInput?.value || inv.analysis.invoiceDate;
 
   const totalAmt = lines.reduce((s, l) => s + l.amount, 0);
-  if (!confirm(`Post JE for $${totalAmt.toFixed(2)} dated ${jeDate}?\n\nDr: ${lines.map(l => `${l.accountName} $${l.amount.toFixed(2)}`).join(', ')}\nCr: ${shiState.shareholderLoanAccount?.name || 'Shareholder Loan'} $${totalAmt.toFixed(2)}`)) return;
+  if (!confirm(`Post expense for $${totalAmt.toFixed(2)} dated ${jeDate}?\n\nLines: ${lines.map(l => `${l.accountName} $${l.amount.toFixed(2)}`).join(', ')}\nPaid from: ${shiState.shareholderLoanAccount?.name || 'Shareholder Loan'} $${totalAmt.toFixed(2)}`)) return;
 
   try {
     const res = await fetch(`/api/admin/clients/${selectedClientId}/shareholder-invoices/${invoiceId}/post`, {
@@ -2537,7 +2537,7 @@ async function postShiInvoice(invoiceId) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'post failed');
 
-    alert(`Journal entry posted!${data.journalEntry?.jeId ? ` JE #${data.journalEntry.jeId}` : ''}\n$${data.journalEntry?.totalAmount?.toFixed(2)}`);
+    alert(`Expense posted!${data.journalEntry?.jeId ? ` Expense #${data.journalEntry.jeId}` : ''}\n$${data.journalEntry?.totalAmount?.toFixed(2)}`);
     await loadClientShareholderInvoices();
     currentClosePeriod = null;
     renderCloseSteps();
