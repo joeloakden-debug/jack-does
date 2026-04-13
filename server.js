@@ -3889,6 +3889,17 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/post', requireAdmin, 
   }
 });
 
+// DELETE an accrued liabilities analysis run for a specific month
+app.delete('/api/admin/clients/:clientId/accrued-liabilities/runs/:month', requireAdmin, (req, res) => {
+  const c = getClientAccruedLiab(req.params.clientId);
+  const month = req.params.month;
+  const before = c.analysisRuns.length;
+  c.analysisRuns = c.analysisRuns.filter(r => r.month !== month);
+  if (c.analysisRuns.length === before) return res.status(404).json({ error: 'No analysis run found for ' + month });
+  saveAccruedLiabilities(accruedLiabData);
+  res.json({ success: true, deleted: month });
+});
+
 // ========================================
 // SHAREHOLDER-PAID INVOICES MODULE
 // ========================================
