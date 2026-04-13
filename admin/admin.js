@@ -2057,9 +2057,11 @@ async function runAccruedLiabAnalysis() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'analysis failed');
     accruedLiabAnalysis = data;
-    renderAccruedLiabResults(panel, data);
     await loadClientAccruedLiab();
-    renderCloseSteps();
+    await renderCloseSteps();
+    // Re-render results into the freshly created panel (renderCloseSteps rebuilds the DOM)
+    const freshPanel = document.getElementById('accrued-liab-panel');
+    if (freshPanel) renderAccruedLiabResults(freshPanel, data);
   } catch (e) {
     panel.innerHTML = `<div style="padding:12px;background:var(--red-50);border-radius:8px;color:var(--red-600);">analysis failed: ${e.message}</div>`;
   }
