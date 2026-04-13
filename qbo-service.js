@@ -1036,17 +1036,24 @@ async function createPurchase(purchase, clientId = 'default') {
     Amount: Math.abs(line.amount),
     AccountBasedExpenseLineDetail: {
       AccountRef: {
-        value: line.accountId,
+        value: String(line.accountId),
         name: line.accountName,
       },
     },
     Description: line.description || '',
   }));
 
+  // Determine PaymentType based on the paying account's classification.
+  // Bank → Cash, Credit Card → CreditCard, anything else (e.g. liability) → Check
+  const acctType = (purchase.accountType || '').toLowerCase();
+  let paymentType = 'Check';
+  if (acctType.includes('credit card')) paymentType = 'CreditCard';
+  else if (acctType === 'bank') paymentType = 'Cash';
+
   const purchaseObj = {
-    PaymentType: 'Cash',
+    PaymentType: paymentType,
     AccountRef: {
-      value: purchase.accountId,
+      value: String(purchase.accountId),
       name: purchase.accountName,
     },
     TxnDate: purchase.date,
@@ -1056,12 +1063,13 @@ async function createPurchase(purchase, clientId = 'default') {
 
   if (purchase.vendorId) {
     purchaseObj.EntityRef = {
-      value: purchase.vendorId,
+      value: String(purchase.vendorId),
       name: purchase.vendorName || '',
       type: 'Vendor',
     };
   }
 
+  console.log('[createPurchase] payload:', JSON.stringify(purchaseObj, null, 2));
   return qbPromise(qb, 'createPurchase', purchaseObj);
 }
 

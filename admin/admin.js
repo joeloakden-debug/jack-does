@@ -51,7 +51,7 @@ function fmtAcct(acct) {
 /** Build an <option> tag for a GL account */
 function acctOption(a, selectedId) {
   const label = fmtAcct(a);
-  return `<option value="${a.id}" data-name="${(a.name || '').replace(/"/g, '&quot;')}" data-acctnum="${a.acctNum || ''}" ${a.id === selectedId ? 'selected' : ''}>${label}</option>`;
+  return `<option value="${a.id}" data-name="${(a.name || '').replace(/"/g, '&quot;')}" data-acctnum="${a.acctNum || ''}" data-type="${a.type || ''}" ${a.id === selectedId ? 'selected' : ''}>${label}</option>`;
 }
 
 // ========================================
@@ -2295,7 +2295,7 @@ async function saveShiSettings() {
       headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
       body: JSON.stringify({
         shareholderLoanAccount: select.value
-          ? { id: select.value, name: select.options[select.selectedIndex]?.dataset.name || '' }
+          ? { id: select.value, name: select.options[select.selectedIndex]?.dataset.name || '', type: select.options[select.selectedIndex]?.dataset.type || '' }
           : null,
       }),
     });

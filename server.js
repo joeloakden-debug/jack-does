@@ -4152,6 +4152,7 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
         memo,
         accountId: c.shareholderLoanAccount.id,
         accountName: c.shareholderLoanAccount.name,
+        accountType: c.shareholderLoanAccount.type || '',
         vendorId: vendorRef?.Id || null,
         vendorName: vendorRef?.DisplayName || vendorName || '',
         lines: expenseLines,
@@ -4205,7 +4206,11 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
     res.json({ ok: true, journalEntry: invoice.journalEntry });
   } catch (e) {
     console.error('[shareholder-invoice] post error:', e);
-    res.status(500).json({ error: e.message });
+    // Extract detailed QBO error if available
+    const qboFault = e?.Fault?.Error?.[0]?.Detail || e?.Fault?.Error?.[0]?.Message || '';
+    const detail = qboFault || e.message;
+    console.error('[shareholder-invoice] detail:', detail);
+    res.status(e.statusCode || 500).json({ error: detail });
   }
 });
 
