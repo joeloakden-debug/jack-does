@@ -2582,7 +2582,7 @@ async function runPrepaidScan() {
     const res = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/scan`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
-      body: JSON.stringify({ threshold: prepaidState.scanThreshold || 500 }),
+      body: JSON.stringify({ threshold: prepaidState.scanThreshold || 500, month: currentClosePeriod?.month || undefined }),
     });
     const data = await res.json();
     if (!res.ok) { throw new Error(data.error || 'scan failed'); }
