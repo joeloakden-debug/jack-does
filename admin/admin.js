@@ -2495,6 +2495,14 @@ function renderShiPanel() {
   }
 
   panel.innerHTML = html;
+
+  // Initialize totals and wire up live amount updates
+  panel.querySelectorAll('.shi-invoice-card').forEach(card => {
+    shiUpdateTotals(card);
+    card.querySelectorAll('.shi-amt-input').forEach(inp => {
+      inp.addEventListener('input', () => shiUpdateTotals(card));
+    });
+  });
 }
 
 function renderShiInvoiceCard(inv) {
@@ -2557,19 +2565,28 @@ function renderShiInvoiceCard(inv) {
   const linesHtml = (a.lines || []).map((line, idx) => {
     const matchedId = !isPosted ? matchAccount(line) : '';
     return `
-    <div class="shi-je-line" style="display:flex;gap:8px;align-items:center;margin-bottom:4px;font-size:0.8rem;">
-      <span style="flex:0 0 20px;color:var(--gray-400);">${idx + 1}.</span>
-      <span style="flex:1;">${line.description}</span>
-      <span style="flex:0 0 80px;text-align:right;font-weight:500;">$${Number(line.amount).toFixed(2)}</span>
+    <div class="shi-je-line" data-line-idx="${idx}" style="display:flex;gap:6px;align-items:center;margin-bottom:4px;font-size:0.8rem;">
+      <span style="flex:0 0 16px;color:var(--gray-400);font-size:0.72rem;">${idx + 1}.</span>
       ${!isPosted ? `
+        <input type="text" class="shi-desc-input" value="${(line.description || '').replace(/"/g, '&quot;')}" style="flex:1;padding:3px 6px;border:1px solid var(--gray-300);border-radius:4px;font-size:0.78rem;">
+        <input type="number" class="shi-amt-input" step="0.01" value="${Number(line.amount).toFixed(2)}" style="flex:0 0 90px;padding:3px 6px;border:1px solid var(--gray-300);border-radius:4px;font-size:0.78rem;text-align:right;">
         <select class="shi-acct-select" data-line-idx="${idx}" style="flex:0 0 220px;padding:3px 6px;border:1px solid var(--gray-300);border-radius:4px;font-size:0.78rem;">
           <option value="">select GL account…</option>
-          ${eligibleAccounts
-            .map(ac => acctOption(ac, matchedId)).join('')}
+          ${eligibleAccounts.map(ac => acctOption(ac, matchedId)).join('')}
         </select>
-      ` : ''}
+        <button onclick="shiRemoveLine('${inv.id}',${idx})" style="flex:0 0 24px;background:none;border:none;color:var(--red-400);cursor:pointer;font-size:1rem;padding:0;" title="remove line">×</button>
+      ` : `
+        <span style="flex:1;">${line.description}</span>
+        <span style="flex:0 0 80px;text-align:right;font-weight:500;">$${Number(line.amount).toFixed(2)}</span>
+      `}
     </div>`;
   }).join('');
+
+  const addLineBtn = !isPosted ? `
+    <div style="margin-top:4px;">
+      <button onclick="shiAddLine('${inv.id}')" style="background:none;border:1px dashed var(--gray-300);border-radius:4px;padding:4px 12px;font-size:0.76rem;color:var(--gray-500);cursor:pointer;">+ add line</button>
+    </div>
+  ` : '';
 
   const actions = !isPosted ? `
     <div style="display:flex;gap:8px;margin-top:8px;">
@@ -2599,20 +2616,9 @@ function renderShiInvoiceCard(inv) {
       ${a.reasoning ? `<div style="margin-top:4px;font-style:italic;color:var(--gray-500);font-size:0.78rem;">${a.reasoning}</div>` : ''}
       <div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(0,0,0,0.06);">
         ${linesHtml}
-        ${(() => {
-          const lineTotal = (a.lines || []).reduce((s, l) => s + Number(l.amount || 0), 0);
-          const invTotal = Number(a.totalAmount || 0);
-          const diff = Math.round((invTotal - lineTotal) * 100) / 100;
-          const balanced = Math.abs(diff) < 0.01;
-          const color = balanced ? 'var(--green-600)' : 'var(--red-600)';
-          return `<div style="display:flex;justify-content:flex-end;gap:16px;margin-top:6px;font-size:0.78rem;font-weight:600;">
-            <span style="color:var(--gray-500);">lines total: $${lineTotal.toFixed(2)}</span>
-            <span style="color:var(--gray-500);">invoice total: $${invTotal.toFixed(2)}</span>
-            ${balanced
-              ? '<span style="color:var(--green-600);">✓ balanced</span>'
-              : `<span style="color:var(--red-600);">⚠ difference: $${diff.toFixed(2)}</span>`}
-          </div>`;
-        })()}
+        ${addLineBtn}
+        <div class="shi-totals" data-inv-total="${Number(a.totalAmount || 0).toFixed(2)}" style="display:flex;justify-content:flex-end;gap:16px;margin-top:6px;font-size:0.78rem;font-weight:600;">
+        </div>
         ${!isPosted ? `
           <div style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:0.8rem;">
             <label style="color:var(--gray-500);">date:</label>
@@ -2628,24 +2634,31 @@ async function postShiInvoice(invoiceId) {
   const card = document.querySelector(`.shi-invoice-card[data-invoice-id="${invoiceId}"]`);
   if (!card) return;
 
-  // Gather account selections from the card
-  const selects = card.querySelectorAll('.shi-acct-select');
+  // Gather line data from the editable inputs in the card
+  const lineEls = card.querySelectorAll('.shi-je-line');
   const inv = shiState.invoices.find(i => i.id === invoiceId);
   if (!inv) return;
 
   const lines = [];
-  for (let i = 0; i < selects.length; i++) {
-    const sel = selects[i];
-    if (!sel.value) {
+  for (let i = 0; i < lineEls.length; i++) {
+    const lineEl = lineEls[i];
+    const sel = lineEl.querySelector('.shi-acct-select');
+    const descInput = lineEl.querySelector('.shi-desc-input');
+    const amtInput = lineEl.querySelector('.shi-amt-input');
+    if (!sel?.value) {
       alert(`Please select a GL account for line ${i + 1}`);
       return;
     }
-    const lineData = inv.analysis.lines[i];
+    const amount = parseFloat(amtInput?.value) || 0;
+    if (amount <= 0) {
+      alert(`Line ${i + 1} has an invalid amount`);
+      return;
+    }
     lines.push({
       accountId: sel.value,
       accountName: sel.options[sel.selectedIndex]?.dataset.name || '',
-      description: lineData.description,
-      amount: lineData.amount,
+      description: descInput?.value || '',
+      amount,
     });
   }
 
@@ -2684,6 +2697,42 @@ async function deleteShiInvoice(invoiceId) {
     renderCloseSteps();
     setTimeout(() => renderShiPanel(), 100);
   } catch (e) { alert('delete failed: ' + e.message); }
+}
+
+function shiUpdateTotals(card) {
+  const totalsEl = card.querySelector('.shi-totals');
+  if (!totalsEl) return;
+  const invTotal = parseFloat(totalsEl.dataset.invTotal) || 0;
+  const amtInputs = card.querySelectorAll('.shi-amt-input');
+  let lineTotal = 0;
+  amtInputs.forEach(inp => { lineTotal += parseFloat(inp.value) || 0; });
+  lineTotal = Math.round(lineTotal * 100) / 100;
+  const diff = Math.round((invTotal - lineTotal) * 100) / 100;
+  const balanced = Math.abs(diff) < 0.01;
+  totalsEl.innerHTML = `
+    <span style="color:var(--gray-500);">lines total: $${lineTotal.toFixed(2)}</span>
+    <span style="color:var(--gray-500);">invoice total: $${invTotal.toFixed(2)}</span>
+    ${balanced
+      ? '<span style="color:var(--green-600);">✓ balanced</span>'
+      : `<span style="color:var(--red-600);">⚠ difference: $${diff.toFixed(2)}</span>`}`;
+}
+
+function shiAddLine(invoiceId) {
+  const inv = shiState.invoices.find(i => i.id === invoiceId);
+  if (!inv || !inv.analysis) return;
+  inv.analysis.lines.push({ description: '', amount: 0, suggestedAccount: '' });
+  renderShiPanel();
+}
+
+function shiRemoveLine(invoiceId, lineIdx) {
+  const inv = shiState.invoices.find(i => i.id === invoiceId);
+  if (!inv || !inv.analysis?.lines) return;
+  if (inv.analysis.lines.length <= 1) {
+    alert('Cannot remove the last line');
+    return;
+  }
+  inv.analysis.lines.splice(lineIdx, 1);
+  renderShiPanel();
 }
 
 // ========================================
