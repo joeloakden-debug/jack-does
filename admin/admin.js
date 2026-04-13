@@ -2343,9 +2343,7 @@ function renderShiPanel() {
   const month = currentClosePeriod?.month;
   const pending = shiState.invoices.filter(i => i.status === 'pending' && i.closeMonth === month);
   const posted = shiState.invoices.filter(i => i.status === 'posted' && i.closeMonth === month);
-  const dismissed = shiState.invoices.filter(i => i.status === 'dismissed' && i.closeMonth === month);
-
-  if (pending.length === 0 && posted.length === 0 && dismissed.length === 0) {
+  if (pending.length === 0 && posted.length === 0) {
     panel.innerHTML = '';
     return;
   }
@@ -2362,21 +2360,14 @@ function renderShiPanel() {
     html += `</details>`;
   }
 
-  if (dismissed.length > 0) {
-    html += `<details style="margin-top:8px;"><summary style="font-size:0.82rem;color:var(--gray-400);cursor:pointer;">${dismissed.length} dismissed</summary>`;
-    html += dismissed.map(inv => renderShiInvoiceCard(inv)).join('');
-    html += `</details>`;
-  }
-
   panel.innerHTML = html;
 }
 
 function renderShiInvoiceCard(inv) {
   const a = inv.analysis || {};
   const isPosted = inv.status === 'posted';
-  const isDismissed = inv.status === 'dismissed';
-  const borderColor = isPosted ? 'var(--green-500)' : (isDismissed ? 'var(--gray-300)' : 'var(--blue-500)');
-  const bgColor = isPosted ? '#f0fdf4' : (isDismissed ? '#f9fafb' : '#eff6ff');
+  const borderColor = isPosted ? 'var(--green-500)' : 'var(--blue-500)';
+  const bgColor = isPosted ? '#f0fdf4' : '#eff6ff';
 
   const confidenceColors = {
     high: { bg: '#dcfce7', fg: '#166534' },
@@ -2411,13 +2402,13 @@ function renderShiInvoiceCard(inv) {
   }
 
   const linesHtml = (a.lines || []).map((line, idx) => {
-    const matchedId = !isPosted && !isDismissed ? matchAccount(line) : '';
+    const matchedId = !isPosted ? matchAccount(line) : '';
     return `
     <div class="shi-je-line" style="display:flex;gap:8px;align-items:center;margin-bottom:4px;font-size:0.8rem;">
       <span style="flex:0 0 20px;color:var(--gray-400);">${idx + 1}.</span>
       <span style="flex:1;">${line.description}</span>
       <span style="flex:0 0 80px;text-align:right;font-weight:500;">$${Number(line.amount).toFixed(2)}</span>
-      ${!isPosted && !isDismissed ? `
+      ${!isPosted ? `
         <select class="shi-acct-select" data-line-idx="${idx}" style="flex:0 0 220px;padding:3px 6px;border:1px solid var(--gray-300);border-radius:4px;font-size:0.78rem;">
           <option value="">select GL account…</option>
           ${eligibleAccounts
@@ -2427,21 +2418,16 @@ function renderShiInvoiceCard(inv) {
     </div>`;
   }).join('');
 
-  const actions = !isPosted && !isDismissed ? `
+  const actions = !isPosted ? `
     <div style="display:flex;gap:8px;margin-top:8px;">
       <button class="btn btn-primary" onclick="postShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:5px 12px;">post journal entry</button>
-      <button class="btn btn-secondary" onclick="dismissShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:5px 10px;">skip for now</button>
-      <button class="btn btn-secondary" onclick="deleteShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:5px 10px;color:var(--red-600);">remove</button>
-    </div>
-  ` : (isDismissed ? `
-    <div style="margin-top:6px;">
-      <button class="btn btn-secondary" onclick="dismissShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:4px 10px;">restore</button>
+      <button class="btn btn-secondary" onclick="deleteShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:5px 10px;color:var(--red-600);">delete</button>
     </div>
   ` : `
     <div style="margin-top:6px;font-size:0.78rem;color:var(--green-600);">
       ✓ posted ${inv.journalEntry?.date || ''} — $${Number(inv.journalEntry?.totalAmount || 0).toFixed(2)}${inv.journalEntry?.jeId ? ` (JE #${inv.journalEntry.jeId})` : ''}
     </div>
-  `);
+  `;
 
   return `
     <div class="shi-invoice-card" data-invoice-id="${inv.id}" style="border-left:3px solid ${borderColor};background:${bgColor};padding:10px 12px;margin-bottom:6px;border-radius:4px;font-size:0.82rem;">
@@ -2460,7 +2446,7 @@ function renderShiInvoiceCard(inv) {
       ${a.reasoning ? `<div style="margin-top:4px;font-style:italic;color:var(--gray-500);font-size:0.78rem;">${a.reasoning}</div>` : ''}
       <div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(0,0,0,0.06);">
         ${linesHtml}
-        ${!isPosted && !isDismissed ? `
+        ${!isPosted ? `
           <div style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:0.8rem;">
             <label style="color:var(--gray-500);">date:</label>
             <input type="date" class="shi-date-input" value="${a.invoiceDate || ''}" style="padding:3px 6px;border:1px solid var(--gray-300);border-radius:4px;font-size:0.78rem;">
@@ -2518,18 +2504,6 @@ async function postShiInvoice(invoiceId) {
     renderCloseSteps();
     setTimeout(() => renderShiPanel(), 100);
   } catch (e) { alert('post failed: ' + e.message); }
-}
-
-async function dismissShiInvoice(invoiceId) {
-  try {
-    await fetch(`/api/admin/clients/${selectedClientId}/shareholder-invoices/${invoiceId}/dismiss`, {
-      method: 'PUT',
-      headers: { 'Authorization': getAuth() },
-    });
-    await loadClientShareholderInvoices();
-    renderCloseSteps();
-    setTimeout(() => renderShiPanel(), 100);
-  } catch (e) { alert('dismiss failed: ' + e.message); }
 }
 
 async function deleteShiInvoice(invoiceId) {
