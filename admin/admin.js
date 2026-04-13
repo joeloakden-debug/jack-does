@@ -1441,12 +1441,9 @@ function renderStepCard(step) {
            <input type="file" id="shi-file-input" accept=".pdf,.jpg,.jpeg,.png,.gif,.webp" style="display:none;" onchange="handleShiUpload(this)">
          </label>`;
   } else if (step.id === 'prepaid') {
-    // Prepaid step gets two buttons: scan + run amortization
+    // Single scan button — scan doubles as the entry point for the prepaid workflow
     const scanDisabled = step.status === 'locked' ? 'disabled' : '';
-    const runDisabled = canAct ? '' : 'disabled';
-    actionBtn = `
-      <button class="btn-step-action" data-step-action="scan-prepaids" ${scanDisabled} style="margin-bottom:6px;">scan expenses</button>
-      ${step.action ? `<button class="btn-step-action" data-step-action="${step.action}" ${runDisabled}>${step.actionLabel}</button>` : `<span class="btn-step-action-placeholder">${step.actionLabel}</span>`}`;
+    actionBtn = `<button class="btn-step-action" data-step-action="scan-prepaids" ${scanDisabled}>scan expenses</button>`;
   } else {
     actionBtn = step.action
       ? `<button class="btn-step-action" data-step-action="${step.action}" ${canAct ? '' : 'disabled'}>${step.actionLabel}</button>`
