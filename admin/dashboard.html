@@ -147,6 +147,22 @@
         <div class="client-tab" id="client-tab-settings" style="display:none;">
           <div class="settings-module">
             <div class="settings-module-header">
+              <h3>shareholder-paid invoices</h3>
+              <p>upload invoices paid personally by shareholders. AI reads each invoice and suggests a journal entry (Dr expense/asset, Cr shareholder loan).</p>
+            </div>
+
+            <div class="form-group" style="margin-bottom:12px;">
+              <label style="display:block;font-size:0.82rem;color:var(--gray-600);margin-bottom:4px;">shareholder loan GL account</label>
+              <select id="shi-account-select" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;"></select>
+            </div>
+
+            <div style="margin-bottom:12px;">
+              <button class="btn btn-primary" id="btn-save-shi-settings">save settings</button>
+            </div>
+          </div>
+
+          <div class="settings-module">
+            <div class="settings-module-header">
               <h3>fixed assets</h3>
               <p>GL accounts and amortization policies. The Excel export contains the per-asset detail.</p>
             </div>

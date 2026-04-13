@@ -22,7 +22,7 @@ if (DATA_DIR !== __dirname) {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
   // Seed: copy any committed data files into the volume if they don't exist there yet
-  const seedFiles = ['clients.json', 'fixed-assets.json', 'prepaid-expenses.json', 'accrued-liabilities.json'];
+  const seedFiles = ['clients.json', 'fixed-assets.json', 'prepaid-expenses.json', 'accrued-liabilities.json', 'shareholder-invoices.json'];
   for (const f of seedFiles) {
     const dest = path.join(DATA_DIR, f);
     const src = path.join(__dirname, f);
@@ -2261,6 +2261,13 @@ app.get('/api/admin/clients/:clientId/close-calendar', requireAdmin, async (req,
       (alData.analysisRuns || []).filter(r => r.accrualJE).map(r => r.month)
     );
 
+    const shiData = getClientShareholderInvoices(clientId);
+    const shiConfigured = !!shiData.shareholderLoanAccount;
+    // For shareholder invoices, a month is "complete" if there are any posted invoices for that month
+    const shiPostedMonths = new Set(
+      (shiData.invoices || []).filter(i => i.status === 'posted').map(i => i.closeMonth)
+    );
+
     // Determine closing month
     let closeDate = null;
     if (qbo.isConnected(clientId)) {
@@ -2293,6 +2300,7 @@ app.get('/api/admin/clients/:clientId/close-calendar', requireAdmin, async (req,
         isClosed,
         isFuture: !isClosed && !isCurrent,
         modules: {
+          shareholderInvoices: !shiConfigured ? 'skipped' : (shiPostedMonths.has(month) ? 'complete' : (isClosed ? 'closed' : 'pending')),
           fixedAssets: faRuns.has(month) ? 'complete' : (isClosed ? 'closed' : 'pending'),
           prepaidExpenses: !ppConfigured ? 'skipped' : (ppRuns.has(month) ? 'complete' : (isClosed ? 'closed' : 'pending')),
           accruedLiabilities: !alConfigured ? 'skipped' : (alPosted.has(month) ? 'complete' : (isClosed ? 'closed' : 'pending')),
@@ -3835,6 +3843,284 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/post', requireAdmin, 
     console.error('[accrued-liab] post error:', e);
     res.status(500).json({ error: `Failed to post: ${e.message}` });
   }
+});
+
+// ========================================
+// SHAREHOLDER-PAID INVOICES MODULE
+// ========================================
+const SHAREHOLDER_INVOICES_FILE = dataPath('shareholder-invoices.json');
+
+function loadShareholderInvoices() {
+  try {
+    if (fs.existsSync(SHAREHOLDER_INVOICES_FILE)) {
+      return JSON.parse(fs.readFileSync(SHAREHOLDER_INVOICES_FILE, 'utf-8'));
+    }
+  } catch (e) { console.error('Failed to load shareholder-invoices.json:', e.message); }
+  return {};
+}
+function saveShareholderInvoices(data) {
+  fs.writeFileSync(SHAREHOLDER_INVOICES_FILE, JSON.stringify(data, null, 2), 'utf-8');
+}
+let shareholderInvoiceData = loadShareholderInvoices();
+
+function getClientShareholderInvoices(clientId) {
+  if (!shareholderInvoiceData[clientId]) {
+    shareholderInvoiceData[clientId] = {
+      shareholderLoanAccount: null,
+      invoices: [],
+    };
+  }
+  const c = shareholderInvoiceData[clientId];
+  if (!c.invoices) c.invoices = [];
+  return c;
+}
+
+const SHAREHOLDER_INVOICE_PROMPT = `You are a senior accountant reviewing an invoice/receipt that was paid personally by a shareholder and needs to be recorded in the company's books.
+
+The journal entry pattern is:
+  Dr: Appropriate expense or asset account
+  Cr: Shareholder Loan (liability)
+
+Current close month: {CLOSE_MONTH}
+
+Review the attached document carefully and determine:
+1. What is the vendor name?
+2. What is the invoice date?
+3. What is the total amount (including taxes)?
+4. What is this invoice for? (description)
+5. What GL account category should be debited? (e.g., office supplies, professional fees, software, insurance, equipment/fixed asset, meals & entertainment, travel, advertising, rent, repairs & maintenance, utilities, other)
+6. If there are multiple line items that should go to different accounts, list each separately.
+
+IMPORTANT GUIDELINES:
+- If the invoice includes tax (GST/HST/PST/VAT), include the gross amount as the total
+- If there are clearly distinct line items for different expense categories, break them out
+- If the document is unclear, describe what you can see and flag for manual review
+- Capital items (equipment, furniture, vehicles over $500) should be categorized as fixed assets
+- Be specific about the expense category — don't just say "expense"
+
+Respond with ONLY a JSON object (no markdown, no explanation):
+{
+  "vendor": "vendor name",
+  "invoiceDate": "YYYY-MM-DD",
+  "totalAmount": number,
+  "description": "what this invoice is for",
+  "currency": "CAD" or "USD",
+  "confidence": "high" | "medium" | "low",
+  "reasoning": "brief explanation of your categorization",
+  "lines": [
+    {
+      "description": "line item description",
+      "amount": number,
+      "suggestedCategory": "expense category",
+      "isCapital": false
+    }
+  ]
+}`;
+
+// Multer for shareholder invoice uploads (memory storage for AI processing)
+const shareholderUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (['.pdf', '.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`File type ${ext} not supported. Use PDF or image files.`));
+    }
+  },
+});
+
+// GET settings + invoices
+app.get('/api/admin/clients/:clientId/shareholder-invoices', requireAdmin, (req, res) => {
+  const c = getClientShareholderInvoices(req.params.clientId);
+  res.json(c);
+});
+
+// PUT settings (shareholder loan account)
+app.put('/api/admin/clients/:clientId/shareholder-invoices/settings', requireAdmin, (req, res) => {
+  const c = getClientShareholderInvoices(req.params.clientId);
+  if (req.body.shareholderLoanAccount !== undefined) c.shareholderLoanAccount = req.body.shareholderLoanAccount;
+  saveShareholderInvoices(shareholderInvoiceData);
+  res.json({ ok: true });
+});
+
+// POST upload + AI analyze a single invoice
+app.post('/api/admin/clients/:clientId/shareholder-invoices/upload', requireAdmin, shareholderUpload.single('invoice'), async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    const c = getClientShareholderInvoices(clientId);
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'No file uploaded' });
+
+    // Determine close month
+    let closeDate = null;
+    if (qbo.isConnected(clientId)) {
+      try { closeDate = await qbo.getBookCloseDate(clientId); } catch (_) {}
+    }
+    let closeMonth;
+    if (closeDate) {
+      const cd = new Date(closeDate + 'T00:00:00');
+      const nm = new Date(cd.getFullYear(), cd.getMonth() + 1, 1);
+      closeMonth = formatMonthStr(nm.getFullYear(), nm.getMonth());
+    } else {
+      const now = new Date();
+      const last = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      closeMonth = formatMonthStr(last.getFullYear(), last.getMonth());
+    }
+
+    console.log(`[shareholder-invoice] analyzing ${file.originalname} for client ${clientId}`);
+
+    // Determine media type
+    let mediaType = file.mimetype;
+    if (mediaType.includes('pdf')) mediaType = 'application/pdf';
+    else if (mediaType.includes('png')) mediaType = 'image/png';
+    else if (mediaType.includes('jpeg') || mediaType.includes('jpg')) mediaType = 'image/jpeg';
+    else if (mediaType.includes('gif')) mediaType = 'image/gif';
+    else if (mediaType.includes('webp')) mediaType = 'image/webp';
+
+    const prompt = SHAREHOLDER_INVOICE_PROMPT.replace('{CLOSE_MONTH}', closeMonth);
+
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1500,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: mediaType === 'application/pdf' ? 'document' : 'image',
+            source: { type: 'base64', media_type: mediaType, data: file.buffer.toString('base64') },
+          },
+          { type: 'text', text: prompt },
+        ],
+      }],
+    });
+
+    const rawText = response.content[0]?.text || '';
+    let analysis;
+    try {
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      analysis = JSON.parse(jsonMatch ? jsonMatch[0] : rawText);
+    } catch (_) {
+      analysis = { vendor: 'Unknown', totalAmount: 0, description: rawText.slice(0, 300), confidence: 'low', reasoning: 'Could not parse AI response', lines: [] };
+    }
+
+    // Save the invoice record
+    const invoice = {
+      id: `shi-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      fileName: file.originalname,
+      fileSize: file.size,
+      fileType: file.mimetype,
+      fileData: file.buffer.toString('base64'),
+      uploadedAt: new Date().toISOString(),
+      closeMonth,
+      analysis,
+      status: 'pending', // pending | posted | dismissed
+      journalEntry: null,
+    };
+
+    c.invoices.push(invoice);
+    saveShareholderInvoices(shareholderInvoiceData);
+
+    res.json({ ok: true, invoice: { ...invoice, fileData: undefined } });
+  } catch (e) {
+    console.error('[shareholder-invoice] upload error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /post — post a single invoice as a JE to QBO
+app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', requireAdmin, async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    const c = getClientShareholderInvoices(clientId);
+    if (!c.shareholderLoanAccount) {
+      return res.status(400).json({ error: 'Shareholder Loan GL account not configured' });
+    }
+
+    const invoice = c.invoices.find(i => i.id === req.params.invoiceId);
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    if (invoice.status === 'posted') return res.status(400).json({ error: 'Already posted' });
+
+    // Build JE lines from request body (user may have edited)
+    const jeLines = req.body.lines;
+    if (!jeLines || jeLines.length === 0) return res.status(400).json({ error: 'No JE lines provided' });
+
+    const jeDate = req.body.date || invoice.analysis.invoiceDate;
+    const totalAmount = Math.round(jeLines.reduce((s, l) => s + Number(l.amount), 0) * 100) / 100;
+
+    // Build debit lines (expenses/assets)
+    const qboLines = [];
+    for (const line of jeLines) {
+      qboLines.push({
+        accountId: line.accountId,
+        accountName: line.accountName,
+        description: line.description || invoice.analysis.description,
+        amount: Math.round(Number(line.amount) * 100) / 100,
+        type: 'debit',
+      });
+    }
+    // Credit line: shareholder loan
+    qboLines.push({
+      accountId: c.shareholderLoanAccount.id,
+      accountName: c.shareholderLoanAccount.name,
+      description: `Shareholder-paid: ${invoice.analysis.vendor || invoice.fileName}`,
+      amount: totalAmount,
+      type: 'credit',
+    });
+
+    const clientName = CLIENTS[clientId]?.name || clientId;
+    const memo = `Shareholder-paid invoice: ${invoice.analysis.vendor || invoice.fileName} — ${clientName}`;
+
+    if (qbo.isConnected(clientId)) {
+      const jeResult = await qbo.createJournalEntry({ date: jeDate, memo, lines: qboLines }, clientId);
+      invoice.journalEntry = {
+        jeId: jeResult.Id,
+        date: jeDate,
+        totalAmount,
+        lineCount: jeLines.length,
+        postedAt: new Date().toISOString(),
+      };
+    } else {
+      // Offline mode — record intent without posting
+      invoice.journalEntry = {
+        jeId: null,
+        date: jeDate,
+        totalAmount,
+        lineCount: jeLines.length,
+        postedAt: new Date().toISOString(),
+        offline: true,
+      };
+    }
+
+    invoice.status = 'posted';
+    saveShareholderInvoices(shareholderInvoiceData);
+
+    res.json({ ok: true, journalEntry: invoice.journalEntry });
+  } catch (e) {
+    console.error('[shareholder-invoice] post error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PUT dismiss/undismiss an invoice
+app.put('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/dismiss', requireAdmin, (req, res) => {
+  const c = getClientShareholderInvoices(req.params.clientId);
+  const invoice = c.invoices.find(i => i.id === req.params.invoiceId);
+  if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+  invoice.status = invoice.status === 'dismissed' ? 'pending' : 'dismissed';
+  saveShareholderInvoices(shareholderInvoiceData);
+  res.json({ ok: true, status: invoice.status });
+});
+
+// DELETE an invoice
+app.delete('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId', requireAdmin, (req, res) => {
+  const c = getClientShareholderInvoices(req.params.clientId);
+  const idx = c.invoices.findIndex(i => i.id === req.params.invoiceId);
+  if (idx === -1) return res.status(404).json({ error: 'Invoice not found' });
+  c.invoices.splice(idx, 1);
+  saveShareholderInvoices(shareholderInvoiceData);
+  res.json({ ok: true });
 });
 
 // ========================================

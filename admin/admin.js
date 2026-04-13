@@ -21,6 +21,7 @@ let prepaidState = { prepaidAccount: null, items: [], amortizationRuns: [], scan
 let prepaidPreview = null; // cached preview for the current close period
 let accruedLiabState = { accruedLiabilitiesAccount: null, analysisRuns: [], materialityThreshold: 10 };
 let accruedLiabAnalysis = null; // latest analysis result for the panel
+let shiState = { shareholderLoanAccount: null, invoices: [] };
 
 /**
  * Show a brief "settings saved ✓" confirmation next to a button.
@@ -1018,8 +1019,8 @@ async function loadClientFixedAssets() {
     }
 
     renderAssetClasses();
-    // Load prepaid + accrued liabilities state — renderCloseSteps depends on both
-    await Promise.all([loadClientPrepaid(), loadClientAccruedLiab()]);
+    // Load module state — renderCloseSteps depends on all of these
+    await Promise.all([loadClientPrepaid(), loadClientAccruedLiab(), loadClientShareholderInvoices()]);
     await renderFixedAssets();
   } catch (e) { console.error('Failed to load fixed assets:', e); }
 }
@@ -1213,6 +1214,42 @@ function buildCloseSteps(period) {
       meta: '',
     },
     (() => {
+      // Shareholder-paid invoices
+      const shiConfigured = !!shiState.shareholderLoanAccount;
+      const pendingInvoices = (shiState.invoices || []).filter(i => i.status === 'pending' && i.closeMonth === month);
+      const postedInvoices = (shiState.invoices || []).filter(i => i.status === 'posted' && i.closeMonth === month);
+      let status, statusLabel, action, actionLabel, meta;
+      if (!shiConfigured) {
+        status = 'skipped';
+        statusLabel = 'not configured';
+        action = null;
+        actionLabel = 'configure in settings';
+        meta = '';
+      } else if (postedInvoices.length > 0 && pendingInvoices.length === 0) {
+        const total = postedInvoices.reduce((s, i) => s + (i.journalEntry?.totalAmount || 0), 0);
+        status = 'complete';
+        statusLabel = `posted ${fmtMoney(total)} for ${postedInvoices.length} invoice${postedInvoices.length !== 1 ? 's' : ''}`;
+        action = 'upload-shi';
+        actionLabel = 'upload more';
+        meta = '';
+      } else {
+        status = 'ready';
+        statusLabel = pendingInvoices.length > 0
+          ? `${pendingInvoices.length} invoice${pendingInvoices.length !== 1 ? 's' : ''} pending review`
+          : 'upload invoices to process';
+        action = 'upload-shi';
+        actionLabel = 'upload invoice';
+        meta = postedInvoices.length > 0 ? `${postedInvoices.length} already posted` : '';
+      }
+      return {
+        id: 'shareholder-invoices',
+        num: 2,
+        title: 'shareholder-paid invoices',
+        desc: 'upload invoices paid by the shareholder personally. AI reads each invoice and suggests a journal entry.',
+        status, statusLabel, action, actionLabel, meta,
+      };
+    })(),
+    (() => {
       // Prepaid expenses — status driven by prepaidPreview + prepaidState
       const configured = !!prepaidState.prepaidAccount;
       const hasItems = (prepaidState.items || []).length > 0;
@@ -1243,7 +1280,7 @@ function buildCloseSteps(period) {
       }
       return {
         id: 'prepaid',
-        num: 2,
+        num: 3,
         title: 'prepaid expenses',
         desc: 'amortize prepaid expenses for the period.',
         status, statusLabel, action, actionLabel, meta,
@@ -1275,7 +1312,7 @@ function buildCloseSteps(period) {
       }
       return {
         id: 'accrued-liabilities',
-        num: 3,
+        num: 4,
         title: 'accrued liabilities',
         desc: 'analyze expense patterns and subsequent transactions to identify missing accruals.',
         status, statusLabel, action, actionLabel, meta,
@@ -1283,7 +1320,7 @@ function buildCloseSteps(period) {
     })(),
     {
       id: 'receivables',
-      num: 4,
+      num: 5,
       title: 'receivables & deferred revenues',
       desc: 'reconcile AR, defer unearned revenue, recognize earned revenue.',
       status: 'skipped',
@@ -1294,7 +1331,7 @@ function buildCloseSteps(period) {
     },
     {
       id: 'fixed-assets',
-      num: 5,
+      num: 6,
       title: 'fixed asset amortization',
       desc: 'compute monthly amortization, reconcile to QBO, post the journal entry.',
       status: runForThisMonth ? 'complete' : 'ready',
@@ -1307,7 +1344,7 @@ function buildCloseSteps(period) {
     },
     {
       id: 'income-taxes',
-      num: 6,
+      num: 7,
       title: 'current income taxes',
       desc: 'estimate and accrue current-period income tax expense.',
       status: 'skipped',
@@ -1318,7 +1355,7 @@ function buildCloseSteps(period) {
     },
     {
       id: 'reconciliation',
-      num: 7,
+      num: 8,
       title: 'overall reconciliation',
       desc: 'tie every module schedule back to the QBO trial balance.',
       status: 'skipped',
@@ -1329,7 +1366,7 @@ function buildCloseSteps(period) {
     },
     {
       id: 'export',
-      num: 8,
+      num: 9,
       title: 'export & review',
       desc: 'generate the Excel workbook and run a Claude review pass over it.',
       status: 'ready',
@@ -1344,7 +1381,7 @@ function buildCloseSteps(period) {
   // wait until the module steps above are complete (or skipped). Individual
   // module steps (prepaid, accrued liabilities, fixed assets) are independent
   // of each other and can be run in any order.
-  const moduleStepIds = new Set(['sync', 'prepaid', 'accrued-liabilities', 'receivables', 'fixed-assets', 'income-taxes']);
+  const moduleStepIds = new Set(['sync', 'shareholder-invoices', 'prepaid', 'accrued-liabilities', 'receivables', 'fixed-assets', 'income-taxes']);
   const allModulesDone = steps
     .filter(s => moduleStepIds.has(s.id))
     .every(s => s.status === 'complete' || s.status === 'skipped');
@@ -1372,7 +1409,16 @@ function renderStepCard(step) {
   const s = STEP_STATUS_STYLES[step.status] || STEP_STATUS_STYLES.skipped;
   const canAct = step.action && (step.status === 'ready' || step.status === 'complete');
   let actionBtn;
-  if (step.id === 'prepaid') {
+  if (step.id === 'shareholder-invoices') {
+    // Shareholder invoices step: file upload button (label wrapping hidden input)
+    const disabled = step.status === 'locked' || step.status === 'skipped';
+    actionBtn = disabled
+      ? `<span class="btn-step-action-placeholder">${step.actionLabel}</span>`
+      : `<label class="btn-step-action" style="cursor:pointer;text-align:center;display:inline-block;">
+           ${step.actionLabel}
+           <input type="file" id="shi-file-input" accept=".pdf,.jpg,.jpeg,.png,.gif,.webp" style="display:none;" onchange="handleShiUpload(this)">
+         </label>`;
+  } else if (step.id === 'prepaid') {
     // Prepaid step gets two buttons: scan + run amortization
     const scanDisabled = step.status === 'locked' ? 'disabled' : '';
     const runDisabled = canAct ? '' : 'disabled';
@@ -1388,7 +1434,9 @@ function renderStepCard(step) {
   // The fixed-assets step embeds the reconciliation panel and the export step
   // embeds the Claude review panel. Both are hidden until their action runs.
   let extras = '';
-  if (step.id === 'prepaid') {
+  if (step.id === 'shareholder-invoices') {
+    extras = `<div id="shi-panel" style="margin-top:12px;"></div>`;
+  } else if (step.id === 'prepaid') {
     extras = `<div id="prepaid-scan-panel" style="margin-top:12px;"></div>`;
   } else if (step.id === 'accrued-liabilities') {
     extras = `<div id="accrued-liab-panel" style="margin-top:12px;"></div>`;
@@ -1433,6 +1481,10 @@ async function renderCloseSteps() {
   const steps = buildCloseSteps(currentClosePeriod);
   container.innerHTML = steps.map(renderStepCard).join('');
 
+  // Auto-render shareholder invoice panel if there are pending invoices
+  const shiPending = (shiState.invoices || []).filter(i => i.closeMonth === currentClosePeriod?.month);
+  if (shiPending.length > 0) renderShiPanel();
+
   // Render fiscal year calendar (non-blocking)
   renderCloseCalendar();
 }
@@ -1472,6 +1524,7 @@ async function renderCloseCalendar() {
       return `
         <tr class="${rowClass}">
           <td>${label}</td>
+          <td style="text-align:center;">${statusIcon(m.modules.shareholderInvoices)}</td>
           <td style="text-align:center;">${statusIcon(m.modules.fixedAssets)}</td>
           <td style="text-align:center;">${statusIcon(m.modules.prepaidExpenses)}</td>
           <td style="text-align:center;">${statusIcon(m.modules.accruedLiabilities)}</td>
@@ -1502,6 +1555,7 @@ async function renderCloseCalendar() {
             <thead>
               <tr>
                 <th>period</th>
+                <th style="text-align:center;">SH invoices</th>
                 <th style="text-align:center;">fixed assets</th>
                 <th style="text-align:center;">prepaid expenses</th>
                 <th style="text-align:center;">accrued liabilities</th>
@@ -2183,6 +2237,278 @@ async function postAccruedLiabilities() {
 
 // Wire settings save button
 document.getElementById('btn-save-accrued-liab-settings').addEventListener('click', saveAccruedLiabSettings);
+
+// ========================================
+// SHAREHOLDER-PAID INVOICES MODULE
+// ========================================
+
+async function loadClientShareholderInvoices() {
+  if (!selectedClientId) return;
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/shareholder-invoices`, {
+      headers: { 'Authorization': getAuth() },
+    });
+    const data = await res.json();
+    shiState = {
+      shareholderLoanAccount: data.shareholderLoanAccount || null,
+      invoices: data.invoices || [],
+    };
+  } catch (e) {
+    console.error('Failed to load shareholder invoices:', e);
+    shiState = { shareholderLoanAccount: null, invoices: [] };
+  }
+  renderShiSettings();
+}
+
+function renderShiSettings() {
+  const acctSelect = document.getElementById('shi-account-select');
+  if (!acctSelect) return;
+  const savedId = shiState.shareholderLoanAccount?.id;
+  const eligible = qboAccounts.filter(a =>
+    ['Other Current Liability', 'Long Term Liability', 'Equity', 'Other Liability'].includes(a.type) ||
+    (a.name || '').toLowerCase().includes('shareholder') ||
+    (a.name || '').toLowerCase().includes('loan') ||
+    (a.name || '').toLowerCase().includes('due to')
+  );
+  if (savedId && !eligible.find(a => a.id === savedId)) {
+    const saved = qboAccounts.find(a => a.id === savedId);
+    if (saved) eligible.unshift(saved);
+    else eligible.unshift({ id: savedId, name: shiState.shareholderLoanAccount.name || '(saved)', type: '?' });
+  }
+  acctSelect.innerHTML = '<option value="">select shareholder loan account…</option>' +
+    eligible.map(a =>
+      `<option value="${a.id}" data-name="${(a.name || '').replace(/"/g, '&quot;')}" ${a.id === savedId ? 'selected' : ''}>${a.name} (${a.type})</option>`
+    ).join('');
+}
+
+async function saveShiSettings() {
+  const select = document.getElementById('shi-account-select');
+  try {
+    await fetch(`/api/admin/clients/${selectedClientId}/shareholder-invoices/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({
+        shareholderLoanAccount: select.value
+          ? { id: select.value, name: select.options[select.selectedIndex]?.dataset.name || '' }
+          : null,
+      }),
+    });
+    showSettingsSaved('btn-save-shi-settings');
+    await loadClientShareholderInvoices();
+    renderCloseSteps();
+  } catch (e) { alert('save failed: ' + e.message); }
+}
+
+document.getElementById('btn-save-shi-settings').addEventListener('click', saveShiSettings);
+
+async function handleShiUpload(input) {
+  if (!input.files?.length || !selectedClientId) return;
+  const file = input.files[0];
+  input.value = ''; // reset so same file can be re-selected
+
+  const panel = document.getElementById('shi-panel');
+  if (panel) {
+    panel.innerHTML = `
+      <div style="padding:16px;background:var(--blue-50);border-radius:8px;font-size:0.85rem;color:var(--gray-700);">
+        <strong>analyzing ${file.name}…</strong><br>
+        uploading and sending to AI for review. this may take 10–20 seconds.
+      </div>`;
+  }
+
+  try {
+    const formData = new FormData();
+    formData.append('invoice', file);
+
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/shareholder-invoices/upload`, {
+      method: 'POST',
+      headers: { 'Authorization': getAuth() },
+      body: formData,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'upload failed');
+
+    await loadClientShareholderInvoices();
+    renderCloseSteps();
+    // After re-render, show the review panel with all pending invoices
+    setTimeout(() => renderShiPanel(), 100);
+  } catch (e) {
+    if (panel) panel.innerHTML = `<div style="padding:12px;background:var(--red-50);border-radius:8px;color:var(--red-600);">upload failed: ${e.message}</div>`;
+  }
+}
+
+function renderShiPanel() {
+  const panel = document.getElementById('shi-panel');
+  if (!panel) return;
+
+  const month = currentClosePeriod?.month;
+  const pending = shiState.invoices.filter(i => i.status === 'pending' && i.closeMonth === month);
+  const posted = shiState.invoices.filter(i => i.status === 'posted' && i.closeMonth === month);
+  const dismissed = shiState.invoices.filter(i => i.status === 'dismissed' && i.closeMonth === month);
+
+  if (pending.length === 0 && posted.length === 0 && dismissed.length === 0) {
+    panel.innerHTML = '';
+    return;
+  }
+
+  let html = '';
+
+  if (pending.length > 0) {
+    html += pending.map(inv => renderShiInvoiceCard(inv)).join('');
+  }
+
+  if (posted.length > 0) {
+    html += `<details style="margin-top:8px;"><summary style="font-size:0.82rem;color:var(--gray-500);cursor:pointer;">${posted.length} posted invoice${posted.length !== 1 ? 's' : ''}</summary>`;
+    html += posted.map(inv => renderShiInvoiceCard(inv)).join('');
+    html += `</details>`;
+  }
+
+  if (dismissed.length > 0) {
+    html += `<details style="margin-top:8px;"><summary style="font-size:0.82rem;color:var(--gray-400);cursor:pointer;">${dismissed.length} dismissed</summary>`;
+    html += dismissed.map(inv => renderShiInvoiceCard(inv)).join('');
+    html += `</details>`;
+  }
+
+  panel.innerHTML = html;
+}
+
+function renderShiInvoiceCard(inv) {
+  const a = inv.analysis || {};
+  const isPosted = inv.status === 'posted';
+  const isDismissed = inv.status === 'dismissed';
+  const borderColor = isPosted ? 'var(--green-500)' : (isDismissed ? 'var(--gray-300)' : 'var(--blue-500)');
+  const bgColor = isPosted ? '#f0fdf4' : (isDismissed ? '#f9fafb' : '#eff6ff');
+
+  const confidenceColors = {
+    high: { bg: '#dcfce7', fg: '#166534' },
+    medium: { bg: '#fef9c3', fg: '#854d0e' },
+    low: { bg: '#f3f4f6', fg: '#6b7280' },
+  };
+  const cc = confidenceColors[a.confidence] || confidenceColors.low;
+
+  const linesHtml = (a.lines || []).map((line, idx) => `
+    <div class="shi-je-line" style="display:flex;gap:8px;align-items:center;margin-bottom:4px;font-size:0.8rem;">
+      <span style="flex:0 0 20px;color:var(--gray-400);">${idx + 1}.</span>
+      <span style="flex:1;">${line.description}</span>
+      <span style="flex:0 0 100px;color:var(--gray-500);">${line.suggestedCategory}${line.isCapital ? ' (capital)' : ''}</span>
+      <span style="flex:0 0 80px;text-align:right;font-weight:500;">$${Number(line.amount).toFixed(2)}</span>
+      ${!isPosted && !isDismissed ? `
+        <select class="shi-acct-select" data-line-idx="${idx}" style="flex:0 0 200px;padding:3px 6px;border:1px solid var(--gray-300);border-radius:4px;font-size:0.78rem;">
+          <option value="">select GL account…</option>
+          ${qboAccounts.filter(ac => ['Expense', 'Other Expense', 'Cost of Goods Sold', 'Fixed Asset', 'Other Current Asset'].includes(ac.type))
+            .map(ac => `<option value="${ac.id}" data-name="${(ac.name || '').replace(/"/g, '&quot;')}">${ac.name}</option>`).join('')}
+        </select>
+      ` : ''}
+    </div>
+  `).join('');
+
+  const actions = !isPosted && !isDismissed ? `
+    <div style="display:flex;gap:8px;margin-top:8px;">
+      <button class="btn btn-primary" onclick="postShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:5px 12px;">post journal entry</button>
+      <button class="btn btn-secondary" onclick="dismissShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:5px 10px;">dismiss</button>
+      <button class="btn btn-secondary" onclick="deleteShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:5px 10px;color:var(--red-600);">delete</button>
+    </div>
+  ` : (isDismissed ? `
+    <div style="margin-top:6px;">
+      <button class="btn btn-secondary" onclick="dismissShiInvoice('${inv.id}')" style="font-size:0.78rem;padding:4px 10px;">restore</button>
+    </div>
+  ` : `
+    <div style="margin-top:6px;font-size:0.78rem;color:var(--green-600);">
+      ✓ posted ${inv.journalEntry?.date || ''} — $${Number(inv.journalEntry?.totalAmount || 0).toFixed(2)}${inv.journalEntry?.jeId ? ` (JE #${inv.journalEntry.jeId})` : ''}
+    </div>
+  `);
+
+  return `
+    <div class="shi-invoice-card" data-invoice-id="${inv.id}" style="border-left:3px solid ${borderColor};background:${bgColor};padding:10px 12px;margin-bottom:6px;border-radius:4px;font-size:0.82rem;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+        <div>
+          <strong>${a.vendor || 'Unknown Vendor'}</strong>
+          <span style="margin-left:8px;font-weight:600;">$${Number(a.totalAmount || 0).toFixed(2)}</span>
+          <span style="margin-left:8px;color:var(--gray-500);">${a.invoiceDate || '—'}</span>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <span style="padding:2px 8px;border-radius:10px;font-size:0.72rem;font-weight:500;background:${cc.bg};color:${cc.fg};">${a.confidence || 'low'} confidence</span>
+          <span style="font-size:0.72rem;color:var(--gray-400);" title="${inv.fileName}">📄 ${inv.fileName?.length > 20 ? inv.fileName.slice(0, 20) + '…' : inv.fileName}</span>
+        </div>
+      </div>
+      <div style="margin-top:4px;color:var(--gray-600);">${a.description || ''}</div>
+      ${a.reasoning ? `<div style="margin-top:4px;font-style:italic;color:var(--gray-500);font-size:0.78rem;">${a.reasoning}</div>` : ''}
+      <div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(0,0,0,0.06);">
+        <div style="font-size:0.74rem;font-weight:600;color:var(--gray-500);margin-bottom:4px;">SUGGESTED JOURNAL ENTRY — Dr Expense/Asset, Cr Shareholder Loan</div>
+        ${linesHtml}
+      </div>
+      ${actions}
+    </div>`;
+}
+
+async function postShiInvoice(invoiceId) {
+  const card = document.querySelector(`.shi-invoice-card[data-invoice-id="${invoiceId}"]`);
+  if (!card) return;
+
+  // Gather account selections from the card
+  const selects = card.querySelectorAll('.shi-acct-select');
+  const inv = shiState.invoices.find(i => i.id === invoiceId);
+  if (!inv) return;
+
+  const lines = [];
+  for (let i = 0; i < selects.length; i++) {
+    const sel = selects[i];
+    if (!sel.value) {
+      alert(`Please select a GL account for line ${i + 1}`);
+      return;
+    }
+    const lineData = inv.analysis.lines[i];
+    lines.push({
+      accountId: sel.value,
+      accountName: sel.options[sel.selectedIndex]?.dataset.name || '',
+      description: lineData.description,
+      amount: lineData.amount,
+    });
+  }
+
+  const totalAmt = lines.reduce((s, l) => s + l.amount, 0);
+  if (!confirm(`Post JE for $${totalAmt.toFixed(2)}?\n\nDr: ${lines.map(l => `${l.accountName} $${l.amount.toFixed(2)}`).join(', ')}\nCr: ${shiState.shareholderLoanAccount?.name || 'Shareholder Loan'} $${totalAmt.toFixed(2)}`)) return;
+
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/shareholder-invoices/${invoiceId}/post`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ lines, date: inv.analysis.invoiceDate }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'post failed');
+
+    alert(`Journal entry posted!${data.journalEntry?.jeId ? ` JE #${data.journalEntry.jeId}` : ''}\n$${data.journalEntry?.totalAmount?.toFixed(2)}`);
+    await loadClientShareholderInvoices();
+    currentClosePeriod = null;
+    renderCloseSteps();
+    setTimeout(() => renderShiPanel(), 100);
+  } catch (e) { alert('post failed: ' + e.message); }
+}
+
+async function dismissShiInvoice(invoiceId) {
+  try {
+    await fetch(`/api/admin/clients/${selectedClientId}/shareholder-invoices/${invoiceId}/dismiss`, {
+      method: 'PUT',
+      headers: { 'Authorization': getAuth() },
+    });
+    await loadClientShareholderInvoices();
+    renderCloseSteps();
+    setTimeout(() => renderShiPanel(), 100);
+  } catch (e) { alert('dismiss failed: ' + e.message); }
+}
+
+async function deleteShiInvoice(invoiceId) {
+  if (!confirm('Delete this invoice? This cannot be undone.')) return;
+  try {
+    await fetch(`/api/admin/clients/${selectedClientId}/shareholder-invoices/${invoiceId}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': getAuth() },
+    });
+    await loadClientShareholderInvoices();
+    renderCloseSteps();
+    setTimeout(() => renderShiPanel(), 100);
+  } catch (e) { alert('delete failed: ' + e.message); }
+}
 
 // ========================================
 // PREPAID EXPENSE SCANNER (Part B)
