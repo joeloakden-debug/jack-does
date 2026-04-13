@@ -1268,10 +1268,11 @@ function buildCloseSteps(period) {
       const configured = !!prepaidState.prepaidAccount;
       const hasItems = (prepaidState.items || []).length > 0;
       const prepaidRun = (prepaidState.amortizationRuns || []).find(r => r.month === month);
+      const monthScanned = (prepaidState.scannedMonths || []).includes(month);
       let status, statusLabel, action, actionLabel, meta;
-      if (!configured || !hasItems) {
+      if (!configured) {
         status = 'skipped';
-        statusLabel = !configured ? 'not configured' : 'no items';
+        statusLabel = 'not configured';
         action = null;
         actionLabel = 'configure in settings';
         meta = '';
@@ -1281,15 +1282,22 @@ function buildCloseSteps(period) {
         action = 'run-prepaid';
         actionLabel = 'view run';
         meta = '';
+      } else if (monthScanned && !hasItems) {
+        // Scanned but nothing needed prepaid treatment
+        status = 'complete';
+        statusLabel = 'scanned — no prepaid expenses found';
+        action = 'scan-prepaids';
+        actionLabel = 're-scan';
+        meta = '';
       } else {
         const eligibleCount = prepaidPreview?.eligibleCount || 0;
         const eligibleTotal = Number(prepaidPreview?.totalAmount || 0);
-        status = 'ready';
+        status = hasItems && eligibleCount > 0 ? 'ready' : (monthScanned ? 'complete' : 'ready');
         statusLabel = eligibleCount > 0
           ? `${eligibleCount} item${eligibleCount !== 1 ? 's' : ''} ready — $${eligibleTotal.toFixed(2)}`
-          : 'nothing to amortize this period';
-        action = 'run-prepaid';
-        actionLabel = 'run amortization';
+          : (monthScanned ? 'scanned — nothing to amortize' : 'nothing to amortize this period');
+        action = eligibleCount > 0 ? 'run-prepaid' : 'scan-prepaids';
+        actionLabel = eligibleCount > 0 ? 'run amortization' : 're-scan';
         meta = '';
       }
       return {
@@ -1664,6 +1672,7 @@ async function loadClientPrepaid() {
       prepaidAccount: data.prepaidAccount || null,
       items: data.items || [],
       amortizationRuns: data.amortizationRuns || [],
+      scannedMonths: data.scannedMonths || [],
       scanThreshold: data.scanThreshold ?? 500,
     };
     // Also fetch preview for current close period so step card can show eligible total
