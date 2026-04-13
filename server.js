@@ -4153,16 +4153,26 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
           })
           .map(a => String(a.Id))
       );
-      console.log('[shareholder-invoice] tax liability account IDs:', Array.from(taxLiabilityIds));
 
-      // Separate expense lines from tax lines
+      // Detect tax lines by BOTH account ID and line description/name.
+      // AI may map tax to a regular expense account but describe it as "GST", "PST (7%)", etc.
+      const TAX_DESC_RE = /\b(GST|HST|PST|QST|RST|sales\s*tax|tax\s*\(\d)/i;
+
       const expenseLines = [];
-      let taxAmount = 0;
+      const taxLines = []; // { type: 'gst'|'hst'|'pst', amount }
       for (const line of jeLines) {
         const amt = Math.round(Number(line.amount) * 100) / 100;
-        if (taxLiabilityIds.has(String(line.accountId))) {
-          taxAmount += amt;
-          console.log(`[shareholder-invoice] tax line detected: ${line.accountName} $${amt}`);
+        const desc = (line.description || line.accountName || '').toUpperCase();
+        const isTaxByAccount = taxLiabilityIds.has(String(line.accountId));
+        const isTaxByDesc = TAX_DESC_RE.test(line.description || '') || TAX_DESC_RE.test(line.accountName || '');
+
+        if (isTaxByAccount || isTaxByDesc) {
+          // Classify the tax type
+          let taxType = 'gst'; // default
+          if (/PST|QST|RST/i.test(desc)) taxType = 'pst';
+          else if (/HST/i.test(desc)) taxType = 'hst';
+          taxLines.push({ type: taxType, amount: amt, description: line.description });
+          console.log(`[shareholder-invoice] tax line detected (${taxType}): "${line.description}" $${amt}`);
         } else {
           expenseLines.push({
             accountId: line.accountId,
@@ -4173,18 +4183,47 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
         }
       }
 
-      // If there are tax lines, find the appropriate QBO TaxCode to apply to expense lines
+      const totalTaxAmount = taxLines.reduce((s, t) => s + t.amount, 0);
+      const hasGST = taxLines.some(t => t.type === 'gst');
+      const hasHST = taxLines.some(t => t.type === 'hst');
+      const hasPST = taxLines.some(t => t.type === 'pst');
+      console.log(`[shareholder-invoice] tax summary: GST=${hasGST} HST=${hasHST} PST=${hasPST} total=$${totalTaxAmount}`);
+
+      // Find the appropriate QBO TaxCode based on which taxes are present
       let taxCodeId = null;
-      if (taxAmount > 0 && expenseLines.length > 0) {
+      if (totalTaxAmount > 0 && expenseLines.length > 0) {
         try {
           const tcData = await qbo.getTaxCodes(clientId);
-          const taxCodes = tcData?.QueryResponse?.TaxCode || [];
+          const taxCodes = (tcData?.QueryResponse?.TaxCode || []).filter(tc => tc.Active !== false);
           console.log('[shareholder-invoice] available tax codes:', taxCodes.map(tc => `${tc.Id}:${tc.Name}`).join(', '));
-          // Pick the first active, non-exempt tax code (typically GST, HST, or GST/PST)
-          const activeTaxCode = taxCodes.find(tc => tc.Active !== false && tc.Name !== 'NON' && tc.Name !== 'Exempt');
-          if (activeTaxCode) {
-            taxCodeId = String(activeTaxCode.Id);
-            console.log(`[shareholder-invoice] using tax code: ${activeTaxCode.Name} (${taxCodeId})`);
+
+          // Match tax code based on what taxes are on the invoice:
+          //   GST + PST → look for "GST/PST" combined code (e.g. "GST/PST BC")
+          //   HST       → look for "HST" code
+          //   GST only  → look for "GST" code
+          let matched = null;
+          const tcNames = taxCodes.map(tc => ({ ...tc, upper: (tc.Name || '').toUpperCase() }));
+
+          if (hasGST && hasPST) {
+            // Prefer combined GST/PST code
+            matched = tcNames.find(tc => tc.upper.includes('GST') && tc.upper.includes('PST'));
+            if (!matched) matched = tcNames.find(tc => tc.upper.includes('GST/PST'));
+          }
+          if (!matched && hasHST) {
+            matched = tcNames.find(tc => tc.upper.includes('HST') && !tc.upper.includes('PST'));
+          }
+          if (!matched && hasGST && !hasPST) {
+            // GST only — find a code that has GST but NOT PST
+            matched = tcNames.find(tc => tc.upper.includes('GST') && !tc.upper.includes('PST') && tc.upper !== 'NON');
+          }
+          // Fallback: any active non-exempt tax code
+          if (!matched) {
+            matched = tcNames.find(tc => tc.upper !== 'NON' && tc.upper !== 'EXEMPT');
+          }
+
+          if (matched) {
+            taxCodeId = String(matched.Id);
+            console.log(`[shareholder-invoice] selected tax code: ${matched.Name} (${taxCodeId})`);
           }
         } catch (e) {
           console.error('[shareholder-invoice] failed to fetch tax codes:', e.message);
@@ -4201,9 +4240,8 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
           const expTotal = expenseLines.reduce((s, l) => s + l.amount, 0);
           for (const line of expenseLines) {
             const share = expTotal > 0 ? line.amount / expTotal : 1 / expenseLines.length;
-            line.amount = Math.round((line.amount + taxAmount * share) * 100) / 100;
+            line.amount = Math.round((line.amount + totalTaxAmount * share) * 100) / 100;
           }
-          taxAmount = 0; // absorbed
         }
       }
 
