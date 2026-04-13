@@ -4134,54 +4134,50 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
     const memo = `Shareholder-paid invoice: ${invoice.analysis.vendor || invoice.fileName} — ${clientName}`;
 
     if (qbo.isConnected(clientId)) {
-      // Find or create the vendor in QBO so the expense is properly attributed
-      let vendorRef = null;
-      const vendorName = invoice.analysis.vendor;
-      if (vendorName) {
-        try {
-          vendorRef = await qbo.findOrCreateVendor(vendorName, clientId);
-        } catch (vendorErr) {
-          console.error(`[shareholder-invoice] vendor lookup/create failed for "${vendorName}":`, vendorErr.message);
-          // Continue without vendor — expense will still post
-        }
-      }
-
-      // Create a Purchase (Expense) transaction — paid from shareholder loan account
-      const purchaseResult = await qbo.createPurchase({
-        date: jeDate,
-        memo,
+      // Build JE lines: debit the expense/asset accounts, credit the shareholder loan
+      // (QBO API doesn't support Purchase/Expense from liability accounts like Shareholder Loan,
+      //  so we use a Journal Entry which achieves the identical accounting result.)
+      const qboLines = expenseLines.map(line => ({
+        accountId: line.accountId,
+        accountName: line.accountName,
+        description: line.description,
+        amount: line.amount,
+        type: 'debit',
+      }));
+      // Credit line: shareholder loan
+      qboLines.push({
         accountId: c.shareholderLoanAccount.id,
         accountName: c.shareholderLoanAccount.name,
-        accountType: c.shareholderLoanAccount.type || '',
-        vendorId: vendorRef?.Id || null,
-        vendorName: vendorRef?.DisplayName || vendorName || '',
-        lines: expenseLines,
-      }, clientId);
-      const txnId = purchaseResult.Id;
+        description: `Shareholder-paid: ${invoice.analysis.vendor || invoice.fileName}`,
+        amount: totalAmount,
+        type: 'credit',
+      });
 
-      // Attach the original invoice PDF/image to the expense in QBO
+      const jeResult = await qbo.createJournalEntry({ date: jeDate, memo, lines: qboLines }, clientId);
+      const txnId = jeResult.Id;
+
+      // Attach the original invoice PDF/image to the JE in QBO
       let attachmentId = null;
       if (invoice.fileData) {
         try {
           const fileBuffer = Buffer.from(invoice.fileData, 'base64');
           const attachResult = await qbo.uploadAttachment({
             entityId: txnId,
-            entityType: 'Purchase',
+            entityType: 'JournalEntry',
             fileName: invoice.fileName,
             contentType: invoice.fileType || 'application/pdf',
             buffer: fileBuffer,
           }, clientId);
           attachmentId = attachResult?.Id || null;
-          console.log(`[shareholder-invoice] attached ${invoice.fileName} to Expense #${txnId} (attachment ${attachmentId})`);
+          console.log(`[shareholder-invoice] attached ${invoice.fileName} to JE #${txnId} (attachment ${attachmentId})`);
         } catch (attachErr) {
-          console.error(`[shareholder-invoice] failed to attach file to Expense #${txnId}:`, attachErr.message);
-          // Don't fail the whole post — expense was created successfully
+          console.error(`[shareholder-invoice] failed to attach file to JE #${txnId}:`, attachErr.message);
+          // Don't fail the whole post — JE was created successfully
         }
       }
 
       invoice.journalEntry = {
         jeId: txnId,
-        txnType: 'Purchase',
         date: jeDate,
         totalAmount,
         lineCount: jeLines.length,
