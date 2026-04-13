@@ -40,6 +40,20 @@ function showSettingsSaved(btnId) {
   }, 2000);
 }
 
+/** Format a GL account label — shows "1234 - Account Name" if number exists, otherwise just name */
+function fmtAcct(acct) {
+  if (!acct) return '';
+  const num = acct.acctNum || acct.AcctNum || '';
+  const name = acct.name || acct.Name || '';
+  return num ? `${num} - ${name}` : name;
+}
+
+/** Build an <option> tag for a GL account */
+function acctOption(a, selectedId) {
+  const label = fmtAcct(a);
+  return `<option value="${a.id}" data-name="${(a.name || '').replace(/"/g, '&quot;')}" data-acctnum="${a.acctNum || ''}" ${a.id === selectedId ? 'selected' : ''}>${label}</option>`;
+}
+
 // ========================================
 // LOAD DATA
 // ========================================
@@ -123,7 +137,7 @@ function renderAccountSelect(selectedName, selectedId, entryIndex, lineIndex) {
     options += `<optgroup label="${type}">`;
     groups[type].forEach(a => {
       const selected = a.id === matchedId ? ' selected' : '';
-      options += `<option value="${a.id}" data-name="${a.name.replace(/"/g, '&quot;')}"${selected}>${a.name}</option>`;
+      options += `<option value="${a.id}" data-name="${a.name.replace(/"/g, '&quot;')}" data-acctnum="${a.acctNum || ''}"${selected}>${fmtAcct(a)}</option>`;
     });
     options += `</optgroup>`;
   });
@@ -1688,9 +1702,7 @@ function renderPrepaidSettings() {
       else eligible.unshift({ id: savedId, name: prepaidState.prepaidAccount.name || '(saved account)', type: '?' });
     }
     acctSelect.innerHTML = '<option value="">select prepaid expenses account…</option>' +
-      eligible.map(a =>
-        `<option value="${a.id}" data-name="${(a.name || '').replace(/"/g, '&quot;')}" ${a.id === savedId ? 'selected' : ''}>${a.name} (${a.type})</option>`
-      ).join('');
+      eligible.map(a => acctOption(a, savedId)).join('');
   }
 
   // Threshold field
@@ -1812,9 +1824,7 @@ function populatePrepaidExpenseAccountSelect(selectedId) {
   if (!select) return;
   const expenseAccounts = qboAccounts.filter(a => ['Expense', 'Other Expense', 'Cost of Goods Sold'].includes(a.type));
   select.innerHTML = '<option value="">select expense account…</option>' +
-    expenseAccounts.map(a =>
-      `<option value="${a.id}" data-name="${(a.name || '').replace(/"/g, '&quot;')}" ${a.id === selectedId ? 'selected' : ''}>${a.name}</option>`
-    ).join('');
+    expenseAccounts.map(a => acctOption(a, selectedId)).join('');
 }
 
 function closePrepaidModal() {
@@ -1987,9 +1997,7 @@ function renderAccruedLiabSettings() {
       else eligible.unshift({ id: savedId, name: accruedLiabState.accruedLiabilitiesAccount.name || '(saved)', type: '?' });
     }
     acctSelect.innerHTML = '<option value="">select accrued liabilities account…</option>' +
-      eligible.map(a =>
-        `<option value="${a.id}" data-name="${(a.name || '').replace(/"/g, '&quot;')}" ${a.id === savedId ? 'selected' : ''}>${a.name} (${a.type})</option>`
-      ).join('');
+      eligible.map(a => acctOption(a, savedId)).join('');
   }
   const thresholdInput = document.getElementById('accrued-liab-threshold');
   if (thresholdInput) thresholdInput.value = accruedLiabState.materialityThreshold ?? 10;
@@ -2276,9 +2284,7 @@ function renderShiSettings() {
     else eligible.unshift({ id: savedId, name: shiState.shareholderLoanAccount.name || '(saved)', type: '?' });
   }
   acctSelect.innerHTML = '<option value="">select shareholder loan account…</option>' +
-    eligible.map(a =>
-      `<option value="${a.id}" data-name="${(a.name || '').replace(/"/g, '&quot;')}" ${a.id === savedId ? 'selected' : ''}>${a.name} (${a.type})</option>`
-    ).join('');
+    eligible.map(a => acctOption(a, savedId)).join('');
 }
 
 async function saveShiSettings() {
@@ -2382,16 +2388,35 @@ function renderShiInvoiceCard(inv) {
 
   // Fuzzy-match AI suggested account name to actual QBO accounts
   function matchAccount(line) {
-    const suggested = (line.suggestedAccount || line.suggestedCategory || '').toLowerCase();
-    if (!suggested) return '';
-    // Try exact name match first
-    const exact = eligibleAccounts.find(ac => (ac.name || '').toLowerCase() === suggested);
-    if (exact) return exact.id;
-    // Try contains match
-    const contains = eligibleAccounts.find(ac => (ac.name || '').toLowerCase().includes(suggested) || suggested.includes((ac.name || '').toLowerCase()));
-    if (contains) return contains.id;
-    // Try word overlap
-    const words = suggested.split(/[\s/&,]+/).filter(w => w.length > 2);
+    // Try suggestedAccount first (AI should return exact name from chart), then category
+    const candidates = [line.suggestedAccount, line.suggestedCategory, line.description].filter(Boolean);
+    for (const raw of candidates) {
+      const suggested = raw.toLowerCase().trim();
+      if (!suggested) continue;
+
+      // Exact name match
+      const exact = eligibleAccounts.find(ac => (ac.name || '').toLowerCase() === suggested);
+      if (exact) return exact.id;
+
+      // Account number match (if AI returned a number)
+      if (/^\d+$/.test(suggested.split(/\s/)[0])) {
+        const numMatch = eligibleAccounts.find(ac => ac.acctNum === suggested.split(/\s/)[0]);
+        if (numMatch) return numMatch.id;
+      }
+
+      // Exact substring match (account name contains suggestion or vice versa)
+      const contains = eligibleAccounts.find(ac => {
+        const acName = (ac.name || '').toLowerCase();
+        return acName.includes(suggested) || suggested.includes(acName);
+      });
+      if (contains) return contains.id;
+    }
+
+    // Word overlap scoring across all candidates
+    const allWords = candidates.join(' ').toLowerCase().split(/[\s/&,()-]+/).filter(w => w.length > 2);
+    // Remove very common words that cause false matches
+    const stopWords = new Set(['and', 'the', 'for', 'from', 'with', 'fees', 'fee', 'expense', 'expenses', 'other', 'cost', 'general']);
+    const words = allWords.filter(w => !stopWords.has(w));
     let bestMatch = null, bestScore = 0;
     for (const ac of eligibleAccounts) {
       const acName = (ac.name || '').toLowerCase();
@@ -2412,7 +2437,7 @@ function renderShiInvoiceCard(inv) {
         <select class="shi-acct-select" data-line-idx="${idx}" style="flex:0 0 220px;padding:3px 6px;border:1px solid var(--gray-300);border-radius:4px;font-size:0.78rem;">
           <option value="">select GL account…</option>
           ${eligibleAccounts
-            .map(ac => `<option value="${ac.id}" data-name="${(ac.name || '').replace(/"/g, '&quot;')}" ${ac.id === matchedId ? 'selected' : ''}>${ac.name}</option>`).join('')}
+            .map(ac => acctOption(ac, matchedId)).join('')}
         </select>
       ` : ''}
     </div>`;
@@ -2446,6 +2471,20 @@ function renderShiInvoiceCard(inv) {
       ${a.reasoning ? `<div style="margin-top:4px;font-style:italic;color:var(--gray-500);font-size:0.78rem;">${a.reasoning}</div>` : ''}
       <div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(0,0,0,0.06);">
         ${linesHtml}
+        ${(() => {
+          const lineTotal = (a.lines || []).reduce((s, l) => s + Number(l.amount || 0), 0);
+          const invTotal = Number(a.totalAmount || 0);
+          const diff = Math.round((invTotal - lineTotal) * 100) / 100;
+          const balanced = Math.abs(diff) < 0.01;
+          const color = balanced ? 'var(--green-600)' : 'var(--red-600)';
+          return `<div style="display:flex;justify-content:flex-end;gap:16px;margin-top:6px;font-size:0.78rem;font-weight:600;">
+            <span style="color:var(--gray-500);">lines total: $${lineTotal.toFixed(2)}</span>
+            <span style="color:var(--gray-500);">invoice total: $${invTotal.toFixed(2)}</span>
+            ${balanced
+              ? '<span style="color:var(--green-600);">✓ balanced</span>'
+              : `<span style="color:var(--red-600);">⚠ difference: $${diff.toFixed(2)}</span>`}
+          </div>`;
+        })()}
         ${!isPosted ? `
           <div style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:0.8rem;">
             <label style="color:var(--gray-500);">date:</label>

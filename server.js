@@ -1003,6 +1003,7 @@ app.get('/api/admin/accounts', requireAdmin, async (req, res) => {
       const accounts = accountsArray.map(a => ({
         id: a.Id,
         name: a.Name,
+        acctNum: a.AcctNum || '',
         type: a.AccountType,
         subType: a.AccountSubType || '',
         fullyQualifiedName: a.FullyQualifiedName || a.Name,
@@ -4002,7 +4003,7 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/upload', requireAdmi
         const relevant = accounts.filter(a =>
           ['Expense', 'Other Expense', 'Cost of Goods Sold', 'Fixed Asset', 'Other Current Asset'].includes(a.AccountType)
         );
-        accountList = relevant.map(a => `- ${a.Name} (${a.AccountType})`).join('\n');
+        accountList = relevant.map(a => `- ${a.AcctNum ? a.AcctNum + ' ' : ''}${a.Name} (${a.AccountType})`).join('\n');
       } catch (_) {}
     }
 
