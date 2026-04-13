@@ -2278,8 +2278,17 @@ app.get('/api/admin/clients/:clientId/close-calendar', requireAdmin, async (req,
 
     const alData = getClientAccruedLiab(clientId);
     const alConfigured = !!alData.accruedLiabilitiesAccount;
-    const alPosted = new Set(
-      (alData.analysisRuns || []).filter(r => r.accrualJE).map(r => r.month)
+    // A month is "complete" if JE was posted OR analysis found $0 to accrue
+    const alComplete = new Set(
+      (alData.analysisRuns || []).filter(r => {
+        if (r.accrualJE) return true; // JE posted
+        // Check if analysis found nothing to accrue
+        const aAccts = (r.partA?.accounts || []).filter(a => a.status !== 'dismissed');
+        const bTxns = (r.partB?.transactions || []).filter(t => t.status !== 'dismissed');
+        const totalA = aAccts.reduce((s, a) => s + (Number(a.accrualAmount) || 0), 0);
+        const totalB = bTxns.filter(t => !t.overlapWithPartA || !aAccts.some(a => a.accountId === t.accountId)).reduce((s, t) => s + (Number(t.accrualAmount) || 0), 0);
+        return Math.round((totalA + totalB) * 100) / 100 <= 0;
+      }).map(r => r.month)
     );
 
     const shiData = getClientShareholderInvoices(clientId);
@@ -2324,7 +2333,7 @@ app.get('/api/admin/clients/:clientId/close-calendar', requireAdmin, async (req,
           shareholderInvoices: !shiConfigured ? 'skipped' : (shiPostedMonths.has(month) ? 'complete' : (isClosed ? 'closed' : 'pending')),
           fixedAssets: faRuns.has(month) ? 'complete' : (isClosed ? 'closed' : 'pending'),
           prepaidExpenses: !ppConfigured ? 'skipped' : ((ppRuns.has(month) || ppScanned.has(month)) ? 'complete' : (isClosed ? 'closed' : 'pending')),
-          accruedLiabilities: !alConfigured ? 'skipped' : (alPosted.has(month) ? 'complete' : (isClosed ? 'closed' : 'pending')),
+          accruedLiabilities: !alConfigured ? 'skipped' : (alComplete.has(month) ? 'complete' : (isClosed ? 'closed' : 'pending')),
         },
       };
     });

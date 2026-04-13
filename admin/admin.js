@@ -1325,11 +1325,31 @@ function buildCloseSteps(period) {
         action = 'analyze-accrued-liab';
         actionLabel = 'view analysis';
         meta = alRun.reversalJE ? `reversal JE dated ${alRun.reversalJE.date}` : '';
+      } else if (alRun) {
+        // Analysis ran — check if there's anything to post
+        const aAccts = (alRun.partA?.accounts || []).filter(a => a.status !== 'dismissed');
+        const bTxns = (alRun.partB?.transactions || []).filter(t => t.status !== 'dismissed');
+        const totalA = aAccts.reduce((s, a) => s + (Number(a.accrualAmount) || 0), 0);
+        const totalB = bTxns.filter(t => !t.overlapWithPartA || !aAccts.some(a => a.accountId === t.accountId)).reduce((s, t) => s + (Number(t.accrualAmount) || 0), 0);
+        const grandTotal = Math.round((totalA + totalB) * 100) / 100;
+        if (grandTotal <= 0) {
+          status = 'complete';
+          statusLabel = 'analyzed — no accrued liabilities detected';
+          action = 'analyze-accrued-liab';
+          actionLabel = 're-analyze';
+          meta = '';
+        } else {
+          status = 'ready';
+          statusLabel = `analysis complete — ${fmtMoney(grandTotal)} to accrue`;
+          action = 'analyze-accrued-liab';
+          actionLabel = 're-analyze';
+          meta = '';
+        }
       } else {
         status = 'ready';
-        statusLabel = alRun ? 'analysis complete — review & post' : 'ready to analyze';
+        statusLabel = 'ready to analyze';
         action = 'analyze-accrued-liab';
-        actionLabel = alRun ? 're-analyze' : 'analyze';
+        actionLabel = 'analyze';
         meta = '';
       }
       return {
@@ -2052,7 +2072,7 @@ async function runAccruedLiabAnalysis() {
     const res = await fetch(`/api/admin/clients/${selectedClientId}/accrued-liabilities/analyze`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ month: currentClosePeriod?.month || undefined }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'analysis failed');
@@ -2169,14 +2189,22 @@ function renderAccruedLiabResults(panel, data) {
   const grandTotal = Math.round((totalA + totalB) * 100) / 100;
 
   if (!data.alreadyPosted) {
-    html += `
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px;background:var(--blue-50);border-radius:8px;font-size:0.85rem;">
-        <div>
-          <strong>total accrual: ${fmtMoney(grandTotal)}</strong>
-          <span style="color:var(--gray-500);margin-left:8px;">(Part A: ${fmtMoney(totalA)} + Part B: ${fmtMoney(totalB)})</span>
-        </div>
-        <button class="btn btn-primary" data-step-action="post-accrued-liab" ${grandTotal <= 0 ? 'disabled' : ''}>post accrual JE + reversal</button>
-      </div>`;
+    if (grandTotal <= 0) {
+      html += `
+        <div style="display:flex;align-items:center;gap:8px;padding:12px;background:var(--green-50);border-radius:8px;font-size:0.85rem;color:var(--green-700);">
+          <span style="font-size:1.1rem;">✓</span>
+          <strong>no accrued liabilities detected — nothing to post</strong>
+        </div>`;
+    } else {
+      html += `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:12px;background:var(--blue-50);border-radius:8px;font-size:0.85rem;">
+          <div>
+            <strong>total accrual: ${fmtMoney(grandTotal)}</strong>
+            <span style="color:var(--gray-500);margin-left:8px;">(Part A: ${fmtMoney(totalA)} + Part B: ${fmtMoney(totalB)})</span>
+          </div>
+          <button class="btn btn-primary" onclick="showAccrualPostModal()">review & post accrual JE</button>
+        </div>`;
+    }
   }
 
   panel.innerHTML = html;
@@ -2225,14 +2253,103 @@ async function toggleAccruedLiabDismiss(part, index, dismiss) {
   } catch (e) { alert('update failed: ' + e.message); }
 }
 
+function showAccrualPostModal() {
+  if (!accruedLiabAnalysis) return;
+  const data = accruedLiabAnalysis;
+  const month = data.month;
+  const alAccount = accruedLiabState.accruedLiabilitiesAccount;
+
+  // Gather non-dismissed items with amounts > 0
+  const aItems = (data.partA?.accounts || []).filter(a => a.status !== 'dismissed' && Number(a.accrualAmount) > 0);
+  const bItems = (data.partB?.transactions || []).filter(t => t.status !== 'dismissed' && Number(t.accrualAmount) > 0);
+  // Exclude Part B items that overlap with Part A
+  const bFiltered = bItems.filter(t => !t.overlapWithPartA || !aItems.some(a => a.accountId === t.accountId));
+  const allItems = [...aItems.map(a => ({ accountName: a.accountName, amount: Number(a.accrualAmount), source: 'A' })),
+                    ...bFiltered.map(t => ({ accountName: t.accountName, amount: Number(t.accrualAmount), source: 'B' }))];
+  const grandTotal = Math.round(allItems.reduce((s, i) => s + i.amount, 0) * 100) / 100;
+
+  // Build JE lines table
+  let linesHtml = '';
+  for (const item of allItems) {
+    linesHtml += `<tr style="border-bottom:1px solid var(--gray-200);">
+      <td style="padding:6px 8px;">${item.accountName}</td>
+      <td style="padding:6px 8px;text-align:center;">Dr</td>
+      <td style="padding:6px 8px;text-align:right;">${fmtMoney(item.amount)}</td>
+      <td style="padding:6px 8px;text-align:right;">—</td>
+      <td style="padding:6px 8px;font-size:0.72rem;color:var(--gray-500);">Part ${item.source}</td>
+    </tr>`;
+  }
+  // Credit line
+  linesHtml += `<tr style="border-bottom:1px solid var(--gray-200);font-weight:600;">
+    <td style="padding:6px 8px;">${alAccount?.name || 'Accrued Liabilities'}</td>
+    <td style="padding:6px 8px;text-align:center;">Cr</td>
+    <td style="padding:6px 8px;text-align:right;">—</td>
+    <td style="padding:6px 8px;text-align:right;">${fmtMoney(grandTotal)}</td>
+    <td style="padding:6px 8px;"></td>
+  </tr>`;
+
+  // Parse period for dates
+  const [y, m] = month.split('-').map(Number);
+  const lastDay = new Date(y, m, 0);
+  const accrualDate = lastDay.toISOString().split('T')[0];
+  const reversalDate = new Date(y, m, 1).toISOString().split('T')[0];
+
+  const overlay = document.createElement('div');
+  overlay.id = 'accrual-post-modal';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;z-index:1000;';
+  overlay.innerHTML = `
+    <div style="background:var(--white);border-radius:12px;padding:28px;width:100%;max-width:680px;max-height:80vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.2);">
+      <h3 style="margin:0 0 4px;font-size:1.05rem;">accrual journal entry — ${formatPeriodLabel(month)}</h3>
+      <p style="margin:0 0 16px;font-size:0.82rem;color:var(--gray-500);">This will create two entries in QBO:</p>
+
+      <div style="margin-bottom:16px;">
+        <div style="font-size:0.82rem;font-weight:600;margin-bottom:6px;">1. Accrual JE — dated ${accrualDate}</div>
+        <table style="width:100%;border-collapse:collapse;font-size:0.82rem;">
+          <thead>
+            <tr style="border-bottom:2px solid var(--gray-300);text-align:left;">
+              <th style="padding:6px 8px;">account</th>
+              <th style="padding:6px 8px;text-align:center;">type</th>
+              <th style="padding:6px 8px;text-align:right;">debit</th>
+              <th style="padding:6px 8px;text-align:right;">credit</th>
+              <th style="padding:6px 8px;">source</th>
+            </tr>
+          </thead>
+          <tbody>${linesHtml}</tbody>
+          <tfoot>
+            <tr style="border-top:2px solid var(--gray-400);font-weight:700;">
+              <td style="padding:6px 8px;">total</td>
+              <td></td>
+              <td style="padding:6px 8px;text-align:right;">${fmtMoney(grandTotal)}</td>
+              <td style="padding:6px 8px;text-align:right;">${fmtMoney(grandTotal)}</td>
+              <td></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <div style="margin-bottom:20px;font-size:0.82rem;color:var(--gray-600);">
+        <strong>2. Auto-reversal JE</strong> — dated ${reversalDate} (same lines, debits/credits reversed)
+      </div>
+
+      <div style="display:flex;justify-content:flex-end;gap:10px;">
+        <button class="btn btn-secondary" onclick="document.getElementById('accrual-post-modal').remove()" style="padding:8px 18px;">cancel</button>
+        <button class="btn btn-primary" onclick="postAccruedLiabilities()" style="padding:8px 18px;">post to QBO</button>
+      </div>
+    </div>`;
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
 async function postAccruedLiabilities() {
   if (!selectedClientId || !accruedLiabAnalysis?.month) return;
   const month = accruedLiabAnalysis.month;
 
-  if (!confirm(`Post accrual JE for ${month}?\n\nThis will create two journal entries in QBO:\n1. Accrual JE dated ${month} last day (Dr expenses / Cr Accrued Liabilities)\n2. Auto-reversal JE dated first day of next month\n\nContinue?`)) return;
+  // Close modal if open
+  const modal = document.getElementById('accrual-post-modal');
 
-  const btn = document.querySelector('[data-step-action="post-accrued-liab"]');
-  if (btn) { btn.textContent = 'posting…'; btn.disabled = true; }
+  // Find the post button in modal or step card
+  const postBtn = modal?.querySelector('.btn-primary') || document.querySelector('[data-step-action="post-accrued-liab"]');
+  if (postBtn) { postBtn.textContent = 'posting…'; postBtn.disabled = true; }
 
   try {
     const res = await fetch(`/api/admin/clients/${selectedClientId}/accrued-liabilities/post`, {
@@ -2243,12 +2360,15 @@ async function postAccruedLiabilities() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'post failed');
 
+    if (modal) modal.remove();
     alert(`Posted accrual JE for ${month}\n\nAccrual: ${fmtMoney(data.accrualJE.totalAmount)} (JE #${data.accrualJE.journalEntryId})\nReversal dated ${data.reversalJE.date} (JE #${data.reversalJE.journalEntryId})`);
     await loadClientAccruedLiab();
     currentClosePeriod = null;
     renderCloseSteps();
-  } catch (e) { alert('post failed: ' + e.message); }
-  if (btn) { btn.textContent = 'post accrual JE + reversal'; btn.disabled = false; }
+  } catch (e) {
+    alert('post failed: ' + e.message);
+    if (postBtn) { postBtn.textContent = 'post to QBO'; postBtn.disabled = false; }
+  }
 }
 
 // Wire settings save button
