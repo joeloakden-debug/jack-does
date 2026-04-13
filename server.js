@@ -209,6 +209,25 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
+/** Call anthropic.messages.create with automatic retry on 429/529 errors */
+async function claudeWithRetry(params, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await anthropic.messages.create(params);
+    } catch (e) {
+      const status = e?.status || e?.statusCode || 0;
+      const isRetryable = status === 429 || status === 529 || (e.message && e.message.includes('Overloaded'));
+      if (isRetryable && attempt < maxRetries) {
+        const delay = attempt * 5000; // 5s, 10s, 15s
+        console.log(`[claude] ${status} on attempt ${attempt}/${maxRetries}, retrying in ${delay / 1000}s...`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
 const JACK_SYSTEM_PROMPT = `You are "jack", the AI accountant for "jack does" — a modern accounting firm.
 
 Your personality:
@@ -4011,7 +4030,7 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/upload', requireAdmi
       .replace('{CLOSE_MONTH}', closeMonth)
       .replace('{ACCOUNT_LIST}', accountList);
 
-    const response = await anthropic.messages.create({
+    const response = await claudeWithRetry({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 1500,
       messages: [{
@@ -4072,7 +4091,11 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/upload', requireAdmi
     res.json({ ok: true, invoice: { ...invoice, fileData: undefined } });
   } catch (e) {
     console.error('[shareholder-invoice] upload error:', e);
-    res.status(500).json({ error: e.message });
+    const isOverloaded = e?.status === 529 || (e.message && e.message.includes('Overloaded'));
+    const msg = isOverloaded
+      ? 'AI service is temporarily busy. Please try again in a minute.'
+      : e.message;
+    res.status(isOverloaded ? 503 : 500).json({ error: msg });
   }
 });
 
