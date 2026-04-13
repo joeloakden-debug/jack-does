@@ -4160,16 +4160,33 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
       }
 
       // Create a Purchase (Expense) transaction — paid from shareholder loan account
-      const purchaseResult = await qbo.createPurchase({
-        date: jeDate,
-        memo,
-        accountId: c.shareholderLoanAccount.id,
-        accountName: c.shareholderLoanAccount.name,
-        accountType: c.shareholderLoanAccount.type || '',
-        vendorId: vendorRef?.Id || null,
-        vendorName: vendorRef?.DisplayName || vendorName || '',
-        lines: expenseLines,
-      }, clientId);
+      console.log('[shareholder-invoice] SH loan account:', JSON.stringify(c.shareholderLoanAccount));
+      console.log('[shareholder-invoice] vendorRef:', JSON.stringify(vendorRef));
+      console.log('[shareholder-invoice] expenseLines:', JSON.stringify(expenseLines));
+
+      let purchaseResult;
+      try {
+        purchaseResult = await qbo.createPurchase({
+          date: jeDate,
+          memo,
+          accountId: c.shareholderLoanAccount.id,
+          accountName: c.shareholderLoanAccount.name,
+          accountType: c.shareholderLoanAccount.type || '',
+          vendorId: vendorRef?.Id || null,
+          vendorName: vendorRef?.DisplayName || vendorName || '',
+          lines: expenseLines,
+        }, clientId);
+      } catch (purchErr) {
+        // Extract full QBO error detail for diagnostics
+        const errStr = typeof purchErr === 'object' ? JSON.stringify(purchErr, null, 2) : String(purchErr);
+        console.error('[shareholder-invoice] createPurchase FAILED:', errStr);
+        const fault = purchErr?.Fault?.Error?.[0]?.Detail
+          || purchErr?.Fault?.Error?.[0]?.Message
+          || purchErr?.error?.Fault?.Error?.[0]?.Detail
+          || purchErr?.message
+          || errStr;
+        throw new Error(`QBO Expense creation failed: ${fault}`);
+      }
       const txnId = purchaseResult.Id;
 
       // Attach the original invoice PDF/image to the expense in QBO
