@@ -4121,12 +4121,35 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
 
     if (qbo.isConnected(clientId)) {
       const jeResult = await qbo.createJournalEntry({ date: jeDate, memo, lines: qboLines }, clientId);
+      const jeId = jeResult.Id;
+
+      // Attach the original invoice PDF/image to the JE in QBO
+      let attachmentId = null;
+      if (invoice.fileData) {
+        try {
+          const fileBuffer = Buffer.from(invoice.fileData, 'base64');
+          const attachResult = await qbo.uploadAttachment({
+            entityId: jeId,
+            entityType: 'JournalEntry',
+            fileName: invoice.fileName,
+            contentType: invoice.fileType || 'application/pdf',
+            buffer: fileBuffer,
+          }, clientId);
+          attachmentId = attachResult?.Id || null;
+          console.log(`[shareholder-invoice] attached ${invoice.fileName} to JE #${jeId} (attachment ${attachmentId})`);
+        } catch (attachErr) {
+          console.error(`[shareholder-invoice] failed to attach file to JE #${jeId}:`, attachErr.message);
+          // Don't fail the whole post — JE was created successfully
+        }
+      }
+
       invoice.journalEntry = {
-        jeId: jeResult.Id,
+        jeId,
         date: jeDate,
         totalAmount,
         lineCount: jeLines.length,
         postedAt: new Date().toISOString(),
+        attachmentId,
       };
     } else {
       // Offline mode — record intent without posting

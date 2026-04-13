@@ -1212,4 +1212,54 @@ module.exports = {
   getTransactionAttachments,
   downloadAttachment,
   getProfitAndLossMonthly,
+  uploadAttachment,
 };
+
+/**
+ * Upload a file and attach it to a QBO entity (e.g. JournalEntry).
+ * Uses the QBO Upload Endpoint (multipart/form-data).
+ * @param {Object} opts - { entityId, entityType, fileName, contentType, buffer }
+ * @param {string} clientId
+ * @returns {Object} The Attachable response from QBO
+ */
+async function uploadAttachment({ entityId, entityType, fileName, contentType, buffer }, clientId = 'default') {
+  const tokenData = await refreshTokenIfNeeded(clientId);
+  const realmId = tokenData.realmId;
+  const url = `${qboApiBase()}/v3/company/${realmId}/upload?minorversion=65`;
+
+  // Build the metadata JSON that QBO expects
+  const metadata = {
+    AttachableRef: [{
+      EntityRef: {
+        type: entityType,
+        value: String(entityId),
+      },
+    }],
+    FileName: fileName,
+    ContentType: contentType,
+  };
+
+  // QBO upload uses multipart/form-data with two parts:
+  // 1) "file_metadata_0" — JSON metadata
+  // 2) "file_content_0" — the actual file bytes
+  const form = new FormData();
+  form.set('file_metadata_0', new Blob([JSON.stringify(metadata)], { type: 'application/json' }), 'metadata.json');
+  form.set('file_content_0', new Blob([buffer], { type: contentType }), fileName);
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenData.accessToken}`,
+      Accept: 'application/json',
+    },
+    body: form,
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`QBO attachment upload failed (${res.status}): ${text}`);
+  }
+
+  const body = await res.json();
+  return body?.AttachableResponse?.[0]?.Attachable || body;
+}
