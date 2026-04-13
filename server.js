@@ -3894,10 +3894,18 @@ Review the attached document carefully and determine:
 5. Which GL account from the list above best fits each line item?
 6. If there are multiple line items that should go to different accounts, list each separately.
 
-CRITICAL: The sum of all line amounts MUST equal the totalAmount exactly. If the invoice includes taxes (GST/HST/PST/VAT), add a separate line for the tax amount. Every dollar on the invoice must be accounted for in the lines.
+CRITICAL RULE — BALANCED LINES:
+The sum of all line amounts MUST equal totalAmount EXACTLY, down to the cent. Before responding, verify: add up every line amount and confirm it equals totalAmount. If it doesn't, you MUST add or adjust lines until it balances.
+
+Common sources of imbalance:
+- Tax (GST/HST/PST/VAT) not included as a line → add a "GST" or "HST" line
+- Rounding → adjust the last line by the difference
+- Shipping/handling fees omitted → add a line
+
+Example: if totalAmount is 775.04 and subtotal items sum to 692.00, the remaining 83.04 is likely tax — add a line like {"description": "GST/HST", "amount": 83.04, "suggestedCategory": "taxes", ...}
 
 IMPORTANT GUIDELINES:
-- Include tax as a separate line item (e.g. "GST", "HST", "PST") so lines sum to the total
+- ALWAYS include tax as a separate line item so lines sum to the total
 - If there are clearly distinct line items for different expense categories, break them out
 - If the document is unclear, describe what you can see and flag for manual review
 - Capital items (equipment, furniture, vehicles over $500) should be categorized as fixed assets
@@ -4024,6 +4032,23 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/upload', requireAdmi
       analysis = JSON.parse(jsonMatch ? jsonMatch[0] : rawText);
     } catch (_) {
       analysis = { vendor: 'Unknown', totalAmount: 0, description: rawText.slice(0, 300), confidence: 'low', reasoning: 'Could not parse AI response', lines: [] };
+    }
+
+    // Validate: lines must sum to totalAmount. If not, add a balancing line.
+    if (analysis.lines && analysis.lines.length > 0 && analysis.totalAmount > 0) {
+      const lineSum = Math.round(analysis.lines.reduce((s, l) => s + Number(l.amount || 0), 0) * 100) / 100;
+      const total = Math.round(Number(analysis.totalAmount) * 100) / 100;
+      const diff = Math.round((total - lineSum) * 100) / 100;
+      if (Math.abs(diff) >= 0.01) {
+        console.log(`[shareholder-invoice] lines sum to ${lineSum}, total is ${total}, adding balancing line of ${diff}`);
+        analysis.lines.push({
+          description: diff > 0 ? 'Tax (GST/HST/PST)' : 'Adjustment',
+          amount: diff,
+          suggestedCategory: diff > 0 ? 'taxes' : 'other',
+          suggestedAccount: '',
+          isCapital: false,
+        });
+      }
     }
 
     // Save the invoice record
