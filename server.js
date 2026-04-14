@@ -34,6 +34,7 @@ if (DATA_DIR !== __dirname) {
 }
 function dataPath(filename) { return path.join(DATA_DIR, filename); }
 const excelReviewService = require('./excel-review-service');
+const prepaidReviewService = require('./prepaid-review-service');
 
 const app = express();
 const PORT = parseInt(process.env.PORT, 10) || 3000;
@@ -3098,6 +3099,122 @@ app.get('/api/admin/clients/:clientId/prepaid-expenses/export-template', require
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// Export current prepaid schedule + run Claude review for the current close period
+app.get('/api/admin/clients/:clientId/prepaid-expenses/export-excel', requireAdmin, async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    const client = CLIENTS[clientId];
+    const clientName = client?.name || clientId;
+    const clientData = getClientPrepaid(clientId);
+
+    // Determine as-of month: query param > latest run month > current month
+    let asOfMonth = req.query.month;
+    if (!asOfMonth) {
+      const runs = (clientData.amortizationRuns || []).slice().sort((a, b) => (b.month || '').localeCompare(a.month || ''));
+      asOfMonth = runs[0]?.month || formatMonthStr(new Date().getFullYear(), new Date().getMonth());
+    }
+
+    const { snapshots, totals } = prepaidReviewService.buildItemSnapshots(clientData, asOfMonth);
+
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'jack does';
+    wb.created = new Date();
+
+    // ---- Sheet 1: Schedule ----
+    const ws = wb.addWorksheet('Prepaid Schedule', { properties: { tabColor: { argb: 'FF3b82f6' } } });
+    ws.mergeCells(1, 1, 1, 11);
+    ws.getCell(1, 1).value = `${clientName} — Prepaid Expenses Schedule (as of ${asOfMonth})`;
+    ws.getCell(1, 1).font = { name: 'Calibri', size: 14, bold: true };
+    ws.getRow(1).height = 22;
+
+    const headers = [
+      'Vendor', 'Description', 'Expense Account', 'Start Date', 'End Date',
+      'Total Months', 'Opening Balance', 'Monthly Amount',
+      'Months Through', 'Recognized To Date', 'Closing Balance',
+    ];
+    const headerRow = 3;
+    headers.forEach((h, i) => {
+      const cell = ws.getCell(headerRow, i + 1);
+      cell.value = h;
+      cell.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1a1a2e' } };
+      cell.alignment = { vertical: 'middle' };
+    });
+    ws.getRow(headerRow).height = 20;
+
+    const widths = [22, 28, 28, 12, 12, 12, 16, 14, 14, 18, 16];
+    widths.forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+
+    const currencyFormat = '"$"#,##0.00;[Red]-"$"#,##0.00';
+    snapshots.forEach((s, idx) => {
+      const r = headerRow + 1 + idx;
+      ws.getCell(r, 1).value = s.vendor;
+      ws.getCell(r, 2).value = s.description;
+      ws.getCell(r, 3).value = s.expenseAccountName;
+      ws.getCell(r, 4).value = s.startDate;
+      ws.getCell(r, 5).value = s.endDate;
+      ws.getCell(r, 6).value = s.totalMonths;
+      ws.getCell(r, 7).value = s.openingBalance;
+      ws.getCell(r, 8).value = s.monthlyAmount;
+      ws.getCell(r, 9).value = s.monthsThrough;
+      ws.getCell(r, 10).value = s.actualRecognized;
+      ws.getCell(r, 11).value = s.closingBalance;
+      [7, 8, 10, 11].forEach(col => { ws.getCell(r, col).numFmt = currencyFormat; });
+    });
+
+    // Totals row
+    const totalsRow = headerRow + 1 + snapshots.length;
+    ws.getCell(totalsRow, 1).value = 'TOTALS';
+    ws.getCell(totalsRow, 1).font = { bold: true };
+    ws.getCell(totalsRow, 7).value = totals.opening;
+    ws.getCell(totalsRow, 10).value = totals.recognized;
+    ws.getCell(totalsRow, 11).value = totals.closing;
+    [7, 10, 11].forEach(col => {
+      ws.getCell(totalsRow, col).numFmt = currencyFormat;
+      ws.getCell(totalsRow, col).font = { bold: true };
+      ws.getCell(totalsRow, col).border = { top: { style: 'thin' } };
+    });
+
+    // ---- Run Claude review (advisory — never blocks download) ----
+    let review = null;
+    try {
+      review = await prepaidReviewService.reviewPrepaid(clientId, clientData, asOfMonth);
+      excelService.addReviewSheet(wb, review, 'Prepaid Expenses Schedule', 'Item');
+      clientData.lastReview = review;
+      savePrepaidExpenses(prepaidData);
+    } catch (e) {
+      console.error('[prepaid-export] review failed:', e.message);
+      review = {
+        status: 'error',
+        summary: `Review could not be completed: ${e.message}`,
+        findings: [],
+        generatedAt: new Date().toISOString(),
+        asOfMonth,
+        reviewError: e.message,
+      };
+      clientData.lastReview = review;
+      savePrepaidExpenses(prepaidData);
+    }
+
+    const fileName = `${clientName} - Prepaid Expenses.xlsx`.replace(/[<>:"/\\|?*]/g, '_');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('X-Review-Status', review?.status || 'unknown');
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (e) {
+    console.error('[prepaid-export] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get the most recent Claude review result for prepaid
+app.get('/api/admin/clients/:clientId/prepaid-expenses/last-review', requireAdmin, (req, res) => {
+  const c = getClientPrepaid(req.params.clientId);
+  res.json({ review: c.lastReview || null });
 });
 
 // Import existing prepaid balances from Excel (replaces the item list)

@@ -1341,7 +1341,9 @@ body {
 .close-step-action-col {
   flex: 0 0 auto;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
 }
 
 .btn-step-action {

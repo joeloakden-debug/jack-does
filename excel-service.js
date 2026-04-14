@@ -524,7 +524,7 @@ function parseWorkbook(workbook) {
 // can travel without losing the audit trail. Called by the server's export
 // endpoint AFTER generateWorkbook returns, so review failures don't block the
 // download itself.
-function addReviewSheet(workbook, review) {
+function addReviewSheet(workbook, review, moduleLabel = 'Fixed Asset Schedule', itemColumnLabel = 'Asset') {
   if (!review) return;
   const sheet = workbook.addWorksheet('Review Notes', {
     properties: { tabColor: { argb: 'FFa855f7' } },
@@ -541,7 +541,7 @@ function addReviewSheet(workbook, review) {
 
   // Title
   sheet.mergeCells(1, 1, 1, 6);
-  sheet.getCell(1, 1).value = 'Claude Review — Fixed Asset Schedule';
+  sheet.getCell(1, 1).value = `Claude Review — ${moduleLabel}`;
   sheet.getCell(1, 1).font = { name: 'Calibri', size: 14, bold: true };
 
   // Status row
@@ -568,7 +568,7 @@ function addReviewSheet(workbook, review) {
 
   // Findings table header
   const headerRowIdx = 6;
-  const headers = ['Severity', 'Category', 'Asset', 'Message', 'Expected', 'Actual'];
+  const headers = ['Severity', 'Category', itemColumnLabel, 'Message', 'Expected', 'Actual'];
   headers.forEach((h, i) => {
     const cell = sheet.getCell(headerRowIdx, i + 1);
     cell.value = h;

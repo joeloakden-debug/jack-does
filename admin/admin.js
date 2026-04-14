@@ -1300,12 +1300,17 @@ function buildCloseSteps(period) {
         actionLabel = eligibleCount > 0 ? 'run amortization' : 're-scan';
         meta = '';
       }
+      // Offer export & Claude review once the period has been processed
+      // (either posted a run or scanned and confirmed nothing to amortize).
+      const canExport = status === 'complete';
       return {
         id: 'prepaid',
         num: 3,
         title: 'prepaid expenses',
         desc: 'amortize prepaid expenses for the period.',
         status, statusLabel, action, actionLabel, meta,
+        secondaryAction: canExport ? 'export-prepaid' : null,
+        secondaryActionLabel: canExport ? 'export & review' : null,
       };
     })(),
     (() => {
@@ -1466,9 +1471,11 @@ function renderStepCard(step) {
            <input type="file" id="shi-file-input" accept=".pdf,.jpg,.jpeg,.png,.gif,.webp" style="display:none;" onchange="handleShiUpload(this)">
          </label>`;
   } else if (step.id === 'prepaid') {
-    // Single scan button — scan doubles as the entry point for the prepaid workflow
+    // Primary action: scan-prepaids (or "view run" if already posted, via step.action)
     const scanDisabled = step.status === 'locked' ? 'disabled' : '';
-    actionBtn = `<button class="btn-step-action" data-step-action="scan-prepaids" ${scanDisabled}>scan expenses</button>`;
+    const primaryAction = step.action || 'scan-prepaids';
+    const primaryLabel = step.actionLabel || 'scan expenses';
+    actionBtn = `<button class="btn-step-action" data-step-action="${primaryAction}" ${scanDisabled}>${primaryLabel}</button>`;
   } else {
     actionBtn = step.action
       ? `<button class="btn-step-action" data-step-action="${step.action}" ${canAct ? '' : 'disabled'}>${step.actionLabel}</button>`
@@ -1478,7 +1485,7 @@ function renderStepCard(step) {
   // Optional secondary action button (e.g. "export & review" on the fixed-assets
   // step after amortization has been posted).
   if (step.secondaryAction && step.secondaryActionLabel) {
-    actionBtn += `<button class="btn-step-action btn-step-action-secondary" data-step-action="${step.secondaryAction}" style="margin-top:6px;">${step.secondaryActionLabel}</button>`;
+    actionBtn += `<button class="btn-step-action btn-step-action-secondary" data-step-action="${step.secondaryAction}">${step.secondaryActionLabel}</button>`;
   }
 
   // The fixed-assets step embeds the reconciliation panel AND the Claude review
@@ -1488,7 +1495,9 @@ function renderStepCard(step) {
   if (step.id === 'shareholder-invoices') {
     extras = `<div id="shi-panel" style="margin-top:12px;"></div>`;
   } else if (step.id === 'prepaid') {
-    extras = `<div id="prepaid-scan-panel" style="margin-top:12px;"></div>`;
+    extras = `
+      <div id="prepaid-scan-panel" style="margin-top:12px;"></div>
+      <div id="prepaid-review-panel" style="display:none;margin-top:12px;"></div>`;
   } else if (step.id === 'accrued-liabilities') {
     extras = `<div id="accrued-liab-panel" style="margin-top:12px;"></div>`;
   } else if (step.id === 'fixed-assets') {
@@ -1649,6 +1658,8 @@ document.addEventListener('click', (e) => {
     openRunPrepaid();
   } else if (action === 'export') {
     exportFixedAssetsExcel();
+  } else if (action === 'export-prepaid') {
+    exportPrepaidExcel();
   }
 });
 
@@ -1688,6 +1699,43 @@ async function exportFixedAssetsExcel() {
       renderReviewPanel({ status: 'error', summary: 'Could not load review result.', findings: [] });
     }
   } catch (e) { alert('export failed: ' + e.message); renderReviewPanel(null); }
+  btns.forEach((b, i) => { b.textContent = originalLabels[i]; b.disabled = false; });
+}
+
+// Export the prepaid schedule and run Claude review for the current close period.
+// Mirrors exportFixedAssetsExcel but targets the prepaid endpoints and panel.
+async function exportPrepaidExcel() {
+  if (!selectedClientId) return;
+  const btns = Array.from(document.querySelectorAll('[data-step-action="export-prepaid"]'));
+  const originalLabels = btns.map(b => b.textContent);
+  btns.forEach(b => { b.textContent = 'exporting & reviewing...'; b.disabled = true; });
+  const panel = document.getElementById('prepaid-review-panel');
+  if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  renderPrepaidReviewPanel({ status: 'loading' });
+  try {
+    const month = currentClosePeriod?.month;
+    const exportUrl = `/api/admin/clients/${selectedClientId}/prepaid-expenses/export-excel${month ? `?month=${month}` : ''}`;
+    const res = await fetch(exportUrl, { headers: { 'Authorization': getAuth() } });
+    if (!res.ok) { alert('export failed'); renderPrepaidReviewPanel(null); return; }
+    const blob = await res.blob();
+    const dlUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = dlUrl;
+    const client = allClients.find(c => c.id === selectedClientId);
+    a.download = `${client?.name || selectedClientId} - Prepaid Expenses.xlsx`;
+    a.click();
+    URL.revokeObjectURL(dlUrl);
+    try {
+      const reviewRes = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/last-review`, {
+        headers: { 'Authorization': getAuth() },
+      });
+      const data = await reviewRes.json();
+      renderPrepaidReviewPanel(data.review);
+    } catch (e) {
+      console.error('Failed to fetch prepaid review:', e);
+      renderPrepaidReviewPanel({ status: 'error', summary: 'Could not load review result.', findings: [] });
+    }
+  } catch (e) { alert('export failed: ' + e.message); renderPrepaidReviewPanel(null); }
   btns.forEach((b, i) => { b.textContent = originalLabels[i]; b.disabled = false; });
 }
 
@@ -3774,11 +3822,26 @@ document.getElementById('qbo-sync-import').addEventListener('click', importSelec
 document.getElementById('qbo-sync-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) document.getElementById('qbo-sync-modal').style.display = 'none'; });
 document.getElementById('btn-suggest-amort').addEventListener('click', suggestAmortization);
 
-// Render the Claude review traffic-light panel below the export button.
+// Render the Claude review traffic-light panel into a given panel element.
+// Used by both the fixed-asset and prepaid review panels.
 // Status can be: clean / warnings / errors / error / skipped / loading / null
-function renderReviewPanel(review) {
-  const panel = document.getElementById('claude-review-panel');
+function _renderReviewPanelInto(panelId, review) {
+  const panel = document.getElementById(panelId);
   if (!panel) return;
+  _renderReviewPanelCore(panel, review, panelId);
+}
+
+function renderPrepaidReviewPanel(review) {
+  _renderReviewPanelInto('prepaid-review-panel', review);
+}
+
+function renderReviewPanel(review) {
+  _renderReviewPanelInto('claude-review-panel', review);
+}
+
+// Shared renderer used by both fixed-asset and prepaid review panels.
+// `panelId` is used to scope dismiss-button handlers so multiple panels can co-exist.
+function _renderReviewPanelCore(panel, review, panelId) {
   if (!review) {
     panel.style.display = 'none';
     panel.innerHTML = '';
@@ -3814,25 +3877,26 @@ function renderReviewPanel(review) {
          <thead><tr>
            <th style="padding:6px 10px;text-align:left;font-size:0.72rem;color:var(--gray-400);text-transform:uppercase;">Severity</th>
            <th style="padding:6px 10px;text-align:left;font-size:0.72rem;color:var(--gray-400);text-transform:uppercase;">Category</th>
-           <th style="padding:6px 10px;text-align:left;font-size:0.72rem;color:var(--gray-400);text-transform:uppercase;">Asset</th>
+           <th style="padding:6px 10px;text-align:left;font-size:0.72rem;color:var(--gray-400);text-transform:uppercase;">Item</th>
            <th style="padding:6px 10px;text-align:left;font-size:0.72rem;color:var(--gray-400);text-transform:uppercase;">Message</th>
          </tr></thead>
          <tbody>${findingRows}</tbody>
        </table>`
     : '<div style="font-size:0.82rem;color:var(--gray-400);margin-top:8px;font-style:italic;">No findings.</div>';
 
+  const dismissBtnId = `btn-dismiss-${panelId}`;
   panel.style.display = '';
   panel.innerHTML = `
     <div style="background:var(--gray-800);border-left:4px solid ${c.bar};padding:12px 16px;border-radius:6px;">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">
         <span style="background:${c.bar};color:#fff;font-weight:700;font-size:0.78rem;padding:3px 10px;border-radius:3px;letter-spacing:0.5px;">${c.label}</span>
         <span style="color:var(--gray-300);font-size:0.9rem;">Claude review — ${escapeHtml(review.asOfMonth || 'most recent period')}</span>
-        <button id="btn-dismiss-review" style="margin-left:auto;background:transparent;border:1px solid var(--gray-600);color:var(--gray-400);font-size:0.75rem;padding:3px 10px;border-radius:3px;cursor:pointer;">dismiss</button>
+        <button id="${dismissBtnId}" style="margin-left:auto;background:transparent;border:1px solid var(--gray-600);color:var(--gray-400);font-size:0.75rem;padding:3px 10px;border-radius:3px;cursor:pointer;">dismiss</button>
       </div>
       <div style="color:var(--gray-200);font-size:0.88rem;line-height:1.4;">${escapeHtml(review.summary || '')}</div>
       ${findingsTable}
     </div>`;
-  document.getElementById('btn-dismiss-review').addEventListener('click', () => renderReviewPanel(null));
+  document.getElementById(dismissBtnId).addEventListener('click', () => _renderReviewPanelInto(panelId, null));
 }
 
 function escapeHtml(s) {
