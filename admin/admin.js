@@ -2159,13 +2159,39 @@ function renderAccruedLiabResults(panel, data) {
   const flaggedA = partA.accounts.filter(a => a.status !== 'dismissed');
   const flaggedB = partB.transactions.filter(t => t.status !== 'dismissed');
 
+  const diag = partA.diagnostics || null;
+  const partBStatus = partB.skipped
+    ? `<span style="color:var(--gray-500);">skipped — ${partB.note || 'window invalid'}</span>`
+    : `${partB.transactions.length} subsequent transaction${partB.transactions.length !== 1 ? 's' : ''} (${partB.windowStart} → ${partB.windowEnd})`;
+
   let html = `
     <div style="padding:12px;background:var(--gray-50);border-radius:8px;margin-bottom:10px;font-size:0.85rem;">
       <strong>analysis for ${data.month}</strong> —
       Part A: ${partA.accounts.length} expense account${partA.accounts.length !== 1 ? 's' : ''} flagged (${partA.lookbackMonths}-month lookback) |
-      Part B: ${partB.transactions.length} subsequent transaction${partB.transactions.length !== 1 ? 's' : ''} (${partB.windowStart} → ${partB.windowEnd})
+      Part B: ${partBStatus}
       ${data.alreadyPosted ? '<br><span style="color:var(--green-600);">✓ accrual JE already posted</span>' : ''}
+      ${diag ? `
+        <div style="margin-top:6px;font-size:0.75rem;color:var(--gray-600);">
+          scanned ${diag.totalAccounts} P&amp;L account${diag.totalAccounts !== 1 ? 's' : ''}:
+          ${diag.evaluated} evaluated,
+          ${diag.negligibleHistory} skipped (no history),
+          ${diag.excluded} excluded by settings,
+          ${diag.withinTolerance} within materiality tolerance,
+          ${diag.zeroCurrentBelowFrequency} zero this month but below frequency threshold
+        </div>` : ''}
     </div>`;
+
+  // Near-miss panel: accounts that appeared last month but didn't meet the flag threshold
+  if (partA.accounts.length === 0 && diag && diag.nearMiss && diag.nearMiss.length > 0) {
+    html += `
+      <div style="padding:10px 12px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;margin-bottom:10px;font-size:0.8rem;">
+        <div style="font-weight:600;color:#854d0e;margin-bottom:4px;">⚠ possible missed accruals — these accounts had activity last month but didn't meet the recurring-pattern threshold:</div>
+        <ul style="margin:4px 0 0 18px;padding:0;color:#713f12;">
+          ${diag.nearMiss.map(nm => `<li>${nm.accountName} — last month: ${fmtMoney(nm.priorMonthAmount)} (seen in ${nm.frequency} of prior ${partA.lookbackMonths} months)</li>`).join('')}
+        </ul>
+        <div style="margin-top:6px;font-size:0.75rem;color:#713f12;">If any of these are recurring, review them manually or record a one-off accrual via journal entry.</div>
+      </div>`;
+  }
 
   // Part A table
   if (partA.accounts.length > 0) {
@@ -2192,7 +2218,7 @@ function renderAccruedLiabResults(panel, data) {
               <td style="padding:6px 8px;text-align:right;">${fmtMoney(a.average)}</td>
               <td style="padding:6px 8px;text-align:right;">${fmtMoney(a.currentMonth)}</td>
               <td style="padding:6px 8px;text-align:right;color:var(--red-600);">${fmtMoney(a.gap)}</td>
-              <td style="padding:6px 8px;"><span style="font-size:0.72rem;padding:1px 6px;border-radius:4px;background:${a.reason === 'missing' ? '#fef2f2' : '#fef9c3'};color:${a.reason === 'missing' ? '#991b1b' : '#854d0e'};">${a.reason}</span></td>
+              <td style="padding:6px 8px;"><span style="font-size:0.72rem;padding:1px 6px;border-radius:4px;background:${String(a.reason).startsWith('missing') ? '#fef2f2' : '#fef9c3'};color:${String(a.reason).startsWith('missing') ? '#991b1b' : '#854d0e'};" title="${a.reason === 'missing_new_recurring' ? 'Appeared last month but not this month — likely a new recurring subscription.' : a.reason === 'missing_recurring' ? 'Recurring pattern (including last month) but no current-month activity.' : a.reason === 'missing' ? 'Account with established history has no current-month activity.' : 'Current-month activity is below the materiality-adjusted 18-month average.'}">${String(a.reason).replace(/_/g, ' ')}</span></td>
               <td style="padding:6px 8px;text-align:right;"><input type="number" step="0.01" value="${a.accrualAmount}" style="width:90px;padding:2px 4px;text-align:right;border:1px solid var(--gray-300);border-radius:3px;" data-al-part="A" data-al-index="${i}" onchange="updateAccruedLiabItem(this)" ${dismissed ? 'disabled' : ''}></td>
               <td style="padding:6px 8px;text-align:center;">
                 ${dismissed

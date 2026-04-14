@@ -3756,9 +3756,25 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
     const excludeSet = new Set(c.excludedAccountIds || []);
     const partAAccounts = [];
     const priorMonths = parsed.months.filter(m => m < targetMonth);
+    // Prior month (immediately before targetMonth) — used for "recent recurring" signal
+    const priorMonthKey = (() => {
+      const d = new Date(year, monthIndex - 1, 1);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    })();
+
+    // Diagnostics: account for every P&L row we considered, so the UI can explain why nothing was flagged
+    const diagnostics = {
+      totalAccounts: parsed.accounts.length,
+      excluded: 0,
+      negligibleHistory: 0,
+      zeroCurrentBelowFrequency: 0, // current=0 but frequency too low to flag
+      withinTolerance: 0, // has history + current entry but inside materiality band
+      evaluated: 0,
+      nearMiss: [], // accounts with recent prior-month activity that didn't quite flag (for user visibility)
+    };
 
     for (const acct of parsed.accounts) {
-      if (excludeSet.has(acct.accountId)) continue;
+      if (excludeSet.has(acct.accountId)) { diagnostics.excluded++; continue; }
       let sumPrior = 0, countPrior = 0;
       for (const m of priorMonths) {
         const val = acct.monthlyTotals[m] || 0;
@@ -3767,24 +3783,63 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
       const average = priorMonths.length > 0 ? sumPrior / priorMonths.length : 0;
       const frequency = countPrior; // how many of the prior months had activity
       const currentMonth = acct.monthlyTotals[targetMonth] || 0;
+      const appearedLastMonth = !!acct.monthlyTotals[priorMonthKey];
+      const priorMonthAmount = acct.monthlyTotals[priorMonthKey] || 0;
 
       // Skip accounts with negligible history
-      if (average < 1 && currentMonth < 1) continue;
+      if (average < 1 && currentMonth < 1 && !appearedLastMonth) {
+        diagnostics.negligibleHistory++;
+        continue;
+      }
+      diagnostics.evaluated++;
 
       const gap = Math.round((average - currentMonth) * 100) / 100;
       const thresholdPct = c.materialityThreshold / 100;
       let flagged = false;
       let reason = '';
 
-      if (currentMonth === 0 && average >= 1 && frequency >= 3) {
-        flagged = true;
-        reason = 'missing';
+      // MISSING: current month has nothing, but the account is clearly recurring
+      // Tiered detection so we catch both established patterns (3+ months)
+      // AND newer subscriptions (appeared last month + at least once before, or just last month with material amount)
+      if (currentMonth === 0) {
+        if (average >= 1 && frequency >= 3) {
+          flagged = true;
+          reason = 'missing';
+        } else if (appearedLastMonth && frequency >= 2) {
+          flagged = true;
+          reason = 'missing_recurring';
+        } else if (appearedLastMonth && priorMonthAmount >= 1) {
+          // New subscription: showed up last month with material spend, but not this month
+          flagged = true;
+          reason = 'missing_new_recurring';
+        } else if (average >= 1 && frequency >= 2) {
+          flagged = true;
+          reason = 'missing';
+        } else {
+          diagnostics.zeroCurrentBelowFrequency++;
+          if (appearedLastMonth) {
+            diagnostics.nearMiss.push({
+              accountId: acct.accountId,
+              accountName: acct.accountName,
+              priorMonthAmount: Math.round(priorMonthAmount * 100) / 100,
+              frequency,
+              note: 'appeared last month but frequency too low',
+            });
+          }
+        }
       } else if (average > 0 && currentMonth < average * (1 - thresholdPct) && frequency >= 3) {
         flagged = true;
         reason = 'below_average';
+      } else {
+        diagnostics.withinTolerance++;
       }
 
       if (flagged) {
+        // For new-recurring where 18-mo average is misleadingly low, use prior-month amount as suggested accrual
+        let suggestedAccrual = gap;
+        if (reason === 'missing_new_recurring' || reason === 'missing_recurring') {
+          suggestedAccrual = Math.round(priorMonthAmount * 100) / 100;
+        }
         partAAccounts.push({
           accountId: acct.accountId,
           accountName: acct.accountName,
@@ -3792,58 +3847,71 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
           average: Math.round(average * 100) / 100,
           frequency,
           currentMonth: Math.round(currentMonth * 100) / 100,
+          priorMonthAmount: Math.round(priorMonthAmount * 100) / 100,
+          appearedLastMonth,
           gap,
           flagged: true,
           reason,
-          accrualAmount: gap,
+          accrualAmount: suggestedAccrual,
           status: 'pending',
         });
       }
     }
 
-    // Sort by gap descending
-    partAAccounts.sort((a, b) => b.gap - a.gap);
+    // Sort by accrual amount (absolute) descending so biggest items bubble up regardless of reason
+    partAAccounts.sort((a, b) => Math.abs(b.accrualAmount) - Math.abs(a.accrualAmount));
 
     // ---- Part B: subsequent events ----
     const nextMonthFirst = new Date(year, monthIndex + 1, 1);
     const windowStart = nextMonthFirst.toISOString().split('T')[0];
-    const windowEnd = new Date().toISOString().split('T')[0];
+    const todayStr = new Date().toISOString().split('T')[0];
+    const windowEnd = todayStr;
+    // If we're analyzing the current in-progress month, the "subsequent events" window is invalid
+    // (windowStart is in the future). Skip the QBO fetch and note it in the diagnostics.
+    const partBSkipped = windowStart > windowEnd;
+    let partBNote = null;
 
-    console.log(`[accrued-liab] Part B: subsequent events ${windowStart} → ${windowEnd}`);
+    let subsequentTxns = [];
+    if (partBSkipped) {
+      partBNote = `Skipped — analyzing ${targetMonth} before it has closed (today is ${todayStr}). Subsequent-events window starts ${windowStart}.`;
+      console.log(`[accrued-liab] Part B: ${partBNote}`);
+    } else {
+      console.log(`[accrued-liab] Part B: subsequent events ${windowStart} → ${windowEnd}`);
 
-    const [billsRes, purchasesRes] = await Promise.all([
-      qbo.getBills(windowStart, windowEnd, 500, clientId).catch(() => null),
-      qbo.getExpenseTransactions(windowStart, windowEnd, 500, clientId).catch(() => null),
-    ]);
+      const [billsRes, purchasesRes] = await Promise.all([
+        qbo.getBills(windowStart, windowEnd, 500, clientId).catch(() => null),
+        qbo.getExpenseTransactions(windowStart, windowEnd, 500, clientId).catch(() => null),
+      ]);
 
-    const bills = (billsRes?.QueryResponse?.Bill || []).map(b => ({
-      txnId: b.Id, txnType: 'Bill', date: b.TxnDate,
-      amount: Number(b.TotalAmt || 0),
-      vendor: b.VendorRef?.name || 'Unknown',
-      memo: b.PrivateNote || b.Memo || '',
-      accountId: b.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.value || '',
-      accountName: b.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.name || '',
-    }));
-    const purchases = (purchasesRes?.QueryResponse?.Purchase || []).map(p => ({
-      txnId: p.Id, txnType: 'Purchase', date: p.TxnDate,
-      amount: Number(p.TotalAmt || 0),
-      vendor: p.EntityRef?.name || 'Unknown',
-      memo: p.PrivateNote || p.Memo || '',
-      accountId: p.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.value || '',
-      accountName: p.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.name || '',
-    }));
-
-    const subsequentTxns = [...bills, ...purchases]
-      .filter(t => !excludeSet.has(t.accountId) && t.amount > 0)
-      .sort((a, b) => b.amount - a.amount)
-      .map(t => ({
-        ...t,
-        flagged: true,
-        accrualAmount: t.amount,
-        status: 'pending',
-        // Note overlap with Part A
-        overlapWithPartA: partAAccounts.some(a => a.accountId === t.accountId),
+      const bills = (billsRes?.QueryResponse?.Bill || []).map(b => ({
+        txnId: b.Id, txnType: 'Bill', date: b.TxnDate,
+        amount: Number(b.TotalAmt || 0),
+        vendor: b.VendorRef?.name || 'Unknown',
+        memo: b.PrivateNote || b.Memo || '',
+        accountId: b.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.value || '',
+        accountName: b.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.name || '',
       }));
+      const purchases = (purchasesRes?.QueryResponse?.Purchase || []).map(p => ({
+        txnId: p.Id, txnType: 'Purchase', date: p.TxnDate,
+        amount: Number(p.TotalAmt || 0),
+        vendor: p.EntityRef?.name || 'Unknown',
+        memo: p.PrivateNote || p.Memo || '',
+        accountId: p.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.value || '',
+        accountName: p.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.name || '',
+      }));
+
+      subsequentTxns = [...bills, ...purchases]
+        .filter(t => !excludeSet.has(t.accountId) && t.amount > 0)
+        .sort((a, b) => b.amount - a.amount)
+        .map(t => ({
+          ...t,
+          flagged: true,
+          accrualAmount: t.amount,
+          status: 'pending',
+          // Note overlap with Part A
+          overlapWithPartA: partAAccounts.some(a => a.accountId === t.accountId),
+        }));
+    }
 
     // Store the run
     const run = {
@@ -3851,11 +3919,15 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
       ranAt: new Date().toISOString(),
       partA: {
         lookbackMonths: priorMonths.length,
+        priorMonth: priorMonthKey,
         accounts: partAAccounts,
+        diagnostics,
       },
       partB: {
         windowStart,
         windowEnd,
+        skipped: partBSkipped,
+        note: partBNote,
         transactions: subsequentTxns,
       },
       accrualJE: null,
