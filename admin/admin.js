@@ -1382,6 +1382,11 @@ function buildCloseSteps(period) {
         : 'ready to run',
       action: 'run-amort',
       actionLabel: runForThisMonth ? 'view run' : 'run amortization',
+      // Show secondary "export & review" button once amortization has been posted
+      // so the user can run the Excel export / Claude review immediately without
+      // waiting for step 9.
+      secondaryAction: runForThisMonth ? 'export' : null,
+      secondaryActionLabel: runForThisMonth ? 'export & review' : null,
       meta: lastRun && !runForThisMonth ? `last run was ${lastRun.month}` : '',
     },
     {
@@ -1470,8 +1475,15 @@ function renderStepCard(step) {
       : `<span class="btn-step-action-placeholder">${step.actionLabel}</span>`;
   }
 
-  // The fixed-assets step embeds the reconciliation panel and the export step
-  // embeds the Claude review panel. Both are hidden until their action runs.
+  // Optional secondary action button (e.g. "export & review" on the fixed-assets
+  // step after amortization has been posted).
+  if (step.secondaryAction && step.secondaryActionLabel) {
+    actionBtn += `<button class="btn-step-action btn-step-action-secondary" data-step-action="${step.secondaryAction}" style="margin-top:6px;">${step.secondaryActionLabel}</button>`;
+  }
+
+  // The fixed-assets step embeds the reconciliation panel AND the Claude review
+  // panel (so results appear right under the step when user clicks "export &
+  // review"). The export step (9) is kept as a fallback entry point.
   let extras = '';
   if (step.id === 'shareholder-invoices') {
     extras = `<div id="shi-panel" style="margin-top:12px;"></div>`;
@@ -1480,9 +1492,9 @@ function renderStepCard(step) {
   } else if (step.id === 'accrued-liabilities') {
     extras = `<div id="accrued-liab-panel" style="margin-top:12px;"></div>`;
   } else if (step.id === 'fixed-assets') {
-    extras = `<div id="reconciliation-panel" style="display:none;margin-top:12px;"></div>`;
-  } else if (step.id === 'export') {
-    extras = `<div id="claude-review-panel" style="display:none;margin-top:12px;"></div>`;
+    extras = `
+      <div id="reconciliation-panel" style="display:none;margin-top:12px;"></div>
+      <div id="claude-review-panel" style="display:none;margin-top:12px;"></div>`;
   }
 
   return `
@@ -1644,8 +1656,13 @@ document.addEventListener('click', (e) => {
 // it's easier to reason about than an anonymous listener).
 async function exportFixedAssetsExcel() {
   if (!selectedClientId) return;
-  const btn = document.querySelector('[data-step-action="export"]');
-  if (btn) { btn.textContent = 'exporting & reviewing...'; btn.disabled = true; }
+  // Handle all "export" buttons on the page (primary on step 9, secondary on fixed-assets card)
+  const btns = Array.from(document.querySelectorAll('[data-step-action="export"]'));
+  const originalLabels = btns.map(b => b.textContent);
+  btns.forEach(b => { b.textContent = 'exporting & reviewing...'; b.disabled = true; });
+  // Scroll the review panel into view so the user sees the result as it loads
+  const panel = document.getElementById('claude-review-panel');
+  if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
   renderReviewPanel({ status: 'loading' });
   try {
     const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/export-excel`, {
@@ -1671,7 +1688,7 @@ async function exportFixedAssetsExcel() {
       renderReviewPanel({ status: 'error', summary: 'Could not load review result.', findings: [] });
     }
   } catch (e) { alert('export failed: ' + e.message); renderReviewPanel(null); }
-  if (btn) { btn.textContent = 'export to Excel'; btn.disabled = false; }
+  btns.forEach((b, i) => { b.textContent = originalLabels[i]; b.disabled = false; });
 }
 
 // ========================================
