@@ -2172,6 +2172,8 @@ function renderAccruedLiabResults(panel, data) {
       ${data.alreadyPosted ? '<br><span style="color:var(--green-600);">✓ accrual JE already posted</span>' : ''}
       ${diag ? `
         <div style="margin-top:6px;font-size:0.75rem;color:var(--gray-600);">
+          P&amp;L ${diag.pnlRangeStart || '?'} → ${diag.pnlRangeEnd || '?'} returned ${diag.monthsReturned ?? '?'} month column${diag.monthsReturned === 1 ? '' : 's'} (${diag.priorMonthsCount ?? '?'} prior to ${data.month}).
+          ${diag.monthsReturned === 0 ? '<span style="color:var(--red-600);font-weight:600;">⚠ P&amp;L column parsing returned zero months — analysis cannot run until this is fixed.</span><br>' : ''}
           scanned ${diag.totalAccounts} P&amp;L account${diag.totalAccounts !== 1 ? 's' : ''}:
           ${diag.evaluated} evaluated,
           ${diag.negligibleHistory} skipped (no history),

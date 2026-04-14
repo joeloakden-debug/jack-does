@@ -3678,19 +3678,73 @@ function parsePnlMonthlyReport(report) {
   const columns = report?.Columns?.Column || [];
   // First column is the account name, rest are months + total
   const monthLabels = [];
+  const MONTH_NAMES = {
+    jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+    jul: 6, aug: 7, sep: 8, sept: 8, oct: 9, nov: 10, dec: 11,
+    january: 0, february: 1, march: 2, april: 3, june: 5, july: 6,
+    august: 7, september: 8, october: 9, november: 10, december: 11,
+  };
+
   for (let i = 1; i < columns.length; i++) {
-    const colTitle = columns[i].ColTitle || '';
-    // Month columns look like "Jan 2025", "Feb 2025", etc. or sometimes "YYYY-MM"
-    // The last column is often "Total" — skip it
-    if (colTitle.toLowerCase() === 'total') continue;
-    // Parse month name to YYYY-MM
-    const d = new Date(colTitle + ' 1');
-    if (!isNaN(d)) {
-      monthLabels.push({
-        idx: i,
-        month: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
-      });
+    const col = columns[i] || {};
+    const colTitle = (col.ColTitle || '').trim();
+    const colType = col.ColType || '';
+    // Skip the trailing "Total" / "YTD" / summary columns
+    if (!colTitle) continue;
+    if (/^total$/i.test(colTitle)) continue;
+    if (colType && !/^money$/i.test(colType) && colType !== '') {
+      // Some QBO responses use ColType "Money" for month cols; skip non-money cols like "String"
+      // but don't be strict here — keep parsing by title/metadata.
     }
+
+    // 1) Prefer MetaData.StartDate (always ISO "YYYY-MM-DD") — most reliable
+    let month = null;
+    const metaArr = Array.isArray(col.MetaData) ? col.MetaData
+      : (Array.isArray(col.MetaData?.Metadata) ? col.MetaData.Metadata : []);
+    for (const m of metaArr) {
+      if ((m?.Name || '').toLowerCase() === 'startdate' && m.Value) {
+        const parts = String(m.Value).split('-');
+        if (parts.length >= 2) {
+          month = `${parts[0]}-${parts[1].padStart(2, '0')}`;
+          break;
+        }
+      }
+    }
+
+    // 2) Fall back to parsing ColTitle strings like "Apr 2026" or "April 2026" or "2026-04"
+    if (!month) {
+      // ISO-ish "YYYY-MM" or "YYYY-MM-DD"
+      const isoMatch = colTitle.match(/^(\d{4})-(\d{1,2})(?:-\d{1,2})?$/);
+      if (isoMatch) {
+        month = `${isoMatch[1]}-${isoMatch[2].padStart(2, '0')}`;
+      }
+    }
+    if (!month) {
+      // "MMM YYYY" or "MMMM YYYY" (+ optional period like "Apr. 2026")
+      const mnMatch = colTitle.match(/^([A-Za-z]+)\.?\s+(\d{4})$/);
+      if (mnMatch) {
+        const mi = MONTH_NAMES[mnMatch[1].toLowerCase()];
+        if (mi !== undefined) {
+          month = `${mnMatch[2]}-${String(mi + 1).padStart(2, '0')}`;
+        }
+      }
+    }
+    if (!month) {
+      // Last-ditch: native Date parsing of "MMM DD, YYYY" style
+      const d = new Date(colTitle);
+      if (!isNaN(d)) {
+        month = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      }
+    }
+
+    if (month) {
+      monthLabels.push({ idx: i, month });
+    }
+  }
+
+  if (monthLabels.length === 0 && columns.length > 1) {
+    console.warn('[parsePnlMonthlyReport] no month columns parsed. Column titles:',
+      columns.slice(1).map(c => `${c.ColTitle || ''}(${c.ColType || ''})`).join(' | '));
   }
 
   const accounts = [];
@@ -3765,6 +3819,10 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
     // Diagnostics: account for every P&L row we considered, so the UI can explain why nothing was flagged
     const diagnostics = {
       totalAccounts: parsed.accounts.length,
+      monthsReturned: parsed.months.length,
+      priorMonthsCount: priorMonths.length,
+      pnlRangeStart: lookbackStartStr,
+      pnlRangeEnd: periodEnd,
       excluded: 0,
       negligibleHistory: 0,
       zeroCurrentBelowFrequency: 0, // current=0 but frequency too low to flag
@@ -3772,6 +3830,10 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
       evaluated: 0,
       nearMiss: [], // accounts with recent prior-month activity that didn't quite flag (for user visibility)
     };
+
+    if (parsed.months.length === 0) {
+      console.warn(`[accrued-liab] QBO P&L returned 0 month columns for ${clientId} range ${lookbackStartStr}→${periodEnd}. Check that summarize_columns_by:Month is honored.`);
+    }
 
     for (const acct of parsed.accounts) {
       if (excludeSet.has(acct.accountId)) { diagnostics.excluded++; continue; }
