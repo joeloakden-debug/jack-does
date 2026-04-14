@@ -1968,11 +1968,37 @@ async function reconcileScheduleToQBO(clientId, schedule) {
     }
   }
   walkRows(tb?.Rows?.Row);
+  console.log(`[fixed-assets] TB accounts found (${tbBalances.size}):`, Array.from(tbBalances.keys()).join(', '));
+
+  // Fuzzy account name lookup — handles account number prefixes (e.g. "1500 Computer hardware"
+  // vs "Computer hardware"), case differences, and leading/trailing whitespace.
+  function findTBBalance(targetName) {
+    if (!targetName) return undefined;
+    // 1. Exact match
+    if (tbBalances.has(targetName)) return tbBalances.get(targetName);
+    // 2. Case-insensitive match
+    const targetLower = targetName.toLowerCase().trim();
+    for (const [key, val] of tbBalances) {
+      if (key.toLowerCase().trim() === targetLower) return val;
+    }
+    // 3. Strip leading account number prefix (e.g. "1500 " or "1500-") from both sides
+    const stripNum = s => s.replace(/^\d{3,5}[\s\-.:]+/, '').trim().toLowerCase();
+    const targetStripped = stripNum(targetName);
+    for (const [key, val] of tbBalances) {
+      if (stripNum(key) === targetStripped) return val;
+    }
+    // 4. Check if one contains the other (for partial matches like sub-accounts)
+    for (const [key, val] of tbBalances) {
+      const keyLower = key.toLowerCase().trim();
+      if (keyLower.includes(targetLower) || targetLower.includes(keyLower)) return val;
+    }
+    return undefined;
+  }
 
   for (const group of schedule.glAccounts) {
     const glName = group.glAccountName;
     // Cost check: compare schedule cost subtotal to TB balance for this account
-    const tbCost = tbBalances.get(glName);
+    const tbCost = findTBBalance(glName);
     const schedCost = group.subtotal.cost;
     if (tbCost !== undefined) {
       const diff = Math.round((tbCost - schedCost) * 100) / 100;
@@ -1999,7 +2025,7 @@ async function reconcileScheduleToQBO(clientId, schedule) {
     // Accum check: try to find an accum account that matches this GL account
     const accumName = group.assets[0]?.accumAccountName || '';
     if (accumName) {
-      const tbAccum = tbBalances.get(accumName);
+      const tbAccum = findTBBalance(accumName);
       const schedAccum = group.subtotal.closingAccum;
       if (tbAccum !== undefined) {
         // Accum is a contra asset — TB credit balance shows as negative
