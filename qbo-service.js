@@ -298,10 +298,13 @@ async function getProfitAndLoss(startDate, endDate, clientId = 'default') {
  */
 async function getProfitAndLossMonthly(startDate, endDate, clientId = 'default') {
   const qb = await getQBClient(clientId);
+  // NOTE: QBO API parameter is `summarize_column_by` (singular). The plural form
+  // is silently ignored, which causes QBO to return a single Total column instead
+  // of one column per month — making the 18-month accrual lookback impossible.
   return qbPromise(qb, 'reportProfitAndLoss', {
     start_date: startDate,
     end_date: endDate,
-    summarize_columns_by: 'Month',
+    summarize_column_by: 'Month',
   });
 }
 
