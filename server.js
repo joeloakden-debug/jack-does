@@ -3943,11 +3943,12 @@ The company's chart of accounts includes these expense/asset accounts:
 
 Review the attached document carefully and determine:
 1. What is the vendor name?
-2. What is the invoice date?
-3. What is the total amount (including taxes)?
-4. What is this invoice for? (description)
-5. Which GL account from the list above best fits each line item?
-6. If there are multiple line items that should go to different accounts, list each separately.
+2. What is the invoice/receipt number? (look for "Invoice #", "Inv No.", "Receipt #", "Order #", "Reference #", etc.)
+3. What is the invoice date?
+4. What is the total amount (including taxes)?
+5. What is this invoice for? (description)
+6. Which GL account from the list above best fits each line item?
+7. If there are multiple line items that should go to different accounts, list each separately.
 
 CRITICAL RULE — BALANCED LINES:
 The sum of all line amounts MUST equal totalAmount EXACTLY, down to the cent. Before responding, verify: add up every line amount and confirm it equals totalAmount. If it doesn't, you MUST add or adjust lines until it balances.
@@ -3970,6 +3971,7 @@ IMPORTANT GUIDELINES:
 Respond with ONLY a JSON object (no markdown, no explanation):
 {
   "vendor": "vendor name",
+  "invoiceNumber": "the invoice/receipt/order number from the document, or empty string if not found",
   "invoiceDate": "YYYY-MM-DD",
   "totalAmount": number,
   "description": "what this invoice is for",
@@ -4343,6 +4345,7 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
       const purchaseResult = await qbo.createPurchase({
         date: jeDate,
         memo,
+        docNumber: invoice.analysis.invoiceNumber || '',
         accountId: c.shareholderLoanAccount.id,
         accountName: c.shareholderLoanAccount.name,
         accountType: c.shareholderLoanAccount.type || '',

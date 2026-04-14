@@ -1102,6 +1102,11 @@ async function createPurchase(purchase, clientId = 'default') {
     Line: lines,
   };
 
+  // Set invoice/reference number if provided
+  if (purchase.docNumber) {
+    purchaseObj.DocNumber = String(purchase.docNumber);
+  }
+
   // Tax handling: TaxExcluded means line amounts are pre-tax, QBO adds tax on top
   if (purchase.globalTaxCalc) {
     purchaseObj.GlobalTaxCalculation = purchase.globalTaxCalc;
