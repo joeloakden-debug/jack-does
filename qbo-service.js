@@ -249,10 +249,24 @@ function qbPromise(qb, method, ...args) {
   return new Promise((resolve, reject) => {
     qb[method](...args, (err, data) => {
       if (err) {
-        // node-quickbooks often passes QBO response body as `err` directly
-        // Wrap it in an Error with the detail extracted
+        // Extract the real QBO error detail from various error shapes:
+        // 1. Axios Error: err.response.data.Fault.Error[0].Detail
+        // 2. Raw QBO response body: err.Fault.Error[0].Detail
+        // 3. Plain Error with message
+        let qboDetail = null;
+
+        // Check axios response.data first (Error instance from HTTP client)
+        if (err.response?.data) {
+          const rd = err.response.data;
+          const fault = rd?.Fault?.Error?.[0];
+          qboDetail = fault?.Detail || fault?.Message || (typeof rd === 'string' ? rd : JSON.stringify(rd));
+        }
+
         if (err instanceof Error) {
-          reject(err);
+          const wrapped = new Error(qboDetail || err.message);
+          wrapped.qboResponse = err.response?.data || null;
+          wrapped.statusCode = err.response?.status || err.statusCode || null;
+          reject(wrapped);
         } else {
           const fault = err?.Fault?.Error?.[0];
           const msg = fault?.Detail || fault?.Message || JSON.stringify(err);

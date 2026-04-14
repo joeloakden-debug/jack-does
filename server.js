@@ -4399,9 +4399,16 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
 
     res.json({ ok: true, journalEntry: invoice.journalEntry });
   } catch (e) {
-    console.error('[shareholder-invoice] post error:', e);
-    // Extract detailed QBO error if available
-    const qboFault = e?.Fault?.Error?.[0]?.Detail || e?.Fault?.Error?.[0]?.Message || '';
+    console.error('[shareholder-invoice] post error:', e.message);
+    if (e.qboResponse) console.error('[shareholder-invoice] QBO response:', JSON.stringify(e.qboResponse, null, 2));
+    if (e.response?.data) console.error('[shareholder-invoice] axios response data:', JSON.stringify(e.response.data, null, 2));
+    // Extract detailed QBO error from all possible shapes
+    const qboFault = e?.qboResponse?.Fault?.Error?.[0]?.Detail
+      || e?.qboResponse?.Fault?.Error?.[0]?.Message
+      || e?.Fault?.Error?.[0]?.Detail
+      || e?.Fault?.Error?.[0]?.Message
+      || e?.response?.data?.Fault?.Error?.[0]?.Detail
+      || '';
     const detail = qboFault || e.message;
     console.error('[shareholder-invoice] detail:', detail);
     res.status(e.statusCode || 500).json({ error: detail });
