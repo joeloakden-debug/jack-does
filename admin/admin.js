@@ -2180,6 +2180,11 @@ function renderAccruedLiabResults(panel, data) {
           ${diag.excluded} excluded by settings,
           ${diag.withinTolerance} within materiality tolerance,
           ${diag.zeroCurrentBelowFrequency} zero this month but below frequency threshold
+          ${diag.monthsReturned === 0 && Array.isArray(diag.rawColumns) && diag.rawColumns.length ? `
+            <details style="margin-top:6px;">
+              <summary style="cursor:pointer;color:var(--red-600);font-weight:600;">show raw QBO columns (${diag.rawColumns.length})</summary>
+              <pre style="margin:6px 0 0;padding:8px;background:#fff;border:1px solid var(--gray-300);border-radius:4px;font-size:0.7rem;white-space:pre-wrap;max-height:200px;overflow:auto;">${JSON.stringify(diag.rawColumns, null, 2)}</pre>
+            </details>` : ''}
         </div>` : ''}
     </div>`;
 

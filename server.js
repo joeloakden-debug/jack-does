@@ -3774,6 +3774,48 @@ function parsePnlMonthlyReport(report) {
   return { months: monthLabels.map(m => m.month), accounts };
 }
 
+// ---- Debug: raw QBO P&L monthly report ----
+// Returns a trimmed view of the QBO response so we can see exactly how
+// the columns are structured when parsing fails.
+app.get('/api/admin/clients/:clientId/accrued-liabilities/debug-pnl', requireAdmin, async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    if (!qbo.isConnected(clientId)) {
+      return res.status(400).json({ error: 'QBO not connected' });
+    }
+    const fixedAssetClient = getClientAssets(clientId);
+    let closeDate = null;
+    try { closeDate = await qbo.getBookCloseDate(clientId); } catch (_) {}
+    const targetMonth = (req.query.month && /^\d{4}-\d{2}$/.test(req.query.month))
+      ? req.query.month
+      : determineAmortizationMonth(fixedAssetClient, closeDate).month;
+    const { year, monthIndex } = parseMonthStr(targetMonth);
+    const periodEnd = lastDayOfMonthDate(year, monthIndex).toISOString().split('T')[0];
+    const lookbackStart = new Date(year, monthIndex - 18, 1);
+    const lookbackStartStr = lookbackStart.toISOString().split('T')[0];
+
+    const report = await qbo.getProfitAndLossMonthly(lookbackStartStr, periodEnd, clientId);
+    const parsed = parsePnlMonthlyReport(report);
+
+    res.json({
+      targetMonth,
+      pnlRange: { start: lookbackStartStr, end: periodEnd },
+      header: report?.Header || null,
+      columns: (report?.Columns?.Column || []).map(c => ({
+        title: c.ColTitle || '',
+        type: c.ColType || '',
+        metaData: c.MetaData || null,
+      })),
+      parsedMonths: parsed.months,
+      parsedAccountCount: parsed.accounts.length,
+      firstAccount: parsed.accounts[0] || null,
+      firstRawRow: report?.Rows?.Row?.[0] || null,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ---- Analysis endpoint ----
 
 app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmin, async (req, res) => {
@@ -3807,6 +3849,16 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
     const pnlReport = await qbo.getProfitAndLossMonthly(lookbackStartStr, periodEnd, clientId);
     const parsed = parsePnlMonthlyReport(pnlReport);
 
+    // Capture raw column metadata so diagnostics can explain parse failures
+    const rawColumns = (pnlReport?.Columns?.Column || []).map(c => ({
+      title: c.ColTitle || '',
+      type: c.ColType || '',
+      startDate: (Array.isArray(c.MetaData) ? c.MetaData : []).find(m => (m?.Name || '').toLowerCase() === 'startdate')?.Value || null,
+    }));
+    if (parsed.months.length === 0) {
+      console.warn('[accrued-liab] raw P&L columns:', JSON.stringify(rawColumns));
+    }
+
     const excludeSet = new Set(c.excludedAccountIds || []);
     const partAAccounts = [];
     const priorMonths = parsed.months.filter(m => m < targetMonth);
@@ -3823,6 +3875,8 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
       priorMonthsCount: priorMonths.length,
       pnlRangeStart: lookbackStartStr,
       pnlRangeEnd: periodEnd,
+      rawColumns,
+      parsedMonths: parsed.months,
       excluded: 0,
       negligibleHistory: 0,
       zeroCurrentBelowFrequency: 0, // current=0 but frequency too low to flag
