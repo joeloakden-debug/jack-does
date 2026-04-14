@@ -18,6 +18,24 @@ If the app requires QBO connection or live data that can't be tested locally, at
 - Check that API endpoints return expected shapes (use `preview_eval` or curl)
 - Review the payload structure being sent to external APIs (log it)
 
+## Mandatory: Auto-Commit and Push
+
+**After every verified code change, automatically commit and push to `origin/master` without waiting for the user to ask.** Railway auto-deploys from master, so unpushed work is invisible to the live app.
+
+Workflow:
+1. Complete the change and run the "Test Before Push" checklist above
+2. Stage only the files you modified (never `git add -A` / `git add .`)
+3. Create a new commit with a descriptive message (never `--amend`, never `--no-verify`)
+4. `git push origin master`
+5. Tell the user the commit SHA so they can track the deploy
+
+Only skip the auto-push when:
+- The user explicitly says not to push, or to wait
+- The change is clearly a work-in-progress mid-task (you'll push at the end of the full task)
+- The syntax/preview checks failed — fix first, then commit
+
+Still never commit: `.env`, credentials, untracked files the user hasn't acknowledged, or unrelated local-tooling changes (e.g. `.claude/launch.json`, `.claude/settings.local.json`).
+
 ### Common gotchas to check:
 - Tax handling: verify tax lines are detected by both account type AND description
 - QBO API payloads: validate structure matches QBO API requirements before sending
