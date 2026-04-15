@@ -3774,6 +3774,68 @@ function parsePnlMonthlyReport(report) {
   return { months: monthLabels.map(m => m.month), accounts };
 }
 
+// ---- Accrued liabilities helpers ----
+
+// Format a number as $X.XX for embedding in formula strings
+function money(n) {
+  const v = Number(n) || 0;
+  return `$${v.toFixed(2)}`;
+}
+
+/**
+ * Walk QBO Bills + Purchases responses and build an index of
+ * accountId → Map(vendor → { vendor, amount, count, transactions })
+ * Splits multi-line transactions by AccountBasedExpenseLineDetail so
+ * a Bill that posts to two accounts contributes separately to each.
+ */
+function buildAccountVendorIndex(billsRes, purchasesRes) {
+  const index = new Map();
+  function add(accountId, vendor, entry) {
+    if (!accountId || !entry || !(entry.amount > 0)) return;
+    if (!index.has(accountId)) index.set(accountId, new Map());
+    const vmap = index.get(accountId);
+    if (!vmap.has(vendor)) vmap.set(vendor, { vendor, amount: 0, count: 0, transactions: [] });
+    const v = vmap.get(vendor);
+    v.amount += entry.amount;
+    v.count++;
+    v.transactions.push(entry);
+  }
+
+  (billsRes?.QueryResponse?.Bill || []).forEach(b => {
+    const vendor = b.VendorRef?.name || 'Unknown';
+    (b.Line || []).forEach(line => {
+      const det = line.AccountBasedExpenseLineDetail;
+      if (!det) return;
+      add(det.AccountRef?.value, vendor, {
+        amount: Number(line.Amount || 0),
+        date: b.TxnDate,
+        txnId: b.Id,
+        txnType: 'Bill',
+        docNumber: b.DocNumber || '',
+        memo: line.Description || b.PrivateNote || '',
+      });
+    });
+  });
+
+  (purchasesRes?.QueryResponse?.Purchase || []).forEach(p => {
+    const vendor = p.EntityRef?.name || 'Unknown';
+    (p.Line || []).forEach(line => {
+      const det = line.AccountBasedExpenseLineDetail;
+      if (!det) return;
+      add(det.AccountRef?.value, vendor, {
+        amount: Number(line.Amount || 0),
+        date: p.TxnDate,
+        txnId: p.Id,
+        txnType: 'Purchase',
+        docNumber: p.DocNumber || '',
+        memo: line.Description || p.PrivateNote || '',
+      });
+    });
+  });
+
+  return index;
+}
+
 // ---- Debug: raw QBO P&L monthly report ----
 // Returns a trimmed view of the QBO response so we can see exactly how
 // the columns are structured when parsing fails.
@@ -3886,51 +3948,74 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
     };
 
     if (parsed.months.length === 0) {
-      console.warn(`[accrued-liab] QBO P&L returned 0 month columns for ${clientId} range ${lookbackStartStr}→${periodEnd}. Check that summarize_columns_by:Month is honored.`);
+      console.warn(`[accrued-liab] QBO P&L returned 0 month columns for ${clientId} range ${lookbackStartStr}→${periodEnd}. Check that summarize_column_by:Month is honored.`);
+    }
+
+    // ---- Fetch prior-month transactions for vendor itemization ----
+    // Group bills + purchases per (accountId → vendor) so each flagged Part A
+    // account can show what made up the prior month's spend, which is the
+    // basis for "missing recurring" suggestions.
+    const priorMonthDate = new Date(year, monthIndex - 1, 1);
+    const priorMonthStart = priorMonthDate.toISOString().split('T')[0];
+    const priorMonthEnd = lastDayOfMonthDate(priorMonthDate.getFullYear(), priorMonthDate.getMonth())
+      .toISOString().split('T')[0];
+
+    let priorMonthVendorIndex = new Map(); // accountId → Map(vendor → { vendor, amount, count, transactions })
+    try {
+      const [pmBills, pmPurch] = await Promise.all([
+        qbo.getBills(priorMonthStart, priorMonthEnd, 500, clientId).catch(() => null),
+        qbo.getExpenseTransactions(priorMonthStart, priorMonthEnd, 500, clientId).catch(() => null),
+      ]);
+      priorMonthVendorIndex = buildAccountVendorIndex(pmBills, pmPurch);
+      console.log(`[accrued-liab] prior-month (${priorMonthStart}→${priorMonthEnd}) vendor index built: ${priorMonthVendorIndex.size} accounts`);
+    } catch (e) {
+      console.warn(`[accrued-liab] failed to build vendor index: ${e.message}`);
     }
 
     for (const acct of parsed.accounts) {
       if (excludeSet.has(acct.accountId)) { diagnostics.excluded++; continue; }
       let sumPrior = 0, countPrior = 0;
+      const activeMonthsList = [];
       for (const m of priorMonths) {
         const val = acct.monthlyTotals[m] || 0;
-        if (val !== 0) { sumPrior += val; countPrior++; }
+        if (val !== 0) { sumPrior += val; countPrior++; activeMonthsList.push(m); }
       }
-      const average = priorMonths.length > 0 ? sumPrior / priorMonths.length : 0;
       const frequency = countPrior; // how many of the prior months had activity
+      const monthsInLookback = priorMonths.length;
+      // Months from first observed activity through last prior month — the "real" data window
+      const firstActiveMonth = activeMonthsList[0] || null;
+      const monthsSinceFirstActivity = firstActiveMonth
+        ? priorMonths.filter(m => m >= firstActiveMonth).length
+        : 0;
+
+      // Three different averages — each appropriate for different scenarios
+      const windowAverage = monthsInLookback > 0 ? sumPrior / monthsInLookback : 0;
+      const historyAverage = monthsSinceFirstActivity > 0 ? sumPrior / monthsSinceFirstActivity : 0;
+      const activeMonthAverage = frequency > 0 ? sumPrior / frequency : 0;
+
       const currentMonth = acct.monthlyTotals[targetMonth] || 0;
       const appearedLastMonth = !!acct.monthlyTotals[priorMonthKey];
       const priorMonthAmount = acct.monthlyTotals[priorMonthKey] || 0;
 
       // Skip accounts with negligible history
-      if (average < 1 && currentMonth < 1 && !appearedLastMonth) {
+      if (sumPrior < 1 && currentMonth < 1 && !appearedLastMonth) {
         diagnostics.negligibleHistory++;
         continue;
       }
       diagnostics.evaluated++;
 
-      const gap = Math.round((average - currentMonth) * 100) / 100;
+      // Detection logic (frequency-aware so newer subscriptions still flag)
       const thresholdPct = c.materialityThreshold / 100;
       let flagged = false;
       let reason = '';
 
-      // MISSING: current month has nothing, but the account is clearly recurring
-      // Tiered detection so we catch both established patterns (3+ months)
-      // AND newer subscriptions (appeared last month + at least once before, or just last month with material amount)
       if (currentMonth === 0) {
-        if (average >= 1 && frequency >= 3) {
-          flagged = true;
-          reason = 'missing';
+        if (frequency >= 3) {
+          flagged = true; reason = 'missing';
         } else if (appearedLastMonth && frequency >= 2) {
-          flagged = true;
-          reason = 'missing_recurring';
+          flagged = true; reason = 'missing_recurring';
         } else if (appearedLastMonth && priorMonthAmount >= 1) {
-          // New subscription: showed up last month with material spend, but not this month
-          flagged = true;
-          reason = 'missing_new_recurring';
-        } else if (average >= 1 && frequency >= 2) {
-          flagged = true;
-          reason = 'missing';
+          flagged = true; reason = 'missing_new_recurring';
         } else {
           diagnostics.zeroCurrentBelowFrequency++;
           if (appearedLastMonth) {
@@ -3943,31 +4028,70 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
             });
           }
         }
-      } else if (average > 0 && currentMonth < average * (1 - thresholdPct) && frequency >= 3) {
-        flagged = true;
-        reason = 'below_average';
+      } else if (activeMonthAverage > 0 && currentMonth < activeMonthAverage * (1 - thresholdPct) && frequency >= 3) {
+        flagged = true; reason = 'below_average';
       } else {
         diagnostics.withinTolerance++;
       }
 
       if (flagged) {
-        // For new-recurring where 18-mo average is misleadingly low, use prior-month amount as suggested accrual
-        let suggestedAccrual = gap;
-        if (reason === 'missing_new_recurring' || reason === 'missing_recurring') {
-          suggestedAccrual = Math.round(priorMonthAmount * 100) / 100;
+        // ---- Choose calculation basis (priority order) ----
+        // 1. New subscription (1 month of history) → use prior-month actual; nothing else is reliable
+        // 2. Recurring with 2+ months of history → use active-month average (excludes empty months that distort)
+        // 3. Established with 3+ months → use active-month average
+        // 4. Below-average case → use the gap to the active-month average
+        let basis, basisValue, formula, suggestedAccrual;
+        if (reason === 'below_average') {
+          basis = 'gap_to_active_average';
+          basisValue = Math.round((activeMonthAverage - currentMonth) * 100) / 100;
+          formula = `Active-month average ${money(activeMonthAverage)} − this month ${money(currentMonth)} = ${money(basisValue)}`;
+          suggestedAccrual = basisValue;
+        } else if (frequency === 1 && appearedLastMonth) {
+          basis = 'prior_month_actual';
+          basisValue = Math.round(priorMonthAmount * 100) / 100;
+          formula = `Prior month (${priorMonthKey}) actual = ${money(priorMonthAmount)} (only 1 month of history available)`;
+          suggestedAccrual = basisValue;
+        } else {
+          basis = 'active_month_average';
+          basisValue = Math.round(activeMonthAverage * 100) / 100;
+          formula = `Σ prior spend ${money(sumPrior)} ÷ months with activity ${frequency} = ${money(activeMonthAverage)}`;
+          suggestedAccrual = basisValue;
         }
+
+        // ---- Vendor breakdown (from prior month transactions) ----
+        const vendorMap = priorMonthVendorIndex.get(acct.accountId);
+        const vendorBreakdown = vendorMap ? Array.from(vendorMap.values())
+          .map(v => ({
+            vendor: v.vendor,
+            amount: Math.round(v.amount * 100) / 100,
+            count: v.count,
+            transactions: v.transactions,
+          }))
+          .sort((a, b) => b.amount - a.amount) : [];
+
         partAAccounts.push({
           accountId: acct.accountId,
           accountName: acct.accountName,
           monthlyTotals: acct.monthlyTotals,
-          average: Math.round(average * 100) / 100,
           frequency,
+          monthsInLookback,
+          monthsSinceFirstActivity,
+          firstActiveMonth,
+          windowAverage: Math.round(windowAverage * 100) / 100,
+          historyAverage: Math.round(historyAverage * 100) / 100,
+          activeMonthAverage: Math.round(activeMonthAverage * 100) / 100,
+          // Legacy field kept for backward compatibility with UI/tests
+          average: Math.round(activeMonthAverage * 100) / 100,
+          totalPriorSpend: Math.round(sumPrior * 100) / 100,
           currentMonth: Math.round(currentMonth * 100) / 100,
           priorMonthAmount: Math.round(priorMonthAmount * 100) / 100,
+          priorMonthKey,
           appearedLastMonth,
-          gap,
+          gap: Math.round((activeMonthAverage - currentMonth) * 100) / 100,
           flagged: true,
           reason,
+          calculation: { basis, basisValue, formula },
+          vendorBreakdown,
           accrualAmount: suggestedAccrual,
           status: 'pending',
         });
@@ -4116,17 +4240,57 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/post', requireAdmin, 
     if (!run) return res.status(400).json({ error: `no analysis run for ${month}` });
     if (run.accrualJE) return res.status(400).json({ error: `accrual JE already posted for ${month}` });
 
-    // Collect all non-dismissed items
+    // Collect all non-dismissed items, itemized by vendor where possible.
+    // For Part A accounts with a vendor breakdown that fully reconciles to
+    // the suggested accrual, split into one JE line per vendor so the
+    // posting (and subsequent reversal) is traceable per-vendor.
     const lines = [];
     for (const a of (run.partA?.accounts || [])) {
       if (a.status === 'dismissed' || !a.accrualAmount || a.accrualAmount <= 0) continue;
-      lines.push({
-        source: 'pattern',
-        accountId: a.accountId,
-        accountName: a.accountName,
-        description: `Accrued liabilities - ${a.reason === 'missing' ? 'missing' : 'below average'} - ${a.accountName}`,
-        amount: Math.round(a.accrualAmount * 100) / 100,
-      });
+      const reasonLabel = (() => {
+        switch (a.reason) {
+          case 'missing': return 'missing';
+          case 'missing_recurring': return 'missing recurring';
+          case 'missing_new_recurring': return 'missing new recurring';
+          case 'below_average': return 'below average';
+          default: return a.reason || '';
+        }
+      })();
+      const vb = Array.isArray(a.vendorBreakdown) ? a.vendorBreakdown : [];
+      const vbTotal = Math.round(vb.reduce((s, v) => s + v.amount, 0) * 100) / 100;
+      const accrual = Math.round(a.accrualAmount * 100) / 100;
+      // If the vendor breakdown reconciles within $0.50 of the suggested accrual,
+      // split per vendor proportionally. Otherwise post one rolled-up line.
+      if (vb.length > 0 && Math.abs(vbTotal - accrual) <= 0.5) {
+        for (const v of vb) {
+          lines.push({
+            source: 'pattern',
+            accountId: a.accountId,
+            accountName: a.accountName,
+            vendor: v.vendor,
+            description: `Accrued liabilities - ${reasonLabel} - ${a.accountName} - ${v.vendor}`,
+            amount: Math.round(v.amount * 100) / 100,
+          });
+        }
+      } else if (vb.length > 0) {
+        // Vendor breakdown exists but doesn't tie — still attribute to the top vendor in the description
+        lines.push({
+          source: 'pattern',
+          accountId: a.accountId,
+          accountName: a.accountName,
+          vendor: vb[0].vendor,
+          description: `Accrued liabilities - ${reasonLabel} - ${a.accountName} (incl. ${vb[0].vendor}${vb.length > 1 ? ` +${vb.length - 1} other${vb.length > 2 ? 's' : ''}` : ''})`,
+          amount: accrual,
+        });
+      } else {
+        lines.push({
+          source: 'pattern',
+          accountId: a.accountId,
+          accountName: a.accountName,
+          description: `Accrued liabilities - ${reasonLabel} - ${a.accountName}`,
+          amount: accrual,
+        });
+      }
     }
     for (const t of (run.partB?.transactions || [])) {
       if (t.status === 'dismissed' || !t.accrualAmount || t.accrualAmount <= 0) continue;

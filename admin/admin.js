@@ -2209,9 +2209,9 @@ function renderAccruedLiabResults(panel, data) {
           <tr style="border-bottom:2px solid var(--gray-300);text-align:left;">
             <th style="padding:6px 8px;width:24px;"></th>
             <th style="padding:6px 8px;">account</th>
-            <th style="padding:6px 8px;text-align:right;">18-mo avg</th>
+            <th style="padding:6px 8px;text-align:right;" title="Average across months that had activity (excludes empty months) — better estimate of recurring cost than the window average">avg / active mo</th>
+            <th style="padding:6px 8px;text-align:center;" title="Months with activity / total prior months in the lookback window">active mos</th>
             <th style="padding:6px 8px;text-align:right;">this month</th>
-            <th style="padding:6px 8px;text-align:right;">gap</th>
             <th style="padding:6px 8px;">reason</th>
             <th style="padding:6px 8px;text-align:right;">accrual amt</th>
             <th style="padding:6px 8px;text-align:center;">action</th>
@@ -2221,13 +2221,15 @@ function renderAccruedLiabResults(panel, data) {
           ${partA.accounts.map((a, i) => {
             const dismissed = a.status === 'dismissed';
             const rowStyle = dismissed ? 'opacity:0.4;text-decoration:line-through;' : '';
+            const activeAvg = a.activeMonthAverage ?? a.average ?? 0;
+            const freqLabel = `${a.frequency || 0}/${a.monthsInLookback ?? partA.lookbackMonths}`;
             return `<tr style="border-bottom:1px solid var(--gray-200);${rowStyle}">
               <td style="padding:6px 4px;text-align:center;vertical-align:middle;"><button type="button" class="al-detail-toggle" data-al-detail-index="${i}" style="background:none;border:1px solid var(--gray-300);border-radius:4px;width:20px;height:20px;cursor:pointer;font-size:0.7rem;line-height:1;padding:0;" title="show calculation details">▸</button></td>
               <td style="padding:6px 8px;">${a.accountName}</td>
-              <td style="padding:6px 8px;text-align:right;">${fmtMoney(a.average)}</td>
+              <td style="padding:6px 8px;text-align:right;">${fmtMoney(activeAvg)}</td>
+              <td style="padding:6px 8px;text-align:center;font-variant-numeric:tabular-nums;color:var(--gray-600);">${freqLabel}</td>
               <td style="padding:6px 8px;text-align:right;">${fmtMoney(a.currentMonth)}</td>
-              <td style="padding:6px 8px;text-align:right;color:var(--red-600);">${fmtMoney(a.gap)}</td>
-              <td style="padding:6px 8px;"><span style="font-size:0.72rem;padding:1px 6px;border-radius:4px;background:${String(a.reason).startsWith('missing') ? '#fef2f2' : '#fef9c3'};color:${String(a.reason).startsWith('missing') ? '#991b1b' : '#854d0e'};" title="${a.reason === 'missing_new_recurring' ? 'Appeared last month but not this month — likely a new recurring subscription.' : a.reason === 'missing_recurring' ? 'Recurring pattern (including last month) but no current-month activity.' : a.reason === 'missing' ? 'Account with established history has no current-month activity.' : 'Current-month activity is below the materiality-adjusted 18-month average.'}">${String(a.reason).replace(/_/g, ' ')}</span></td>
+              <td style="padding:6px 8px;"><span style="font-size:0.72rem;padding:1px 6px;border-radius:4px;background:${String(a.reason).startsWith('missing') ? '#fef2f2' : '#fef9c3'};color:${String(a.reason).startsWith('missing') ? '#991b1b' : '#854d0e'};" title="${a.reason === 'missing_new_recurring' ? 'Appeared last month but not this month — likely a new recurring subscription.' : a.reason === 'missing_recurring' ? 'Recurring pattern (including last month) but no current-month activity.' : a.reason === 'missing' ? 'Account with established history has no current-month activity.' : 'Current-month activity is below the materiality-adjusted active-month average.'}">${String(a.reason).replace(/_/g, ' ')}</span></td>
               <td style="padding:6px 8px;text-align:right;"><input type="number" step="0.01" value="${a.accrualAmount}" style="width:90px;padding:2px 4px;text-align:right;border:1px solid var(--gray-300);border-radius:3px;" data-al-part="A" data-al-index="${i}" onchange="updateAccruedLiabItem(this)" ${dismissed ? 'disabled' : ''}></td>
               <td style="padding:6px 8px;text-align:center;">
                 ${dismissed
@@ -2238,7 +2240,7 @@ function renderAccruedLiabResults(panel, data) {
             </tr>
             <tr data-al-detail-row="${i}" style="display:none;background:#f8fafc;">
               <td colspan="8" style="padding:10px 14px;font-size:0.78rem;color:var(--gray-700);">
-                ${renderAccruedLiabDetail(a, partA.lookbackMonths, data.month)}
+                ${renderAccruedLiabDetail(a, partA.lookbackMonths, data.month, partA.priorMonth)}
               </td>
             </tr>`;
           }).join('')}
@@ -2329,50 +2331,105 @@ function renderAccruedLiabResults(panel, data) {
 }
 
 /**
- * Renders the expandable detail block for a Part A flagged account, explaining:
- * - which calculation method produced the suggested accrual
- * - the recent monthly history that drives the suggestion
- * - the underlying numbers so the user can spot-check
+ * Renders the expandable detail block for a Part A flagged account.
+ * Three sections: (1) plain-language reason, (2) full math breakdown
+ * exposing every variable in the calculation, (3) vendor itemization
+ * from the prior month's transactions, (4) recent monthly history.
  */
-function renderAccruedLiabDetail(a, lookbackMonths, targetMonth) {
+function renderAccruedLiabDetail(a, lookbackMonths, targetMonth, priorMonthKey) {
   const reasonExplain = {
-    missing: `<strong>Missing</strong> — this account has an established history (frequency: ${a.frequency} of prior ${lookbackMonths} months, average ${fmtMoney(a.average)}/mo) but no activity recorded in ${targetMonth}.`,
-    missing_recurring: `<strong>Missing — recurring</strong> — appeared last month and in ${a.frequency} of the prior ${lookbackMonths} months. Likely a recurring expense that hasn't been entered yet.`,
-    missing_new_recurring: `<strong>Missing — new recurring</strong> — first appeared in the immediately prior month with material activity. Likely a new subscription that recurs monthly. The 18-month average understates this because most months had no activity.`,
-    below_average: `<strong>Below average</strong> — this account had ${fmtMoney(a.currentMonth)} this month vs an 18-month average of ${fmtMoney(a.average)} (${a.frequency} of ${lookbackMonths} months had activity). Current month is below the materiality threshold.`,
+    missing: `<strong>Missing</strong> — this account has an established history (${a.frequency} of prior ${a.monthsInLookback ?? lookbackMonths} months had activity) but no activity was recorded in ${targetMonth}.`,
+    missing_recurring: `<strong>Missing — recurring</strong> — appeared last month and in ${a.frequency} of the prior ${a.monthsInLookback ?? lookbackMonths} months. Likely a recurring expense that hasn't been entered yet for ${targetMonth}.`,
+    missing_new_recurring: `<strong>Missing — new recurring</strong> — first appeared in ${a.firstActiveMonth || 'a recent month'} (${a.monthsSinceFirstActivity ?? 1} month${(a.monthsSinceFirstActivity ?? 1) === 1 ? '' : 's'} of history). Likely a new subscription that should recur this month.`,
+    below_average: `<strong>Below average</strong> — this account had ${fmtMoney(a.currentMonth)} this month vs the average of ${fmtMoney(a.activeMonthAverage ?? a.average)} per active month, which is below the materiality threshold.`,
   };
 
-  // Calculation basis (matches server-side logic in /accrued-liabilities/analyze)
-  const usedPriorMonth = (a.reason === 'missing_new_recurring' || a.reason === 'missing_recurring');
-  const basisLabel = usedPriorMonth
-    ? `Prior month actual (${fmtMoney(a.priorMonthAmount)})`
-    : `Gap to 18-month average (${fmtMoney(a.average)} avg − ${fmtMoney(a.currentMonth)} actual)`;
-  const basisRationale = usedPriorMonth
-    ? `For new/recently-started recurring expenses, the 18-month average understates the true monthly cost (most months had no activity). The prior month's actual amount is a better estimate of what the current month should be.`
-    : `For accounts with established history, the gap between the average and what was actually recorded is the most reliable estimate of the missing accrual.`;
+  // ---- Math breakdown ----
+  // All values come from the server's `calculation` object plus the headline numbers.
+  const calc = a.calculation || {};
+  const totalSpend = a.totalPriorSpend ?? 0;
+  const monthsInLookback = a.monthsInLookback ?? lookbackMonths ?? 0;
+  const monthsSinceFirst = a.monthsSinceFirstActivity ?? 0;
+  const freq = a.frequency ?? 0;
 
-  // Build a recent-history mini-table (last 12 months of activity, oldest → newest)
+  const rowsHtml = [
+    { label: 'Σ prior spend (all months in lookback)', value: fmtMoney(totalSpend), note: 'sum of activity in the 18-month window' },
+    { label: 'Months in lookback window', value: monthsInLookback, note: '18 by default; capped to data available' },
+    { label: 'Months since first activity', value: monthsSinceFirst, note: `first seen ${a.firstActiveMonth || '—'}` },
+    { label: 'Months with activity (frequency)', value: freq, note: 'months that had non-zero activity' },
+    { label: 'Window average (Σ ÷ lookback months)', value: fmtMoney(totalSpend / Math.max(1, monthsInLookback)), note: 'understates recurring cost when history is short' },
+    { label: 'History average (Σ ÷ months since first activity)', value: fmtMoney(monthsSinceFirst > 0 ? totalSpend / monthsSinceFirst : 0), note: 'better when activity is consistent month-to-month' },
+    { label: 'Active-month average (Σ ÷ frequency)', value: fmtMoney(freq > 0 ? totalSpend / freq : 0), note: '★ best estimate of per-occurrence cost', highlight: calc.basis === 'active_month_average' },
+    { label: `Prior month actual (${a.priorMonthKey || priorMonthKey || '—'})`, value: fmtMoney(a.priorMonthAmount ?? 0), note: 'most direct signal when only 1-2 months of history exist', highlight: calc.basis === 'prior_month_actual' },
+    { label: `This month actual (${targetMonth})`, value: fmtMoney(a.currentMonth ?? 0), note: 'what is currently in QBO for this month' },
+  ];
+  const mathTable = `
+    <table style="width:100%;border-collapse:collapse;font-size:0.72rem;">
+      <tbody>
+        ${rowsHtml.map(r => `
+          <tr style="border-bottom:1px solid var(--gray-200);${r.highlight ? 'background:#dcfce7;font-weight:600;' : ''}">
+            <td style="padding:3px 6px;">${r.label}</td>
+            <td style="padding:3px 6px;text-align:right;font-variant-numeric:tabular-nums;">${r.value}</td>
+            <td style="padding:3px 6px;color:var(--gray-500);font-size:0.68rem;">${r.note}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>
+    <div style="margin-top:6px;padding:6px 8px;background:#dbeafe;border-radius:4px;font-size:0.72rem;">
+      <strong>Suggested accrual = ${fmtMoney(a.accrualAmount)}</strong><br>
+      <span style="color:var(--gray-700);">${calc.formula || '—'}</span>
+    </div>`;
+
+  // ---- Vendor breakdown ----
+  const vb = Array.isArray(a.vendorBreakdown) ? a.vendorBreakdown : [];
+  const vbTotal = vb.reduce((s, v) => s + (Number(v.amount) || 0), 0);
+  const reconciles = Math.abs(vbTotal - (a.accrualAmount || 0)) <= 0.5;
+  const vendorTable = vb.length
+    ? `<table style="width:100%;border-collapse:collapse;font-size:0.72rem;">
+         <thead>
+           <tr style="border-bottom:1px solid var(--gray-300);text-align:left;">
+             <th style="padding:3px 6px;">vendor</th>
+             <th style="padding:3px 6px;text-align:center;">#</th>
+             <th style="padding:3px 6px;text-align:right;">prior-month total</th>
+             <th style="padding:3px 6px;">latest description</th>
+           </tr>
+         </thead>
+         <tbody>
+           ${vb.map(v => `
+             <tr style="border-bottom:1px solid var(--gray-200);">
+               <td style="padding:3px 6px;font-weight:500;">${v.vendor}</td>
+               <td style="padding:3px 6px;text-align:center;color:var(--gray-600);">${v.count}</td>
+               <td style="padding:3px 6px;text-align:right;font-variant-numeric:tabular-nums;">${fmtMoney(v.amount)}</td>
+               <td style="padding:3px 6px;color:var(--gray-600);font-size:0.68rem;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${((v.transactions?.[0]?.memo) || '').replace(/"/g, '&quot;')}">${(v.transactions?.[0]?.docNumber ? `#${v.transactions[0].docNumber} — ` : '')}${v.transactions?.[0]?.memo || '—'}</td>
+             </tr>`).join('')}
+           <tr style="font-weight:600;${reconciles ? 'background:#dcfce7;' : 'background:#fef3c7;'}">
+             <td style="padding:3px 6px;">total</td>
+             <td style="padding:3px 6px;"></td>
+             <td style="padding:3px 6px;text-align:right;font-variant-numeric:tabular-nums;">${fmtMoney(vbTotal)}</td>
+             <td style="padding:3px 6px;font-size:0.68rem;color:${reconciles ? '#166534' : '#854d0e'};">${reconciles ? '✓ reconciles to suggested accrual' : `differs from suggested accrual by ${fmtMoney(Math.abs(vbTotal - (a.accrualAmount || 0)))}`}</td>
+           </tr>
+         </tbody>
+       </table>
+       <div style="margin-top:4px;color:var(--gray-500);font-size:0.68rem;">JE will be itemized per vendor when the breakdown reconciles. Otherwise a single rolled-up line is posted.</div>`
+    : `<div style="color:var(--gray-500);font-style:italic;">No prior-month bills/expenses found for this account in QBO. JE will be posted as a single rolled-up line.</div>`;
+
+  // ---- Monthly history (mini chart) ----
   const monthly = a.monthlyTotals || {};
   const sortedMonths = Object.keys(monthly).sort();
   const recent = sortedMonths.slice(-12);
   const maxAmt = recent.reduce((m, k) => Math.max(m, Math.abs(monthly[k] || 0)), 0) || 1;
+  const pmKey = a.priorMonthKey || priorMonthKey;
   const historyHtml = recent.length
-    ? `<table style="width:auto;border-collapse:collapse;font-size:0.72rem;margin-top:4px;">
+    ? `<table style="width:auto;border-collapse:collapse;font-size:0.7rem;">
          <tbody>
            ${recent.map(mk => {
              const v = monthly[mk] || 0;
-             const isPriorMonth = (() => {
-               // priorMonthKey isn't passed here — derive from targetMonth
-               const [ty, tm] = targetMonth.split('-').map(Number);
-               const d = new Date(ty, tm - 2, 1);
-               return mk === `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-             })();
+             const isPriorMonth = mk === pmKey;
              const barWidth = Math.max(1, Math.round((Math.abs(v) / maxAmt) * 100));
              const highlight = isPriorMonth ? 'background:#fef3c7;' : '';
              return `<tr style="${highlight}">
                <td style="padding:2px 8px;color:var(--gray-600);">${mk}${isPriorMonth ? ' <span style="color:#854d0e;font-weight:600;">(prior month)</span>' : ''}</td>
                <td style="padding:2px 8px;text-align:right;font-variant-numeric:tabular-nums;">${fmtMoney(v)}</td>
-               <td style="padding:2px 8px;width:120px;"><div style="height:6px;background:var(--gray-200);border-radius:3px;overflow:hidden;"><div style="width:${barWidth}%;height:100%;background:${isPriorMonth ? '#f59e0b' : '#94a3b8'};"></div></div></td>
+               <td style="padding:2px 8px;width:100px;"><div style="height:5px;background:var(--gray-200);border-radius:3px;overflow:hidden;"><div style="width:${barWidth}%;height:100%;background:${isPriorMonth ? '#f59e0b' : '#94a3b8'};"></div></div></td>
              </tr>`;
            }).join('')}
          </tbody>
@@ -2380,18 +2437,23 @@ function renderAccruedLiabDetail(a, lookbackMonths, targetMonth) {
     : `<div style="color:var(--gray-500);font-style:italic;">No prior month activity recorded.</div>`;
 
   return `
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+    <div style="display:grid;grid-template-columns:1fr;gap:14px;">
       <div>
-        <div style="font-weight:600;margin-bottom:4px;">why flagged</div>
+        <div style="font-weight:600;margin-bottom:4px;font-size:0.82rem;">why flagged</div>
         <div>${reasonExplain[a.reason] || `<strong>${a.reason}</strong>`}</div>
-        <div style="margin-top:10px;font-weight:600;margin-bottom:4px;">suggested accrual: ${fmtMoney(a.accrualAmount)}</div>
-        <div style="color:var(--gray-600);"><strong>basis:</strong> ${basisLabel}</div>
-        <div style="color:var(--gray-600);margin-top:4px;font-style:italic;">${basisRationale}</div>
       </div>
       <div>
-        <div style="font-weight:600;margin-bottom:4px;">recent monthly history (last ${recent.length} of ${sortedMonths.length} active months)</div>
+        <div style="font-weight:600;margin-bottom:4px;font-size:0.82rem;">how the suggestion was calculated</div>
+        ${mathTable}
+      </div>
+      <div>
+        <div style="font-weight:600;margin-bottom:4px;font-size:0.82rem;">vendor breakdown — prior month (${pmKey || '—'}) transactions on this account</div>
+        ${vendorTable}
+      </div>
+      <div>
+        <div style="font-weight:600;margin-bottom:4px;font-size:0.82rem;">recent monthly history (last ${recent.length} of ${sortedMonths.length} active months)</div>
         ${historyHtml}
-        <div style="margin-top:6px;color:var(--gray-500);font-size:0.7rem;">Only months with non-zero activity are shown. Empty months were skipped in the average calculation.</div>
+        <div style="margin-top:4px;color:var(--gray-500);font-size:0.68rem;">Only months with non-zero activity are shown. Empty months were skipped in the active-month average.</div>
       </div>
     </div>`;
 }
