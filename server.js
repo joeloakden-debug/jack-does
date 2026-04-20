@@ -3,12 +3,58 @@ const express = require('express');
 const Anthropic = require('@anthropic-ai/sdk').default;
 const multer = require('multer');
 const { marked } = require('marked');
+const crypto = require('crypto');
+const sanitizeHtml = require('sanitize-html');
+const bcrypt = require('bcryptjs');
 
 // Configure marked for clean HTML output
 marked.setOptions({
   breaks: true,
   gfm: true,
 });
+
+// Sanitize Claude-rendered HTML before it reaches the chat UI. Claude may
+// (unintentionally or via prompt injection through uploaded content) emit
+// raw HTML that marked passes through verbatim. Strip scripts, event
+// handlers, and dangerous tags while preserving the formatting we want.
+function sanitizeAssistantHtml(html) {
+  return sanitizeHtml(html, {
+    allowedTags: [
+      'p', 'br', 'strong', 'em', 'b', 'i', 'u', 's', 'del', 'ins',
+      'ul', 'ol', 'li', 'blockquote', 'pre', 'code',
+      'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+      'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
+      'hr', 'span', 'div', 'a',
+    ],
+    allowedAttributes: {
+      a: ['href', 'title', 'target', 'rel'],
+      code: ['class'],
+      pre: ['class'],
+      span: ['class'],
+      div: ['class'],
+      th: ['align'], td: ['align'],
+    },
+    allowedSchemes: ['http', 'https', 'mailto'],
+    transformTags: {
+      a: sanitizeHtml.simpleTransform('a', { rel: 'noopener noreferrer', target: '_blank' }),
+    },
+  });
+}
+
+// Constant-time equality for auth comparisons. Defeats timing attacks
+// that could otherwise leak password bytes via response timing.
+function safeEqual(a, b) {
+  const aa = Buffer.from(String(a ?? ''), 'utf8');
+  const bb = Buffer.from(String(b ?? ''), 'utf8');
+  if (aa.length !== bb.length) {
+    // Still do a constant-time compare against a same-length buffer so
+    // length itself doesn't leak via timing.
+    crypto.timingSafeEqual(aa, aa);
+    return false;
+  }
+  return crypto.timingSafeEqual(aa, bb);
+}
+
 const path = require('path');
 const fs = require('fs');
 const qbo = require('./qbo-service');
@@ -115,7 +161,8 @@ function requireAdmin(req, res, next) {
     ?.split('=')[1];
 
   const adminPw = getAdminPassword();
-  if (authHeader === adminPw || cookieAuth === adminPw) {
+  // Constant-time comparison so response timing can't leak the password.
+  if (safeEqual(authHeader, adminPw) || safeEqual(cookieAuth, adminPw)) {
     return next();
   }
 
@@ -135,7 +182,7 @@ app.use('/admin/admin.js', express.static(path.join(__dirname, 'admin', 'admin.j
 // Admin login endpoint
 app.post('/api/admin/login', (req, res) => {
   const { password } = req.body;
-  if (password === getAdminPassword()) {
+  if (safeEqual(password, getAdminPassword())) {
     res.json({ success: true });
   } else {
     res.status(401).json({ error: 'Invalid password' });
@@ -145,7 +192,7 @@ app.post('/api/admin/login', (req, res) => {
 // Admin: Change password
 app.post('/api/admin/change-password', requireAdmin, (req, res) => {
   const { currentPassword, newPassword } = req.body;
-  if (currentPassword !== getAdminPassword()) {
+  if (!safeEqual(currentPassword, getAdminPassword())) {
     return res.status(401).json({ error: 'Current password is incorrect' });
   }
   if (!newPassword || newPassword.length < 6) {
@@ -430,8 +477,10 @@ app.post('/api/chat', resolveClient, async (req, res) => {
 
     const assistantMessage = response.content[0].text;
 
-    // Convert markdown to HTML for rendering in chat
-    const htmlMessage = marked(assistantMessage);
+    // Convert markdown to HTML for rendering in chat, then sanitize to strip
+    // any script tags or event handlers that could be injected via the model
+    // (or via prompt injection from uploaded document content).
+    const htmlMessage = sanitizeAssistantHtml(marked(assistantMessage));
 
     // Add assistant response to history (store raw for Claude context)
     history.push({ role: 'assistant', content: assistantMessage });
@@ -618,8 +667,19 @@ app.post('/api/process-document', resolveClient, async (req, res) => {
       return res.status(400).json({ error: 'File path and name are required' });
     }
 
-    // Read the file
-    const fullPath = path.resolve(filePath);
+    // Resolve the requested path and assert it lives inside the uploads
+    // directory — prevents path traversal via `../../.env` etc.
+    const uploadsRoot = fs.realpathSync(uploadsDir);
+    let fullPath;
+    try {
+      fullPath = fs.realpathSync(path.resolve(filePath));
+    } catch (_) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+    const rel = path.relative(uploadsRoot, fullPath);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      return res.status(403).json({ error: 'Path outside of uploads directory' });
+    }
     if (!fs.existsSync(fullPath)) {
       return res.status(404).json({ error: 'File not found' });
     }

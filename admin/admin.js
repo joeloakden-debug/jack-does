@@ -250,23 +250,23 @@ function renderAnalysisCard(a) {
       <div class="analysis-detail">
         <div class="analysis-summary">
           <div class="analysis-summary-row">
-            ${analysis.documentType ? `<div class="analysis-summary-item"><span class="label">type</span><span class="value">${analysis.documentType}</span></div>` : ''}
-            ${analysis.vendor ? `<div class="analysis-summary-item"><span class="label">vendor</span><span class="value">${analysis.vendor}</span></div>` : ''}
-            ${analysis.customer ? `<div class="analysis-summary-item"><span class="label">customer</span><span class="value">${analysis.customer}</span></div>` : ''}
-            ${analysis.date ? `<div class="analysis-summary-item"><span class="label">date</span><span class="value">${analysis.date}</span></div>` : ''}
-            ${analysis.confidence ? `<div class="analysis-summary-item"><span class="label">confidence</span><span class="value">${analysis.confidence}</span></div>` : ''}
+            ${analysis.documentType ? `<div class="analysis-summary-item"><span class="label">type</span><span class="value">${escapeHtml(analysis.documentType)}</span></div>` : ''}
+            ${analysis.vendor ? `<div class="analysis-summary-item"><span class="label">vendor</span><span class="value">${escapeHtml(analysis.vendor)}</span></div>` : ''}
+            ${analysis.customer ? `<div class="analysis-summary-item"><span class="label">customer</span><span class="value">${escapeHtml(analysis.customer)}</span></div>` : ''}
+            ${analysis.date ? `<div class="analysis-summary-item"><span class="label">date</span><span class="value">${escapeHtml(analysis.date)}</span></div>` : ''}
+            ${analysis.confidence ? `<div class="analysis-summary-item"><span class="label">confidence</span><span class="value">${escapeHtml(analysis.confidence)}</span></div>` : ''}
           </div>
-          ${analysis.summary ? `<p>${analysis.summary}</p>` : ''}
+          ${analysis.summary ? `<p>${escapeHtml(analysis.summary)}</p>` : ''}
         </div>
 
         <div id="entries-${a.id}">
         ${entries.map((entry, i) => `
           <div class="admin-entry-block" data-analysis-id="${a.id}" data-entry-index="${i}">
             <div class="admin-entry-header">
-              <span class="admin-entry-type">${entry.type || 'journal entry'}</span>
-              <span class="admin-entry-date">${a.status === 'pending' ? `<input type="date" class="edit-date" value="${entry.date || ''}" data-field="date" data-entry="${i}">` : (entry.date || '')}</span>
+              <span class="admin-entry-type">${escapeHtml(entry.type || 'journal entry')}</span>
+              <span class="admin-entry-date">${a.status === 'pending' ? `<input type="date" class="edit-date" value="${escapeHtml(entry.date || '')}" data-field="date" data-entry="${i}">` : escapeHtml(entry.date || '')}</span>
             </div>
-            <div class="admin-entry-memo">${a.status === 'pending' ? `<input type="text" class="edit-memo" value="${(entry.memo || '').replace(/"/g, '&quot;')}" placeholder="memo / description" data-field="memo" data-entry="${i}">` : (entry.memo || '')}</div>
+            <div class="admin-entry-memo">${a.status === 'pending' ? `<input type="text" class="edit-memo" value="${escapeHtml(entry.memo || '')}" placeholder="memo / description" data-field="memo" data-entry="${i}">` : escapeHtml(entry.memo || '')}</div>
             <table class="admin-entry-table">
               <thead>
                 <tr>
@@ -280,8 +280,8 @@ function renderAnalysisCard(a) {
               <tbody>
                 ${entry.lines.map((line, li) => `
                   <tr data-line-index="${li}">
-                    <td>${a.status === 'pending' ? renderAccountSelect(line.accountName, line.accountId, i, li) : line.accountName}</td>
-                    <td>${a.status === 'pending' ? `<input type="text" class="edit-cell" value="${(line.description || '').replace(/"/g, '&quot;')}" data-field="description" data-entry="${i}" data-line="${li}">` : (line.description || '')}</td>
+                    <td>${a.status === 'pending' ? renderAccountSelect(line.accountName, line.accountId, i, li) : escapeHtml(line.accountName)}</td>
+                    <td>${a.status === 'pending' ? `<input type="text" class="edit-cell" value="${escapeHtml(line.description || '')}" data-field="description" data-entry="${i}" data-line="${li}">` : escapeHtml(line.description || '')}</td>
                     <td style="text-align:right">${a.status === 'pending' ? `<input type="number" step="0.01" class="edit-cell edit-amount" value="${line.type === 'debit' ? Math.abs(line.amount).toFixed(2) : ''}" placeholder="0.00" data-field="debit" data-entry="${i}" data-line="${li}">` : (line.type === 'debit' ? '$' + Math.abs(line.amount).toFixed(2) : '')}</td>
                     <td style="text-align:right">${a.status === 'pending' ? `<input type="number" step="0.01" class="edit-cell edit-amount" value="${line.type === 'credit' ? Math.abs(line.amount).toFixed(2) : ''}" placeholder="0.00" data-field="credit" data-entry="${i}" data-line="${li}">` : (line.type === 'credit' ? '$' + Math.abs(line.amount).toFixed(2) : '')}</td>
                     ${a.status === 'pending' ? `<td><button class="btn-remove-line" onclick="removeLine('${a.id}', ${i}, ${li})" title="remove line">&times;</button></td>` : ''}
@@ -311,11 +311,11 @@ function renderAnalysisCard(a) {
         ${analysis.needsReview && analysis.needsReview.length > 0 ? `
           <div class="admin-review-notes">
             <strong>needs review:</strong>
-            <ul>${analysis.needsReview.map(n => `<li>${n}</li>`).join('')}</ul>
+            <ul>${analysis.needsReview.map(n => `<li>${escapeHtml(n)}</li>`).join('')}</ul>
           </div>
         ` : ''}
 
-        ${analysis.notes ? `<div class="admin-notes">${analysis.notes}</div>` : ''}
+        ${analysis.notes ? `<div class="admin-notes">${escapeHtml(analysis.notes)}</div>` : ''}
 
         ${a.status === 'pending' ? `
           <div class="admin-actions" id="actions-${a.id}">
@@ -330,9 +330,9 @@ function renderAnalysisCard(a) {
           </div>
         ` : `
           <div class="admin-reviewed-info">
-            ${a.status === 'approved' ? 'approved' : a.status === 'rejected' ? 'rejected' : a.status}
+            ${a.status === 'approved' ? 'approved' : a.status === 'rejected' ? 'rejected' : escapeHtml(a.status)}
             ${a.reviewedAt ? ` on ${formatDate(a.reviewedAt)}` : ''}
-            ${a.rejectReason ? ` — reason: ${a.rejectReason}` : ''}
+            ${a.rejectReason ? ` — reason: ${escapeHtml(a.rejectReason)}` : ''}
           </div>
         `}
       </div>
