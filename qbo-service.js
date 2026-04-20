@@ -68,17 +68,55 @@ loadTokensFromDisk();
 // OAUTH FLOW (per-client)
 // ========================================
 
+// ---- OAuth CSRF protection ----
+// Pending connections keyed by a random nonce. Each entry records the
+// clientId that initiated the connect, plus an expiry. Callback must
+// present a matching nonce to retrieve the clientId — defeats CSRF where
+// an attacker links a QBO account into a victim's session.
+const pendingOAuthStates = new Map(); // nonce → { clientId, expiresAt }
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const crypto = require('crypto');
+
+function purgeExpiredOAuthStates() {
+  const now = Date.now();
+  for (const [k, v] of pendingOAuthStates) {
+    if (v.expiresAt < now) pendingOAuthStates.delete(k);
+  }
+}
+
 /**
- * Generate the QuickBooks OAuth authorization URL
+ * Generate the QuickBooks OAuth authorization URL and register a pending
+ * OAuth transaction keyed by a random nonce. The nonce is what's placed in
+ * the state param; the callback must present the same nonce to prove the
+ * callback actually resulted from this connect attempt.
  * @param {string} clientId - The client ID to associate this QBO connection with
  */
 function getAuthUri(clientId) {
-  // Encode clientId in the state parameter so we can associate it after callback
-  const state = clientId ? `jackdoes-qbo:${clientId}` : 'jackdoes-qbo:default';
+  purgeExpiredOAuthStates();
+  const nonce = crypto.randomBytes(24).toString('hex');
+  pendingOAuthStates.set(nonce, {
+    clientId: clientId || 'default',
+    expiresAt: Date.now() + OAUTH_STATE_TTL_MS,
+  });
   return oauthClient.authorizeUri({
     scope: [OAuthClient.scopes.Accounting, OAuthClient.scopes.OpenId],
-    state,
+    state: `jackdoes-qbo:${nonce}`,
   });
+}
+
+/**
+ * Look up and consume a pending OAuth state. Returns the clientId if the
+ * nonce matches an active pending entry, else null. Entries are removed
+ * after a successful lookup so each nonce is single-use.
+ */
+function consumeOAuthState(state) {
+  if (typeof state !== 'string') return null;
+  const nonce = state.startsWith('jackdoes-qbo:') ? state.slice('jackdoes-qbo:'.length) : state;
+  purgeExpiredOAuthStates();
+  const entry = pendingOAuthStates.get(nonce);
+  if (!entry) return null;
+  pendingOAuthStates.delete(nonce);
+  return entry.clientId;
 }
 
 /**
@@ -1300,6 +1338,7 @@ async function downloadAttachment(attachableId, clientId = 'default') {
 module.exports = {
   getAuthUri,
   handleCallback,
+  consumeOAuthState,
   isConnected,
   isAnyConnected,
   disconnect,

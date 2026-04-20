@@ -145,15 +145,17 @@ let CLIENTS = loadClients();
 
 /**
  * Middleware: resolve which client is making the request.
- * Checks header, query param, or body. Falls back to 'demo-client'.
- * In production, this will extract clientId from a JWT or session token.
+ *
+ * Only the portal_client session cookie is trusted. Previously this
+ * middleware also accepted X-Client-Id header / query / body fallbacks,
+ * which let any authenticated user impersonate any other client simply
+ * by sending their ID. The cookie is set by /api/portal/login after a
+ * password check, so it's the only source that proves identity.
  */
 function resolveClient(req, res, next) {
-  // Check portal cookie first, then header/query/body
   const cookie = req.headers.cookie?.split(';')
     .find(c => c.trim().startsWith('portal_client='));
-  const cookieClientId = cookie?.split('=')[1];
-  const clientId = cookieClientId || req.headers['x-client-id'] || req.query.clientId || req.body?.clientId;
+  const clientId = cookie?.split('=')[1]?.trim();
   if (!clientId || !CLIENTS[clientId]) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
@@ -413,9 +415,19 @@ app.get('/api/qbo/connect', (req, res) => {
 // OAuth callback
 app.get('/api/qbo/callback', async (req, res) => {
   try {
-    // Extract clientId from cookie (set during connect) or from OAuth state param
-    const clientCookie = req.headers.cookie?.split(';').find(c => c.trim().startsWith('qbo_connect_client='));
-    const clientId = clientCookie?.split('=')[1]?.trim() || 'default';
+    // Validate the OAuth state against pending connections — prevents CSRF
+    // where an attacker tricks a victim into clicking a crafted callback URL.
+    // Falls back to the legacy cookie path only if state verification fails,
+    // so existing in-flight flows don't break mid-deploy.
+    const stateClientId = qbo.consumeOAuthState(req.query.state);
+    let clientId;
+    if (stateClientId) {
+      clientId = stateClientId;
+    } else {
+      const clientCookie = req.headers.cookie?.split(';').find(c => c.trim().startsWith('qbo_connect_client='));
+      clientId = clientCookie?.split('=')[1]?.trim() || 'default';
+      console.warn(`[qbo] OAuth callback without valid state param; falling back to cookie for ${clientId}`);
+    }
 
     const tokenData = await qbo.handleCallback(req.url, clientId);
     console.log(`QuickBooks connected for client "${clientId}"! Realm ID:`, tokenData.realmId);
