@@ -655,7 +655,10 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
 
   // ---------- JournalEntry ----------
   try {
-    const jeResult = await qbPromise(qb, 'findJournalEntries', []);
+    // fetchAll: true pages through all results. Previously an empty criteria
+    // array capped at ~100 records, so clients with more transactions
+    // silently dropped older acquisitions from the scan.
+    const jeResult = await qbPromise(qb, 'findJournalEntries', { fetchAll: true });
     const jes = jeResult?.QueryResponse?.JournalEntry || [];
     console.log('[acquisitions] scanned', jes.length, 'journal entries');
     for (const je of jes) {
@@ -728,7 +731,7 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
 
   // ---------- Bill ----------
   try {
-    const billResult = await qbPromise(qb, 'findBills', []);
+    const billResult = await qbPromise(qb, 'findBills', { fetchAll: true });
     const bills = billResult?.QueryResponse?.Bill || [];
     console.log('[acquisitions] scanned', bills.length, 'bills');
     for (const bill of bills) {
@@ -744,7 +747,7 @@ async function getFixedAssetAcquisitions(clientId = 'default', costAccountIds = 
 
   // ---------- Purchase (Expense / Check / CreditCardCharge / Cash) ----------
   try {
-    const purchResult = await qbPromise(qb, 'findPurchases', []);
+    const purchResult = await qbPromise(qb, 'findPurchases', { fetchAll: true });
     const purchases = purchResult?.QueryResponse?.Purchase || [];
     console.log('[acquisitions] scanned', purchases.length, 'purchases');
     for (const pur of purchases) {

@@ -41,6 +41,19 @@ function sanitizeAssistantHtml(html) {
   });
 }
 
+/**
+ * Atomic JSON file write. Writes to a temp file alongside the destination
+ * then renames it into place. If the process crashes mid-write we end up
+ * with either the old file intact or the new complete file — never a
+ * truncated/corrupted half-written file. Use this for all persisted state.
+ */
+function writeJsonAtomic(filePath, data) {
+  const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  const payload = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+  fs.writeFileSync(tmp, payload, 'utf-8');
+  fs.renameSync(tmp, filePath);
+}
+
 // Constant-time equality for auth comparisons. Defeats timing attacks
 // that could otherwise leak password bytes via response timing.
 function safeEqual(a, b) {
@@ -112,7 +125,7 @@ function loadClients() {
 }
 
 function saveClients(clients) {
-  fs.writeFileSync(CLIENTS_FILE, JSON.stringify(clients, null, 2), 'utf-8');
+  writeJsonAtomic(CLIENTS_FILE, clients);
 }
 
 // ---- Password hashing helpers ----
@@ -182,7 +195,7 @@ function getStoredAdminPassword() {
 
 function saveAdminPassword(password) {
   // Always store bcrypt hashes going forward; never the plaintext.
-  fs.writeFileSync(ADMIN_SETTINGS_FILE, JSON.stringify({ password: hashPassword(password) }, null, 2), 'utf-8');
+  writeJsonAtomic(ADMIN_SETTINGS_FILE, { password: hashPassword(password) });
 }
 
 /**
@@ -197,7 +210,7 @@ function verifyAdminPassword(supplied) {
     try {
       // Only migrate the on-disk settings file, not the env fallback.
       if (fs.existsSync(ADMIN_SETTINGS_FILE)) {
-        fs.writeFileSync(ADMIN_SETTINGS_FILE, JSON.stringify({ password: hashPassword(supplied) }, null, 2), 'utf-8');
+        writeJsonAtomic(ADMIN_SETTINGS_FILE, { password: hashPassword(supplied) });
         console.log('[auth] upgraded legacy plaintext admin password to bcrypt hash');
       }
     } catch (e) {
@@ -1297,7 +1310,7 @@ function loadFixedAssets() {
 }
 
 function saveFixedAssets(data) {
-  fs.writeFileSync(FIXED_ASSETS_FILE, JSON.stringify(data, null, 2), 'utf-8');
+  writeJsonAtomic(FIXED_ASSETS_FILE, data);
 }
 
 function getClientAssets(clientId) {
@@ -2075,7 +2088,12 @@ function buildContinuitySchedule(clientData, asOfMonth, fiscalYearEnd) {
  */
 async function reconcileScheduleToQBO(clientId, schedule) {
   const checks = [];
-  const TOLERANCE = 0.01;
+  // Scale tolerance with the number of assets in a group so that a group of
+  // 200 individually-rounded amortization entries doesn't fail reconciliation
+  // by cumulative sub-cent rounding. $0.01 per asset, floor $0.01.
+  function toleranceFor(groupLen) {
+    return Math.max(0.01, 0.01 * Math.max(1, groupLen));
+  }
 
   if (!qbo.isConnected(clientId)) {
     return { checks: [], allPassed: false, error: 'QBO not connected' };
@@ -2112,6 +2130,11 @@ async function reconcileScheduleToQBO(clientId, schedule) {
 
   // Fuzzy account name lookup — handles account number prefixes (e.g. "1500 Computer hardware"
   // vs "Computer hardware"), case differences, and leading/trailing whitespace.
+  //
+  // Ordering matters. Substring matching is too permissive ("Computer Hardware"
+  // would match "Computer Hardware Depreciation") so it's the last resort and
+  // only used when the other strategies failed AND when exactly one candidate
+  // matches — avoiding the ambiguous-substring case entirely.
   function findTBBalance(targetName) {
     if (!targetName) return undefined;
     // 1. Exact match
@@ -2127,10 +2150,19 @@ async function reconcileScheduleToQBO(clientId, schedule) {
     for (const [key, val] of tbBalances) {
       if (stripNum(key) === targetStripped) return val;
     }
-    // 4. Check if one contains the other (for partial matches like sub-accounts)
+    // 4. Substring match — only return when exactly one candidate matches, so
+    // "Computer Hardware" can't ambiguously match both "Computer Hardware" and
+    // "Computer Hardware Accum. Depn". Log the candidates when ambiguous.
+    const subMatches = [];
     for (const [key, val] of tbBalances) {
       const keyLower = key.toLowerCase().trim();
-      if (keyLower.includes(targetLower) || targetLower.includes(keyLower)) return val;
+      if (keyLower.includes(targetLower) || targetLower.includes(keyLower)) {
+        subMatches.push([key, val]);
+      }
+    }
+    if (subMatches.length === 1) return subMatches[0][1];
+    if (subMatches.length > 1) {
+      console.warn(`[fixed-assets] ambiguous substring match for "${targetName}": ${subMatches.map(m => m[0]).join(', ')} — skipping fuzzy match`);
     }
     return undefined;
   }
@@ -2140,6 +2172,7 @@ async function reconcileScheduleToQBO(clientId, schedule) {
     // Cost check: compare schedule cost subtotal to TB balance for this account
     const tbCost = findTBBalance(glName);
     const schedCost = group.subtotal.cost;
+    const tolerance = toleranceFor((group.assets || []).length);
     if (tbCost !== undefined) {
       const diff = Math.round((tbCost - schedCost) * 100) / 100;
       checks.push({
@@ -2148,7 +2181,8 @@ async function reconcileScheduleToQBO(clientId, schedule) {
         schedule: schedCost,
         qbo: Math.round(tbCost * 100) / 100,
         difference: diff,
-        status: Math.abs(diff) < TOLERANCE ? 'pass' : 'fail',
+        tolerance,
+        status: Math.abs(diff) <= tolerance ? 'pass' : 'fail',
       });
     } else {
       checks.push({
@@ -2178,7 +2212,8 @@ async function reconcileScheduleToQBO(clientId, schedule) {
           schedule: schedAccum,
           qbo: Math.round(tbAccumAbs * 100) / 100,
           difference: diff,
-          status: Math.abs(diff) < TOLERANCE ? 'pass' : 'fail',
+          tolerance,
+          status: Math.abs(diff) <= tolerance ? 'pass' : 'fail',
         });
       } else {
         checks.push({
@@ -2868,7 +2903,7 @@ function loadPrepaidExpenses() {
 }
 
 function savePrepaidExpenses(data) {
-  fs.writeFileSync(PREPAID_FILE, JSON.stringify(data, null, 2), 'utf-8');
+  writeJsonAtomic(PREPAID_FILE, data);
 }
 
 let prepaidData = loadPrepaidExpenses();
@@ -3775,7 +3810,7 @@ function loadAccruedLiabilities() {
   return {};
 }
 function saveAccruedLiabilities(data) {
-  fs.writeFileSync(ACCRUED_LIABILITIES_FILE, JSON.stringify(data, null, 2), 'utf-8');
+  writeJsonAtomic(ACCRUED_LIABILITIES_FILE, data);
 }
 let accruedLiabData = loadAccruedLiabilities();
 
@@ -4631,7 +4666,7 @@ function loadShareholderInvoices() {
   return {};
 }
 function saveShareholderInvoices(data) {
-  fs.writeFileSync(SHAREHOLDER_INVOICES_FILE, JSON.stringify(data, null, 2), 'utf-8');
+  writeJsonAtomic(SHAREHOLDER_INVOICES_FILE, data);
 }
 let shareholderInvoiceData = loadShareholderInvoices();
 

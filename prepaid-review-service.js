@@ -247,10 +247,18 @@ Respond with JSON only.`;
 
   let parsed;
   try {
+    // Cache the review system prompt: it's static across every run and is
+    // ~3 KB, so caching it cuts per-call cost and latency. The cache key is
+    // the prompt text itself; Anthropic will reuse across calls within the
+    // ephemeral TTL.
     const response = await anthropic.messages.create({
       model: REVIEW_MODEL,
       max_tokens: 4000,
-      system: REVIEW_SYSTEM_PROMPT,
+      system: [{
+        type: 'text',
+        text: REVIEW_SYSTEM_PROMPT,
+        cache_control: { type: 'ephemeral' },
+      }],
       messages: [{ role: 'user', content: userMessage }],
     });
     const text = response.content?.[0]?.text || '';

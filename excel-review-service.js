@@ -318,10 +318,16 @@ Respond with JSON only.`;
 
   let parsed;
   try {
+    // Cache the static review system prompt (Anthropic prompt caching). Cuts
+    // per-call cost/latency on repeated reviews with the same instructions.
     const response = await anthropic.messages.create({
       model: REVIEW_MODEL,
       max_tokens: 4000,
-      system: REVIEW_SYSTEM_PROMPT,
+      system: [{
+        type: 'text',
+        text: REVIEW_SYSTEM_PROMPT,
+        cache_control: { type: 'ephemeral' },
+      }],
       messages: [{ role: 'user', content: userMessage }],
     });
     const text = response.content?.[0]?.text || '';
