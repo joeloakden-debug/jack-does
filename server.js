@@ -3776,39 +3776,48 @@ function parsePnlMonthlyReport(report) {
 
 // ---- Accrued liabilities helpers ----
 
+// Round a number to 2 decimal places (cents). Defensively coerces to Number.
+function round2(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+// Format a Date object as YYYY-MM-DD in the server's *local* timezone.
+// NEVER use `.toISOString().split('T')[0]` for local-date strings — it coerces
+// to UTC, which silently shifts the date by ±1 day depending on the server's
+// timezone offset and produces wrong close-period boundaries for any user
+// whose timezone is east of UTC.
+function localDateStr(d) {
+  const dt = (d instanceof Date) ? d : new Date(d);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+}
+
 // Format a number as $X.XX for embedding in formula strings
 function money(n) {
-  const v = Number(n) || 0;
-  return `$${v.toFixed(2)}`;
+  return `$${(Number(n) || 0).toFixed(2)}`;
 }
 
 /**
- * Walk QBO Bills + Purchases responses and build an index of
- * accountId → Map(vendor → { vendor, amount, count, transactions })
- * Splits multi-line transactions by AccountBasedExpenseLineDetail so
- * a Bill that posts to two accounts contributes separately to each.
+ * Walk a Bill/Purchase response and return a flat list of
+ * { accountId, accountName, vendor, amount, date, txnId, txnType, docNumber, memo }
+ * entries — one per AccountBasedExpenseLineDetail line. Used by both the
+ * Part A vendor index and the Part B transaction list so multi-line
+ * transactions are represented consistently across both flows.
  */
-function buildAccountVendorIndex(billsRes, purchasesRes) {
-  const index = new Map();
-  function add(accountId, vendor, entry) {
-    if (!accountId || !entry || !(entry.amount > 0)) return;
-    if (!index.has(accountId)) index.set(accountId, new Map());
-    const vmap = index.get(accountId);
-    if (!vmap.has(vendor)) vmap.set(vendor, { vendor, amount: 0, count: 0, transactions: [] });
-    const v = vmap.get(vendor);
-    v.amount += entry.amount;
-    v.count++;
-    v.transactions.push(entry);
-  }
-
+function extractExpenseLines(billsRes, purchasesRes) {
+  const lines = [];
   (billsRes?.QueryResponse?.Bill || []).forEach(b => {
     const vendor = b.VendorRef?.name || 'Unknown';
     (b.Line || []).forEach(line => {
       const det = line.AccountBasedExpenseLineDetail;
       if (!det) return;
-      add(det.AccountRef?.value, vendor, {
-        amount: Number(line.Amount || 0),
-        date: b.TxnDate,
+      const amount = Number(line.Amount || 0);
+      if (!(amount > 0)) return;
+      lines.push({
+        accountId: det.AccountRef?.value || '',
+        accountName: det.AccountRef?.name || '',
+        vendor,
+        amount,
+        date: b.TxnDate || '',
         txnId: b.Id,
         txnType: 'Bill',
         docNumber: b.DocNumber || '',
@@ -3816,15 +3825,19 @@ function buildAccountVendorIndex(billsRes, purchasesRes) {
       });
     });
   });
-
   (purchasesRes?.QueryResponse?.Purchase || []).forEach(p => {
     const vendor = p.EntityRef?.name || 'Unknown';
     (p.Line || []).forEach(line => {
       const det = line.AccountBasedExpenseLineDetail;
       if (!det) return;
-      add(det.AccountRef?.value, vendor, {
-        amount: Number(line.Amount || 0),
-        date: p.TxnDate,
+      const amount = Number(line.Amount || 0);
+      if (!(amount > 0)) return;
+      lines.push({
+        accountId: det.AccountRef?.value || '',
+        accountName: det.AccountRef?.name || '',
+        vendor,
+        amount,
+        date: p.TxnDate || '',
         txnId: p.Id,
         txnType: 'Purchase',
         docNumber: p.DocNumber || '',
@@ -3832,7 +3845,35 @@ function buildAccountVendorIndex(billsRes, purchasesRes) {
       });
     });
   });
+  return lines;
+}
 
+/**
+ * Build an index of accountId → Map(vendor → { vendor, amount, count, transactions })
+ * from a flat list of expense lines (as produced by extractExpenseLines). Splits
+ * multi-line transactions across accounts so a Bill posting to two accounts
+ * contributes separately to each.
+ */
+function buildAccountVendorIndex(billsRes, purchasesRes) {
+  const index = new Map();
+  const entries = extractExpenseLines(billsRes, purchasesRes);
+  for (const e of entries) {
+    if (!e.accountId) continue;
+    if (!index.has(e.accountId)) index.set(e.accountId, new Map());
+    const vmap = index.get(e.accountId);
+    if (!vmap.has(e.vendor)) vmap.set(e.vendor, { vendor: e.vendor, amount: 0, count: 0, transactions: [] });
+    const v = vmap.get(e.vendor);
+    v.amount += e.amount;
+    v.count++;
+    v.transactions.push({
+      amount: e.amount,
+      date: e.date,
+      txnId: e.txnId,
+      txnType: e.txnType,
+      docNumber: e.docNumber,
+      memo: e.memo,
+    });
+  }
   return index;
 }
 
@@ -3900,12 +3941,12 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
       : determineAmortizationMonth(fixedAssetClient, closeDate).month;
 
     const { year, monthIndex } = parseMonthStr(targetMonth);
-    const periodEnd = lastDayOfMonthDate(year, monthIndex).toISOString().split('T')[0];
+    const periodEnd = localDateStr(lastDayOfMonthDate(year, monthIndex));
 
     // ---- Part A: historical pattern analysis ----
     // 18 months back from start of close month
     const lookbackStart = new Date(year, monthIndex - 18, 1);
-    const lookbackStartStr = lookbackStart.toISOString().split('T')[0];
+    const lookbackStartStr = localDateStr(lookbackStart);
 
     console.log(`[accrued-liab] Part A: P&L monthly ${lookbackStartStr} → ${periodEnd} for ${clientId}`);
     const pnlReport = await qbo.getProfitAndLossMonthly(lookbackStartStr, periodEnd, clientId);
@@ -3955,10 +3996,11 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
     // Group bills + purchases per (accountId → vendor) so each flagged Part A
     // account can show what made up the prior month's spend, which is the
     // basis for "missing recurring" suggestions.
-    const priorMonthDate = new Date(year, monthIndex - 1, 1);
-    const priorMonthStart = priorMonthDate.toISOString().split('T')[0];
-    const priorMonthEnd = lastDayOfMonthDate(priorMonthDate.getFullYear(), priorMonthDate.getMonth())
-      .toISOString().split('T')[0];
+    // Derive the prior-month window directly from priorMonthKey so it can't
+    // drift from the rest of the analysis (both use the same source of truth).
+    const [pmY, pmM] = priorMonthKey.split('-').map(Number);
+    const priorMonthStart = localDateStr(new Date(pmY, pmM - 1, 1));
+    const priorMonthEnd = localDateStr(lastDayOfMonthDate(pmY, pmM - 1));
 
     let priorMonthVendorIndex = new Map(); // accountId → Map(vendor → { vendor, amount, count, transactions })
     try {
@@ -3997,8 +4039,10 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
       const appearedLastMonth = !!acct.monthlyTotals[priorMonthKey];
       const priorMonthAmount = acct.monthlyTotals[priorMonthKey] || 0;
 
-      // Skip accounts with negligible history
-      if (sumPrior < 1 && currentMonth < 1 && !appearedLastMonth) {
+      // Skip accounts with negligible history. "Appeared last month" only
+      // counts if the prior-month amount itself is material — otherwise a
+      // trivial $0.50 one-off keeps the account in the evaluated bucket.
+      if (sumPrior < 1 && currentMonth < 1 && priorMonthAmount < 1) {
         diagnostics.negligibleHistory++;
         continue;
       }
@@ -4022,13 +4066,16 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
             diagnostics.nearMiss.push({
               accountId: acct.accountId,
               accountName: acct.accountName,
-              priorMonthAmount: Math.round(priorMonthAmount * 100) / 100,
+              priorMonthAmount: round2(priorMonthAmount),
               frequency,
               note: 'appeared last month but frequency too low',
             });
           }
         }
-      } else if (activeMonthAverage > 0 && currentMonth < activeMonthAverage * (1 - thresholdPct) && frequency >= 3) {
+      } else if (activeMonthAverage > 0 && currentMonth < activeMonthAverage * (1 - thresholdPct) && frequency >= 2) {
+        // Lowered from frequency >= 3 to match the missing-detection threshold,
+        // so a newer recurring expense that shows up well below its normal
+        // per-occurrence amount is still flagged.
         flagged = true; reason = 'below_average';
       } else {
         diagnostics.withinTolerance++;
@@ -4036,26 +4083,22 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
 
       if (flagged) {
         // ---- Choose calculation basis (priority order) ----
-        // 1. New subscription (1 month of history) → use prior-month actual; nothing else is reliable
-        // 2. Recurring with 2+ months of history → use active-month average (excludes empty months that distort)
-        // 3. Established with 3+ months → use active-month average
-        // 4. Below-average case → use the gap to the active-month average
-        let basis, basisValue, formula, suggestedAccrual;
+        // 1. Below-average case → use the gap to the active-month average
+        // 2. New subscription (1 month of history) → use prior-month actual; nothing else is reliable
+        // 3. Recurring/established with 2+ months → use active-month average
+        let basis, basisValue, formula;
         if (reason === 'below_average') {
           basis = 'gap_to_active_average';
-          basisValue = Math.round((activeMonthAverage - currentMonth) * 100) / 100;
+          basisValue = round2(activeMonthAverage - currentMonth);
           formula = `Active-month average ${money(activeMonthAverage)} − this month ${money(currentMonth)} = ${money(basisValue)}`;
-          suggestedAccrual = basisValue;
         } else if (frequency === 1 && appearedLastMonth) {
           basis = 'prior_month_actual';
-          basisValue = Math.round(priorMonthAmount * 100) / 100;
+          basisValue = round2(priorMonthAmount);
           formula = `Prior month (${priorMonthKey}) actual = ${money(priorMonthAmount)} (only 1 month of history available)`;
-          suggestedAccrual = basisValue;
         } else {
           basis = 'active_month_average';
-          basisValue = Math.round(activeMonthAverage * 100) / 100;
+          basisValue = round2(activeMonthAverage);
           formula = `Σ prior spend ${money(sumPrior)} ÷ months with activity ${frequency} = ${money(activeMonthAverage)}`;
-          suggestedAccrual = basisValue;
         }
 
         // ---- Vendor breakdown (from prior month transactions) ----
@@ -4063,7 +4106,7 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
         const vendorBreakdown = vendorMap ? Array.from(vendorMap.values())
           .map(v => ({
             vendor: v.vendor,
-            amount: Math.round(v.amount * 100) / 100,
+            amount: round2(v.amount),
             count: v.count,
             transactions: v.transactions,
           }))
@@ -4077,22 +4120,22 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
           monthsInLookback,
           monthsSinceFirstActivity,
           firstActiveMonth,
-          windowAverage: Math.round(windowAverage * 100) / 100,
-          historyAverage: Math.round(historyAverage * 100) / 100,
-          activeMonthAverage: Math.round(activeMonthAverage * 100) / 100,
-          // Legacy field kept for backward compatibility with UI/tests
-          average: Math.round(activeMonthAverage * 100) / 100,
-          totalPriorSpend: Math.round(sumPrior * 100) / 100,
-          currentMonth: Math.round(currentMonth * 100) / 100,
-          priorMonthAmount: Math.round(priorMonthAmount * 100) / 100,
+          windowAverage: round2(windowAverage),
+          historyAverage: round2(historyAverage),
+          activeMonthAverage: round2(activeMonthAverage),
+          // Legacy field kept for backward compatibility with older clients
+          average: round2(activeMonthAverage),
+          totalPriorSpend: round2(sumPrior),
+          currentMonth: round2(currentMonth),
+          priorMonthAmount: round2(priorMonthAmount),
           priorMonthKey,
           appearedLastMonth,
-          gap: Math.round((activeMonthAverage - currentMonth) * 100) / 100,
+          gap: round2(activeMonthAverage - currentMonth),
           flagged: true,
           reason,
           calculation: { basis, basisValue, formula },
           vendorBreakdown,
-          accrualAmount: suggestedAccrual,
+          accrualAmount: basisValue,
           status: 'pending',
         });
       }
@@ -4102,9 +4145,8 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
     partAAccounts.sort((a, b) => Math.abs(b.accrualAmount) - Math.abs(a.accrualAmount));
 
     // ---- Part B: subsequent events ----
-    const nextMonthFirst = new Date(year, monthIndex + 1, 1);
-    const windowStart = nextMonthFirst.toISOString().split('T')[0];
-    const todayStr = new Date().toISOString().split('T')[0];
+    const windowStart = localDateStr(new Date(year, monthIndex + 1, 1));
+    const todayStr = localDateStr(new Date());
     const windowEnd = todayStr;
     // If we're analyzing the current in-progress month, the "subsequent events" window is invalid
     // (windowStart is in the future). Skip the QBO fetch and note it in the diagnostics.
@@ -4123,33 +4165,28 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/analyze', requireAdmi
         qbo.getExpenseTransactions(windowStart, windowEnd, 500, clientId).catch(() => null),
       ]);
 
-      const bills = (billsRes?.QueryResponse?.Bill || []).map(b => ({
-        txnId: b.Id, txnType: 'Bill', date: b.TxnDate,
-        amount: Number(b.TotalAmt || 0),
-        vendor: b.VendorRef?.name || 'Unknown',
-        memo: b.PrivateNote || b.Memo || '',
-        accountId: b.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.value || '',
-        accountName: b.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.name || '',
-      }));
-      const purchases = (purchasesRes?.QueryResponse?.Purchase || []).map(p => ({
-        txnId: p.Id, txnType: 'Purchase', date: p.TxnDate,
-        amount: Number(p.TotalAmt || 0),
-        vendor: p.EntityRef?.name || 'Unknown',
-        memo: p.PrivateNote || p.Memo || '',
-        accountId: p.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.value || '',
-        accountName: p.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.name || '',
-      }));
+      // Walk every expense line (not just line 0) so multi-account transactions
+      // contribute correctly to Part B. This mirrors the Part A vendor index.
+      const allLines = extractExpenseLines(billsRes, purchasesRes);
+      const partAAccountIds = new Set(partAAccounts.map(a => a.accountId));
 
-      subsequentTxns = [...bills, ...purchases]
-        .filter(t => !excludeSet.has(t.accountId) && t.amount > 0)
+      subsequentTxns = allLines
+        .filter(l => l.accountId && !excludeSet.has(l.accountId))
         .sort((a, b) => b.amount - a.amount)
-        .map(t => ({
-          ...t,
+        .map(l => ({
+          txnId: l.txnId,
+          txnType: l.txnType,
+          date: l.date,
+          amount: round2(l.amount),
+          vendor: l.vendor,
+          memo: l.memo,
+          docNumber: l.docNumber,
+          accountId: l.accountId,
+          accountName: l.accountName,
           flagged: true,
-          accrualAmount: t.amount,
+          accrualAmount: round2(l.amount),
           status: 'pending',
-          // Note overlap with Part A
-          overlapWithPartA: partAAccounts.some(a => a.accountId === t.accountId),
+          overlapWithPartA: partAAccountIds.has(l.accountId),
         }));
     }
 
@@ -4215,7 +4252,7 @@ app.put('/api/admin/clients/:clientId/accrued-liabilities/runs/:month/items', re
   if (!item) return res.status(404).json({ error: 'item not found' });
 
   if (status !== undefined) item.status = status; // 'pending' | 'accrued' | 'dismissed'
-  if (accrualAmount !== undefined) item.accrualAmount = Number(accrualAmount);
+  if (accrualAmount !== undefined) item.accrualAmount = round2(accrualAmount);
 
   saveAccruedLiabilities(accruedLiabData);
   res.json({ success: true, item });
@@ -4257,10 +4294,10 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/post', requireAdmin, 
         }
       })();
       const vb = Array.isArray(a.vendorBreakdown) ? a.vendorBreakdown : [];
-      const vbTotal = Math.round(vb.reduce((s, v) => s + v.amount, 0) * 100) / 100;
-      const accrual = Math.round(a.accrualAmount * 100) / 100;
+      const vbTotal = round2(vb.reduce((s, v) => s + v.amount, 0));
+      const accrual = round2(a.accrualAmount);
       // If the vendor breakdown reconciles within $0.50 of the suggested accrual,
-      // split per vendor proportionally. Otherwise post one rolled-up line.
+      // split per vendor. Otherwise post one rolled-up line.
       if (vb.length > 0 && Math.abs(vbTotal - accrual) <= 0.5) {
         for (const v of vb) {
           lines.push({
@@ -4269,7 +4306,7 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/post', requireAdmin, 
             accountName: a.accountName,
             vendor: v.vendor,
             description: `Accrued liabilities - ${reasonLabel} - ${a.accountName} - ${v.vendor}`,
-            amount: Math.round(v.amount * 100) / 100,
+            amount: round2(v.amount),
           });
         }
       } else if (vb.length > 0) {
@@ -4300,8 +4337,9 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/post', requireAdmin, 
         source: 'subsequent',
         accountId: t.accountId,
         accountName: t.accountName,
+        vendor: t.vendor,
         description: `Accrued liabilities - ${t.vendor} (${t.date})`,
-        amount: Math.round(t.accrualAmount * 100) / 100,
+        amount: round2(t.accrualAmount),
       });
     }
 
@@ -4309,10 +4347,10 @@ app.post('/api/admin/clients/:clientId/accrued-liabilities/post', requireAdmin, 
       return res.status(400).json({ error: 'No accrual items to post (all dismissed or zero)' });
     }
 
-    const totalAmount = Math.round(lines.reduce((s, l) => s + l.amount, 0) * 100) / 100;
+    const totalAmount = round2(lines.reduce((s, l) => s + l.amount, 0));
     const { year, monthIndex } = parseMonthStr(month);
-    const accrualDate = lastDayOfMonthDate(year, monthIndex).toISOString().split('T')[0];
-    const reversalDate = new Date(year, monthIndex + 1, 1).toISOString().split('T')[0];
+    const accrualDate = localDateStr(lastDayOfMonthDate(year, monthIndex));
+    const reversalDate = localDateStr(new Date(year, monthIndex + 1, 1));
     const clientName = CLIENTS[clientId]?.name || clientId;
 
     // Build accrual JE: Dr expenses, Cr accrued liabilities

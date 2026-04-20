@@ -2353,15 +2353,15 @@ function renderAccruedLiabDetail(a, lookbackMonths, targetMonth, priorMonthKey) 
   const freq = a.frequency ?? 0;
 
   const rowsHtml = [
-    { label: 'Σ prior spend (all months in lookback)', value: fmtMoney(totalSpend), note: 'sum of activity in the 18-month window' },
-    { label: 'Months in lookback window', value: monthsInLookback, note: '18 by default; capped to data available' },
+    { label: 'Σ prior spend (all months in lookback)', value: fmtMoney(totalSpend), note: `sum across the ${monthsInLookback}-month window` },
+    { label: 'Months in lookback window', value: monthsInLookback, note: 'P&L monthly columns returned for the prior-period window' },
     { label: 'Months since first activity', value: monthsSinceFirst, note: `first seen ${a.firstActiveMonth || '—'}` },
-    { label: 'Months with activity (frequency)', value: freq, note: 'months that had non-zero activity' },
+    { label: 'Months with activity (frequency)', value: freq, note: 'months with non-zero activity' },
     { label: 'Window average (Σ ÷ lookback months)', value: fmtMoney(totalSpend / Math.max(1, monthsInLookback)), note: 'understates recurring cost when history is short' },
     { label: 'History average (Σ ÷ months since first activity)', value: fmtMoney(monthsSinceFirst > 0 ? totalSpend / monthsSinceFirst : 0), note: 'better when activity is consistent month-to-month' },
     { label: 'Active-month average (Σ ÷ frequency)', value: fmtMoney(freq > 0 ? totalSpend / freq : 0), note: '★ best estimate of per-occurrence cost', highlight: calc.basis === 'active_month_average' },
     { label: `Prior month actual (${a.priorMonthKey || priorMonthKey || '—'})`, value: fmtMoney(a.priorMonthAmount ?? 0), note: 'most direct signal when only 1-2 months of history exist', highlight: calc.basis === 'prior_month_actual' },
-    { label: `This month actual (${targetMonth})`, value: fmtMoney(a.currentMonth ?? 0), note: 'what is currently in QBO for this month' },
+    { label: `This month actual (${targetMonth})`, value: fmtMoney(a.currentMonth ?? 0), note: 'what is currently in QBO for this month', highlight: calc.basis === 'gap_to_active_average' },
   ];
   const mathTable = `
     <table style="width:100%;border-collapse:collapse;font-size:0.72rem;">
