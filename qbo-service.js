@@ -152,6 +152,12 @@ async function handleCallback(url, clientId) {
  * Refresh the access token if expired
  * @param {string} clientId - The client whose token to refresh
  */
+// In-flight refresh promises keyed by clientId. Concurrent callers that
+// find an expired token will all await the same promise instead of each
+// firing their own refresh — which previously would have both updated
+// tokenStore and both written the file, corrupting the state.
+const refreshInFlight = new Map();
+
 async function refreshTokenIfNeeded(clientId = 'default') {
   const tokenData = tokenStore.get(clientId);
   if (!tokenData) {
@@ -160,29 +166,40 @@ async function refreshTokenIfNeeded(clientId = 'default') {
 
   // Check if token is expired (with 5 min buffer)
   if (Date.now() > tokenData.expiresAt - 300000) {
-    try {
-      oauthClient.setToken({
-        access_token: tokenData.accessToken,
-        refresh_token: tokenData.refreshToken,
-        token_type: 'bearer',
-        realmId: tokenData.realmId,
-      });
-
-      const authResponse = await oauthClient.refresh();
-      const newToken = authResponse.getJson();
-
-      tokenData.accessToken = newToken.access_token;
-      tokenData.refreshToken = newToken.refresh_token;
-      tokenData.expiresAt = Date.now() + (newToken.expires_in * 1000);
-
-      tokenStore.set(clientId, tokenData);
-      saveTokensToDisk();
-    } catch (refreshError) {
-      // If refresh fails, the tokens are invalid — clear them so user can reconnect
-      console.error(`[QBO] Refresh token invalid for client "${clientId}", clearing connection. User must reconnect.`);
-      disconnect(clientId);
-      throw new Error('The Refresh token is invalid, please Authorize again.');
+    if (refreshInFlight.has(clientId)) {
+      // Another request is already refreshing for this client — join it.
+      return refreshInFlight.get(clientId);
     }
+    const p = (async () => {
+      try {
+        oauthClient.setToken({
+          access_token: tokenData.accessToken,
+          refresh_token: tokenData.refreshToken,
+          token_type: 'bearer',
+          realmId: tokenData.realmId,
+        });
+
+        const authResponse = await oauthClient.refresh();
+        const newToken = authResponse.getJson();
+
+        tokenData.accessToken = newToken.access_token;
+        tokenData.refreshToken = newToken.refresh_token;
+        tokenData.expiresAt = Date.now() + (newToken.expires_in * 1000);
+
+        tokenStore.set(clientId, tokenData);
+        saveTokensToDisk();
+        return tokenData;
+      } catch (refreshError) {
+        // If refresh fails, the tokens are invalid — clear them so user can reconnect
+        console.error(`[QBO] Refresh token invalid for client "${clientId}", clearing connection. User must reconnect.`);
+        disconnect(clientId);
+        throw new Error('The Refresh token is invalid, please Authorize again.');
+      } finally {
+        refreshInFlight.delete(clientId);
+      }
+    })();
+    refreshInFlight.set(clientId, p);
+    return p;
   }
 
   return tokenData;
@@ -1239,7 +1256,14 @@ function qboApiBase() {
 async function getTransactionAttachments(txnId, txnType, clientId = 'default') {
   const tokenData = await refreshTokenIfNeeded(clientId);
   const realmId = tokenData.realmId;
-  const query = `select * from Attachable where AttachableRef.EntityRef.value = '${txnId}' and AttachableRef.EntityRef.type = '${txnType}'`;
+  // Validate+escape inputs to prevent QL injection. txnId should always be
+  // numeric in QBO; txnType is an enum. Reject anything outside those shapes.
+  const safeTxnId = String(txnId).replace(/[^0-9]/g, '');
+  const safeTxnType = String(txnType).replace(/[^A-Za-z]/g, '');
+  if (!safeTxnId || !safeTxnType) {
+    throw new Error('Invalid txnId or txnType');
+  }
+  const query = `select * from Attachable where AttachableRef.EntityRef.value = '${safeTxnId}' and AttachableRef.EntityRef.type = '${safeTxnType}'`;
   const url = `${qboApiBase()}/v3/company/${realmId}/query?query=${encodeURIComponent(query)}&minorversion=65`;
 
   const res = await fetch(url, {

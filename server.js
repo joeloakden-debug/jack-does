@@ -1674,10 +1674,11 @@ app.post('/api/admin/clients/:clientId/fixed-assets', requireAdmin, (req, res) =
     description: description || '',
     glAccountName: glAccountName || '',
     vendorName: vendorName || '',
-    originalCost: parseFloat(originalCost) || 0,
+    // Round currency fields so downstream amortization math is cent-accurate.
+    originalCost: round2(originalCost),
     usefulLifeMonths: parseInt(usefulLifeMonths, 10) || 60,
-    salvageValue: parseFloat(salvageValue || 0),
-    acquisitionDate: acquisitionDate || new Date().toISOString().split('T')[0],
+    salvageValue: round2(salvageValue || 0),
+    acquisitionDate: acquisitionDate || localDateStr(new Date()),
     assetAccountId, assetAccountName,
     expenseAccountId, expenseAccountName,
     accumAccountId, accumAccountName,
@@ -1705,7 +1706,8 @@ app.put('/api/admin/clients/:clientId/fixed-assets/:id', requireAdmin, (req, res
   fields.forEach(f => {
     if (req.body[f] !== undefined) {
       if (f === 'originalCost' || f === 'salvageValue') {
-        clientData.assets[idx][f] = parseFloat(req.body[f]);
+        // Cent-accurate currency storage.
+        clientData.assets[idx][f] = round2(req.body[f]);
       } else if (f === 'usefulLifeMonths') {
         clientData.assets[idx][f] = parseInt(req.body[f], 10);
       } else {
@@ -2081,7 +2083,7 @@ async function reconcileScheduleToQBO(clientId, schedule) {
 
   // Pull TB as-of last day of asOfMonth
   const { year, monthIndex } = parseMonthStr(schedule.asOfMonth);
-  const asOf = lastDayOfMonthDate(year, monthIndex).toISOString().split('T')[0];
+  const asOf = localDateStr(lastDayOfMonthDate(year, monthIndex));
 
   let tb;
   try {
@@ -2341,12 +2343,13 @@ function computeAmortizationPreview(clientData, targetMonth) {
     const monthly = calcMonthlyAmort(a, policy, monthsElapsed, priorAmort);
     if (monthly <= 0) return;
 
-    totalAmount += monthly;
+    const monthlyRounded = round2(monthly);
+    totalAmount += monthlyRounded;
     lines.push({
       assetId: a.id,
       assetName: a.name,
       description: a.description || '',
-      amount: monthly,
+      amount: monthlyRounded,
       method: policy.method,
       className: policy.glAccountName || a.glAccountName || a.assetAccountName || '',
       expenseAccountId: policy.expenseAccountId,
@@ -2356,7 +2359,9 @@ function computeAmortizationPreview(clientData, targetMonth) {
     });
   });
 
-  return { lines, totalAmount };
+  // Round the aggregate to cents so downstream reconciliation sees a
+  // value consistent with the sum of (already rounded) per-line amounts.
+  return { lines, totalAmount: round2(totalAmount) };
 }
 
 // Determine the current closing period based purely on the QBO close date.
@@ -2719,7 +2724,7 @@ app.post('/api/admin/clients/:clientId/fixed-assets/run-amortization', requireAd
 
     const { year, monthIndex } = parseMonthStr(targetMonth);
     const asOf = lastDayOfMonthDate(year, monthIndex);
-    const lastDayStr = asOf.toISOString().split('T')[0];
+    const lastDayStr = localDateStr(asOf);
 
     const { lines: previewLines, totalAmount } = computeAmortizationPreview(clientData, targetMonth);
 
@@ -3006,12 +3011,16 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/items', requireAdmin, (r
   }
 
   const c = getClientPrepaid(req.params.clientId);
+  // All currency fields are rounded to 2dp on entry so downstream amortization
+  // math doesn't accumulate float imprecision and reconciliation stays exact.
+  const totalAmt = round2(totalAmount);
+  const opening = openingBalance != null ? round2(openingBalance) : totalAmt;
   const item = {
     id: Date.now().toString() + Math.random().toString(36).slice(2, 7),
     vendor: String(vendor),
     description: description || '',
-    totalAmount: Number(totalAmount),
-    openingBalance: openingBalance != null ? Number(openingBalance) : Number(totalAmount),
+    totalAmount: totalAmt,
+    openingBalance: opening,
     startDate,
     endDate,
     expenseAccountId: String(expenseAccountId),
@@ -3035,7 +3044,8 @@ app.put('/api/admin/clients/:clientId/prepaid-expenses/items/:id', requireAdmin,
   const allowed = ['vendor', 'description', 'totalAmount', 'openingBalance', 'startDate', 'endDate', 'expenseAccountId', 'expenseAccountName'];
   for (const key of allowed) {
     if (req.body[key] !== undefined) {
-      item[key] = ['totalAmount', 'openingBalance'].includes(key) ? Number(req.body[key]) : req.body[key];
+      // Round currency fields on update to keep storage cent-accurate.
+      item[key] = ['totalAmount', 'openingBalance'].includes(key) ? round2(req.body[key]) : req.body[key];
     }
   }
   savePrepaidExpenses(prepaidData);
@@ -3138,7 +3148,7 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/run-amortization', requi
     if (lines.length === 0) return res.status(400).json({ error: `No prepaid items to amortize in ${targetMonth}` });
 
     const { year, monthIndex } = parseMonthStr(targetMonth);
-    const lastDayStr = lastDayOfMonthDate(year, monthIndex).toISOString().split('T')[0];
+    const lastDayStr = localDateStr(lastDayOfMonthDate(year, monthIndex));
 
     // Build the JE: Dr each expense line, Cr Prepaid Expenses for the total
     const jeLines = [];
@@ -3517,7 +3527,7 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan', requireAdmin, asy
 
     const { year, monthIndex } = parseMonthStr(targetMonth);
     const periodStart = `${year}-${String(monthIndex + 1).padStart(2, '0')}-01`;
-    const periodEnd = lastDayOfMonthDate(year, monthIndex).toISOString().split('T')[0];
+    const periodEnd = localDateStr(lastDayOfMonthDate(year, monthIndex));
 
     const threshold = Number(req.body?.threshold) || 500;
     const maxTxns = Math.min(Number(req.body?.maxTransactions) || 30, 50);
@@ -3530,18 +3540,22 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan', requireAdmin, asy
       qbo.getExpenseTransactions(periodStart, periodEnd, 200, clientId).catch(() => null),
     ]);
 
-    const bills = (billsRes?.QueryResponse?.Bill || []).map(b => ({
-      id: b.Id, type: 'Bill', date: b.TxnDate, amount: Number(b.TotalAmt || 0),
-      vendor: b.VendorRef?.name || 'Unknown', memo: b.PrivateNote || b.Memo || '',
-      accountName: b.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.name || '',
-      accountId: b.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.value || '',
-    }));
-    const purchases = (purchasesRes?.QueryResponse?.Purchase || []).map(p => ({
-      id: p.Id, type: 'Purchase', date: p.TxnDate, amount: Number(p.TotalAmt || 0),
-      vendor: p.EntityRef?.name || 'Unknown', memo: p.PrivateNote || p.Memo || '',
-      accountName: p.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.name || '',
-      accountId: p.Line?.[0]?.AccountBasedExpenseLineDetail?.AccountRef?.value || '',
-    }));
+    const bills = (billsRes?.QueryResponse?.Bill || []).map(b => {
+      const acct = summarizeTxnAccounts(b.Line);
+      return {
+        id: b.Id, type: 'Bill', date: b.TxnDate, amount: Number(b.TotalAmt || 0),
+        vendor: b.VendorRef?.name || 'Unknown', memo: b.PrivateNote || b.Memo || '',
+        accountName: acct.accountName, accountId: acct.accountId,
+      };
+    });
+    const purchases = (purchasesRes?.QueryResponse?.Purchase || []).map(p => {
+      const acct = summarizeTxnAccounts(p.Line);
+      return {
+        id: p.Id, type: 'Purchase', date: p.TxnDate, amount: Number(p.TotalAmt || 0),
+        vendor: p.EntityRef?.name || 'Unknown', memo: p.PrivateNote || p.Memo || '',
+        accountName: acct.accountName, accountId: acct.accountId,
+      };
+    });
 
     let candidates = [...bills, ...purchases]
       .filter(t => t.amount >= threshold)
@@ -3928,6 +3942,39 @@ function localDateStr(d) {
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
 }
 
+/**
+ * Summarize the account attribution of a QBO Bill or Purchase's line array.
+ * Previously code took `lines[0].AccountBasedExpenseLineDetail.AccountRef`
+ * verbatim, which silently dropped every line after the first for multi-
+ * account transactions (a bill split across 3 expense accounts would be
+ * shown as belonging only to the first). Returns the largest-amount
+ * account when lines are mixed, with a note about the remaining accounts.
+ */
+function summarizeTxnAccounts(lines) {
+  const arr = Array.isArray(lines) ? lines : [];
+  const enriched = arr
+    .map(l => ({ det: l.AccountBasedExpenseLineDetail, amt: Number(l.Amount || 0) }))
+    .filter(e => e.det?.AccountRef?.value);
+  if (enriched.length === 0) return { accountId: '', accountName: '' };
+  const uniqueIds = [...new Set(enriched.map(e => e.det.AccountRef.value))];
+  if (uniqueIds.length === 1) {
+    return { accountId: uniqueIds[0], accountName: enriched[0].det.AccountRef.name || '' };
+  }
+  // Pick the largest-amount account when mixed
+  const byAcct = new Map();
+  for (const e of enriched) {
+    const id = e.det.AccountRef.value;
+    const prev = byAcct.get(id) || { amount: 0, name: e.det.AccountRef.name || '' };
+    prev.amount += e.amt;
+    byAcct.set(id, prev);
+  }
+  const [topId, top] = [...byAcct.entries()].sort((a, b) => b[1].amount - a[1].amount)[0];
+  return {
+    accountId: topId,
+    accountName: `${top.name} (+${uniqueIds.length - 1} other)`,
+  };
+}
+
 // Format a number as $X.XX for embedding in formula strings
 function money(n) {
   return `$${(Number(n) || 0).toFixed(2)}`;
@@ -4030,9 +4077,9 @@ app.get('/api/admin/clients/:clientId/accrued-liabilities/debug-pnl', requireAdm
       ? req.query.month
       : determineAmortizationMonth(fixedAssetClient, closeDate).month;
     const { year, monthIndex } = parseMonthStr(targetMonth);
-    const periodEnd = lastDayOfMonthDate(year, monthIndex).toISOString().split('T')[0];
+    const periodEnd = localDateStr(lastDayOfMonthDate(year, monthIndex));
     const lookbackStart = new Date(year, monthIndex - 18, 1);
-    const lookbackStartStr = lookbackStart.toISOString().split('T')[0];
+    const lookbackStartStr = localDateStr(lookbackStart);
 
     const report = await qbo.getProfitAndLossMonthly(lookbackStartStr, periodEnd, clientId);
     const parsed = parsePnlMonthlyReport(report);
@@ -4762,10 +4809,15 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/upload', requireAdmi
     }
 
     // Validate: lines must sum to totalAmount. If not, add a balancing line.
+    // Sum the RAW line amounts then round the total, rather than rounding
+    // each line first — per-line rounding can hide a true imbalance (e.g.
+    // three lines of $0.005 sum to $0.015 but each rounds to $0.00,
+    // giving a fake zero variance against a $0.01 total).
     if (analysis.lines && analysis.lines.length > 0 && analysis.totalAmount > 0) {
-      const lineSum = Math.round(analysis.lines.reduce((s, l) => s + Number(l.amount || 0), 0) * 100) / 100;
-      const total = Math.round(Number(analysis.totalAmount) * 100) / 100;
-      const diff = Math.round((total - lineSum) * 100) / 100;
+      const rawLineSum = analysis.lines.reduce((s, l) => s + Number(l.amount || 0), 0);
+      const lineSum = round2(rawLineSum);
+      const total = round2(analysis.totalAmount);
+      const diff = round2(total - rawLineSum);
       if (Math.abs(diff) >= 0.01) {
         console.log(`[shareholder-invoice] lines sum to ${lineSum}, total is ${total}, adding balancing line of ${diff}`);
         analysis.lines.push({
@@ -4952,16 +5004,20 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
         }
       }
 
-      // If no expense lines at all (shouldn't happen), include all lines
+      // Guard: if every line was classified as tax (no real expense lines),
+      // refuse to fall back to posting the tax lines AS expenses — that
+      // would double the JE amount (once as expense, once as tax). Return
+      // a clear error so the user can fix the Claude analysis before post.
       if (expenseLines.length === 0) {
-        for (const line of jeLines) {
-          expenseLines.push({
-            accountId: line.accountId,
-            accountName: line.accountName,
-            description: line.description || invoice.analysis.description,
-            amount: Math.round(Number(line.amount) * 100) / 100,
+        if (taxLines.length > 0) {
+          return res.status(400).json({
+            error: 'Every line on the invoice was classified as tax (GST/HST/PST). ' +
+                   'At least one non-tax expense line is required before posting. ' +
+                   'Edit the analysis to reclassify lines, or post manually.',
           });
         }
+        // No expense and no tax lines either (truly empty) — still unusual.
+        return res.status(400).json({ error: 'No lines available to post.' });
       }
 
       // Consolidate lines with the same GL account into a single line
