@@ -115,6 +115,32 @@ function saveClients(clients) {
   fs.writeFileSync(CLIENTS_FILE, JSON.stringify(clients, null, 2), 'utf-8');
 }
 
+// ---- Password hashing helpers ----
+// Stored passwords are bcrypt hashes ($2a$… / $2b$… / $2y$…). Legacy
+// plaintext entries are still accepted for backward compat and are
+// silently upgraded to a hash on next successful login — so existing
+// admin and portal accounts continue to work through the migration.
+const BCRYPT_ROUNDS = 10;
+function isBcryptHash(s) {
+  return typeof s === 'string' && /^\$2[aby]\$\d{2}\$/.test(s);
+}
+function hashPassword(plain) {
+  return bcrypt.hashSync(String(plain ?? ''), BCRYPT_ROUNDS);
+}
+/**
+ * Verify a supplied password against a stored value that may be either a
+ * bcrypt hash or legacy plaintext. Returns { ok, needsRehash } — callers
+ * should persist a rehashed value when needsRehash is true.
+ */
+function verifyPassword(plain, stored) {
+  if (!stored) return { ok: false, needsRehash: false };
+  if (isBcryptHash(stored)) {
+    return { ok: bcrypt.compareSync(String(plain ?? ''), stored), needsRehash: false };
+  }
+  // Legacy plaintext — use constant-time compare then flag for upgrade
+  return { ok: safeEqual(plain, stored), needsRehash: true };
+}
+
 let CLIENTS = loadClients();
 
 /**
@@ -139,7 +165,10 @@ function resolveClient(req, res, next) {
 // Admin auth — file-backed, falls back to env variable
 const ADMIN_SETTINGS_FILE = dataPath('.admin-settings.json');
 
-function getAdminPassword() {
+// Returns the *stored* admin password value, which may be a bcrypt hash or
+// legacy plaintext or the env var fallback. Use verifyAdminPassword to
+// check a user-supplied password rather than comparing directly.
+function getStoredAdminPassword() {
   try {
     if (fs.existsSync(ADMIN_SETTINGS_FILE)) {
       const settings = JSON.parse(fs.readFileSync(ADMIN_SETTINGS_FILE, 'utf-8'));
@@ -150,7 +179,30 @@ function getAdminPassword() {
 }
 
 function saveAdminPassword(password) {
-  fs.writeFileSync(ADMIN_SETTINGS_FILE, JSON.stringify({ password }, null, 2), 'utf-8');
+  // Always store bcrypt hashes going forward; never the plaintext.
+  fs.writeFileSync(ADMIN_SETTINGS_FILE, JSON.stringify({ password: hashPassword(password) }, null, 2), 'utf-8');
+}
+
+/**
+ * Verify a user-supplied admin password against the stored value.
+ * Handles bcrypt hashes and legacy plaintext; silently migrates legacy
+ * plaintext to a bcrypt hash on first successful login.
+ */
+function verifyAdminPassword(supplied) {
+  const stored = getStoredAdminPassword();
+  const { ok, needsRehash } = verifyPassword(supplied, stored);
+  if (ok && needsRehash) {
+    try {
+      // Only migrate the on-disk settings file, not the env fallback.
+      if (fs.existsSync(ADMIN_SETTINGS_FILE)) {
+        fs.writeFileSync(ADMIN_SETTINGS_FILE, JSON.stringify({ password: hashPassword(supplied) }, null, 2), 'utf-8');
+        console.log('[auth] upgraded legacy plaintext admin password to bcrypt hash');
+      }
+    } catch (e) {
+      console.warn('[auth] admin password rehash failed:', e.message);
+    }
+  }
+  return ok;
 }
 
 function requireAdmin(req, res, next) {
@@ -160,9 +212,8 @@ function requireAdmin(req, res, next) {
     .find(c => c.trim().startsWith('admin_auth='))
     ?.split('=')[1];
 
-  const adminPw = getAdminPassword();
-  // Constant-time comparison so response timing can't leak the password.
-  if (safeEqual(authHeader, adminPw) || safeEqual(cookieAuth, adminPw)) {
+  if ((authHeader && verifyAdminPassword(authHeader)) ||
+      (cookieAuth && verifyAdminPassword(cookieAuth))) {
     return next();
   }
 
@@ -182,7 +233,7 @@ app.use('/admin/admin.js', express.static(path.join(__dirname, 'admin', 'admin.j
 // Admin login endpoint
 app.post('/api/admin/login', (req, res) => {
   const { password } = req.body;
-  if (safeEqual(password, getAdminPassword())) {
+  if (verifyAdminPassword(password)) {
     res.json({ success: true });
   } else {
     res.status(401).json({ error: 'Invalid password' });
@@ -192,7 +243,7 @@ app.post('/api/admin/login', (req, res) => {
 // Admin: Change password
 app.post('/api/admin/change-password', requireAdmin, (req, res) => {
   const { currentPassword, newPassword } = req.body;
-  if (!safeEqual(currentPassword, getAdminPassword())) {
+  if (!verifyAdminPassword(currentPassword)) {
     return res.status(401).json({ error: 'Current password is incorrect' });
   }
   if (!newPassword || newPassword.length < 6) {
@@ -217,15 +268,27 @@ app.get('/admin/dashboard.html', requireAdmin, (req, res) => {
 // Portal login — authenticates by email + password, returns clientId
 app.post('/api/portal/login', (req, res) => {
   const { email, password } = req.body;
-  const entry = Object.entries(CLIENTS).find(
-    ([, c]) => c.email === email && c.password === password
-  );
-  if (entry) {
-    const [clientId, client] = entry;
-    res.json({ success: true, clientId, name: client.name });
-  } else {
-    res.status(401).json({ error: 'Invalid email or password' });
+  const entry = Object.entries(CLIENTS).find(([, c]) => c.email === email);
+  if (!entry) {
+    return res.status(401).json({ error: 'Invalid email or password' });
   }
+  const [clientId, client] = entry;
+  const { ok, needsRehash } = verifyPassword(password, client.password);
+  if (!ok) {
+    return res.status(401).json({ error: 'Invalid email or password' });
+  }
+  // Silently migrate legacy plaintext passwords to bcrypt hashes on first
+  // successful login. Users never notice; the record is simply upgraded.
+  if (needsRehash) {
+    try {
+      CLIENTS[clientId].password = hashPassword(password);
+      saveClients(CLIENTS);
+      console.log(`[auth] upgraded legacy plaintext password for client ${clientId} to bcrypt hash`);
+    } catch (e) {
+      console.warn(`[auth] client password rehash failed for ${clientId}:`, e.message);
+    }
+  }
+  res.json({ success: true, clientId, name: client.name });
 });
 
 // Middleware: require authenticated client (checks cookie)
@@ -1169,7 +1232,8 @@ app.post('/api/admin/clients', requireAdmin, (req, res) => {
   CLIENTS[id] = {
     name,
     email,
-    password,
+    // Store bcrypt hash, never plaintext.
+    password: password ? hashPassword(password) : '',
     billingFrequency: validFreqs.includes(billingFrequency) ? billingFrequency : 'monthly',
     fiscalYearEnd: fiscalYearEnd || null,
     createdAt: new Date().toISOString(),
@@ -1186,7 +1250,8 @@ app.put('/api/admin/clients/:id', requireAdmin, (req, res) => {
   const { name, email, password, billingFrequency, fiscalYearEnd } = req.body;
   if (name) client.name = name;
   if (email) client.email = email;
-  if (password) client.password = password;
+  // Hash new passwords on admin edit. Storing plaintext is never acceptable.
+  if (password) client.password = hashPassword(password);
   const validFreqs = ['monthly', 'quarterly', 'annual'];
   if (billingFrequency && validFreqs.includes(billingFrequency)) {
     client.billingFrequency = billingFrequency;
