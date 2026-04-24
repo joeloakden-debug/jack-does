@@ -5200,6 +5200,154 @@ app.delete('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId', requi
 });
 
 // ========================================
+// FINANCIAL REPORTING — per-client, file-backed
+// ========================================
+// Structure per client:
+//   { "client-id": {
+//       tbSnapshots: [{ id, startDate, endDate, currency, reportName,
+//                       accounts: [{accountId,accountName,debit,credit,net}],
+//                       totalDebit, totalCredit, createdAt }],
+//       mappings: {},        // future: GL account -> up to 10 reporting dimensions
+//       fxRates: [],         // future: functional->reporting currency translation
+//       consolidation: {}    // future: multi-entity consolidation + eliminations
+//     } }
+const REPORTING_FILE = dataPath('financial-reporting.json');
+
+function loadReporting() {
+  try {
+    if (fs.existsSync(REPORTING_FILE)) {
+      return JSON.parse(fs.readFileSync(REPORTING_FILE, 'utf-8'));
+    }
+  } catch (e) {
+    console.error('Failed to load financial-reporting.json:', e.message);
+  }
+  return {};
+}
+
+function saveReporting() { writeJsonAtomic(REPORTING_FILE, reportingData); }
+
+function getClientReporting(clientId) {
+  if (!reportingData[clientId]) {
+    reportingData[clientId] = { tbSnapshots: [], mappings: {}, fxRates: [], consolidation: {} };
+  }
+  const c = reportingData[clientId];
+  c.tbSnapshots = c.tbSnapshots || [];
+  c.mappings = c.mappings || {};
+  c.fxRates = c.fxRates || [];
+  c.consolidation = c.consolidation || {};
+  return c;
+}
+
+let reportingData = loadReporting();
+
+// Flatten a QBO TrialBalance report into an array of account rows.
+// QBO reports return nested Rows.Row with ColData[0]=name (with id), [1]=debit, [2]=credit.
+function flattenTBReport(tb) {
+  const out = [];
+  function walk(rows) {
+    if (!rows) return;
+    for (const row of rows) {
+      if (row.ColData) {
+        const acctName = row.ColData[0]?.value || '';
+        const acctId = row.ColData[0]?.id || '';
+        const debit = parseFloat(String(row.ColData[1]?.value || '').replace(/[$,\s]/g, '')) || 0;
+        const credit = parseFloat(String(row.ColData[2]?.value || '').replace(/[$,\s]/g, '')) || 0;
+        // Skip blank / total-summary rows; only keep rows with an account name and a figure.
+        if (acctName && (debit || credit)) {
+          out.push({ accountId: acctId, accountName: acctName, debit, credit, net: Math.round((debit - credit) * 100) / 100 });
+        }
+      }
+      if (row.Rows?.Row) walk(row.Rows.Row);
+      if (row.Rows && Array.isArray(row.Rows)) walk(row.Rows);
+    }
+  }
+  walk(tb?.Rows?.Row);
+  return out;
+}
+
+// List saved TB snapshots (summary only — no account detail).
+app.get('/api/admin/clients/:clientId/reporting/tb-snapshots', requireAdmin, (req, res) => {
+  const c = getClientReporting(req.params.clientId);
+  const list = c.tbSnapshots.map(s => ({
+    id: s.id,
+    startDate: s.startDate,
+    endDate: s.endDate,
+    currency: s.currency,
+    accountCount: s.accounts?.length || 0,
+    totalDebit: s.totalDebit,
+    totalCredit: s.totalCredit,
+    createdAt: s.createdAt,
+  }));
+  list.sort((a, b) => (b.endDate || '').localeCompare(a.endDate || '') || (b.createdAt || '').localeCompare(a.createdAt || ''));
+  res.json({ snapshots: list });
+});
+
+// Get a single TB snapshot with full account detail.
+app.get('/api/admin/clients/:clientId/reporting/tb-snapshots/:snapshotId', requireAdmin, (req, res) => {
+  const c = getClientReporting(req.params.clientId);
+  const snap = c.tbSnapshots.find(s => s.id === req.params.snapshotId);
+  if (!snap) return res.status(404).json({ error: 'Snapshot not found' });
+  res.json({ snapshot: snap });
+});
+
+// Pull a fresh TB from QBO and save it as a snapshot.
+app.post('/api/admin/clients/:clientId/reporting/tb-snapshots', requireAdmin, async (req, res) => {
+  const { clientId } = req.params;
+  const { startDate, endDate } = req.body || {};
+  if (!startDate || !endDate) {
+    return res.status(400).json({ error: 'startDate and endDate are required (YYYY-MM-DD)' });
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+    return res.status(400).json({ error: 'Dates must be YYYY-MM-DD' });
+  }
+  if (startDate > endDate) {
+    return res.status(400).json({ error: 'startDate must be on or before endDate' });
+  }
+  if (!CLIENTS[clientId]) {
+    return res.status(404).json({ error: 'Client not found' });
+  }
+  if (!qbo.isConnected(clientId)) {
+    return res.status(400).json({ error: 'QuickBooks is not connected for this client' });
+  }
+
+  try {
+    const tb = await qbo.getTrialBalance(startDate, endDate, clientId);
+    const accounts = flattenTBReport(tb);
+    const totalDebit = accounts.reduce((s, a) => s + (a.debit || 0), 0);
+    const totalCredit = accounts.reduce((s, a) => s + (a.credit || 0), 0);
+
+    const c = getClientReporting(clientId);
+    const snap = {
+      id: 'tb_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+      startDate,
+      endDate,
+      currency: tb?.Header?.Currency || tb?.Header?.ReportCurrency || null,
+      reportName: tb?.Header?.ReportName || 'TrialBalance',
+      accounts,
+      totalDebit: Math.round(totalDebit * 100) / 100,
+      totalCredit: Math.round(totalCredit * 100) / 100,
+      createdAt: new Date().toISOString(),
+    };
+    c.tbSnapshots.push(snap);
+    saveReporting();
+    res.json({ success: true, snapshot: snap });
+  } catch (e) {
+    console.error('[reporting] TB pull failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Delete a saved snapshot.
+app.delete('/api/admin/clients/:clientId/reporting/tb-snapshots/:snapshotId', requireAdmin, (req, res) => {
+  const c = getClientReporting(req.params.clientId);
+  const idx = c.tbSnapshots.findIndex(s => s.id === req.params.snapshotId);
+  if (idx === -1) return res.status(404).json({ error: 'Snapshot not found' });
+  c.tbSnapshots.splice(idx, 1);
+  saveReporting();
+  res.json({ success: true });
+});
+
+// ========================================
 // START SERVER
 // ========================================
 app.listen(PORT, '0.0.0.0', () => {

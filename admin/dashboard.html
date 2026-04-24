@@ -30,6 +30,7 @@
     <nav class="admin-nav" id="admin-nav">
       <button class="nav-btn active" data-admin-view="documents">documents</button>
       <button class="nav-btn" data-admin-view="clients">clients</button>
+      <button class="nav-btn" data-admin-view="reporting">reporting</button>
       <button class="nav-btn" data-admin-view="settings">settings</button>
     </nav>
 
@@ -445,6 +446,52 @@
             <button class="btn-modal-cancel" id="amortization-cancel">cancel</button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- Reporting view -->
+    <div class="admin-view" id="view-reporting" style="display:none;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
+        <h2 class="settings-title" style="margin:0;">financial reporting</h2>
+        <span style="font-size:0.82rem;color:var(--gray-500);">trial balance snapshots, GL mapping, statements, consolidation (coming)</span>
+      </div>
+
+      <!-- Pull TB form -->
+      <div class="settings-section" style="margin-bottom:16px;">
+        <h3 style="margin:0 0 12px;font-size:0.95rem;">pull trial balance from QuickBooks</h3>
+        <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+          <div class="form-group" style="flex:1;min-width:180px;margin:0;">
+            <label>client</label>
+            <select id="reporting-client-select" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;"></select>
+          </div>
+          <div class="form-group" style="min-width:150px;margin:0;">
+            <label>start date</label>
+            <input type="date" id="reporting-start-date" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;">
+          </div>
+          <div class="form-group" style="min-width:150px;margin:0;">
+            <label>end date</label>
+            <input type="date" id="reporting-end-date" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;">
+          </div>
+          <button class="btn-modal-save" id="btn-pull-tb">pull trial balance</button>
+        </div>
+        <div id="reporting-status" style="font-size:0.82rem;margin-top:10px;min-height:1em;"></div>
+      </div>
+
+      <!-- Saved snapshots list -->
+      <div class="settings-section">
+        <h3 style="margin:0 0 12px;font-size:0.95rem;">saved snapshots</h3>
+        <div id="reporting-snapshots-list">
+          <div class="empty-state"><p>select a client above to see saved snapshots</p></div>
+        </div>
+      </div>
+
+      <!-- Snapshot detail -->
+      <div class="settings-section" id="reporting-detail-section" style="display:none;margin-top:16px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:12px;flex-wrap:wrap;">
+          <h3 style="margin:0;font-size:0.95rem;" id="reporting-detail-title">trial balance</h3>
+          <button class="btn-modal-cancel" id="btn-close-reporting-detail">close</button>
+        </div>
+        <div id="reporting-detail-table"></div>
       </div>
     </div>
 

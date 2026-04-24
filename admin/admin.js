@@ -652,6 +652,9 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
       loadClients();
       showClientsList();
     }
+    if (currentAdminView === 'reporting') {
+      initReportingView();
+    }
   });
 });
 
@@ -4188,6 +4191,243 @@ document.getElementById('btn-copy-tokens').addEventListener('click', () => {
 });
 
 document.getElementById('btn-refresh-tokens').addEventListener('click', loadQboTokens);
+
+// ========================================
+// FINANCIAL REPORTING
+// ========================================
+let reportingClients = [];
+let reportingSelectedClientId = null;
+let reportingSnapshots = [];
+
+function fmtMoney(n) {
+  const v = Number(n) || 0;
+  return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function setReportingStatus(msg, kind) {
+  const el = document.getElementById('reporting-status');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = kind === 'error' ? 'var(--red-600, #c62828)'
+    : kind === 'success' ? 'var(--green-600)'
+    : 'var(--gray-500)';
+}
+
+async function initReportingView() {
+  try {
+    const res = await fetch('/api/admin/clients', { headers: { 'Authorization': getAuth() } });
+    const data = await res.json();
+    reportingClients = data.clients || [];
+  } catch (e) {
+    console.error('Failed to load clients for reporting:', e);
+    reportingClients = [];
+  }
+
+  const sel = document.getElementById('reporting-client-select');
+  sel.innerHTML = '<option value="">— select client —</option>'
+    + reportingClients.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+
+  // Default end-of-last-month as the period end, first-of-this-year as start.
+  const endInput = document.getElementById('reporting-end-date');
+  const startInput = document.getElementById('reporting-start-date');
+  if (!endInput.value) {
+    const now = new Date();
+    const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0);
+    const yearStart = new Date(now.getFullYear(), 0, 1);
+    endInput.value = lastMonthEnd.toISOString().slice(0, 10);
+    startInput.value = yearStart.toISOString().slice(0, 10);
+  }
+
+  // Restore previously chosen client if we have one
+  if (reportingSelectedClientId && reportingClients.find(c => c.id === reportingSelectedClientId)) {
+    sel.value = reportingSelectedClientId;
+    await loadReportingSnapshots();
+  } else {
+    renderReportingSnapshots([]);
+  }
+}
+
+document.getElementById('reporting-client-select')?.addEventListener('change', async (e) => {
+  reportingSelectedClientId = e.target.value || null;
+  hideReportingDetail();
+  if (reportingSelectedClientId) {
+    await loadReportingSnapshots();
+  } else {
+    renderReportingSnapshots([]);
+  }
+});
+
+async function loadReportingSnapshots() {
+  if (!reportingSelectedClientId) return;
+  try {
+    const res = await fetch(`/api/admin/clients/${reportingSelectedClientId}/reporting/tb-snapshots`, {
+      headers: { 'Authorization': getAuth() },
+    });
+    const data = await res.json();
+    reportingSnapshots = data.snapshots || [];
+    renderReportingSnapshots(reportingSnapshots);
+  } catch (e) {
+    console.error('Failed to load snapshots:', e);
+    renderReportingSnapshots([]);
+  }
+}
+
+function renderReportingSnapshots(list) {
+  const el = document.getElementById('reporting-snapshots-list');
+  if (!reportingSelectedClientId) {
+    el.innerHTML = '<div class="empty-state"><p>select a client above to see saved snapshots</p></div>';
+    return;
+  }
+  if (!list.length) {
+    el.innerHTML = '<div class="empty-state"><p>no snapshots yet</p><span>pull one using the form above</span></div>';
+    return;
+  }
+  el.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:0.88rem;">
+      <thead>
+        <tr style="border-bottom:1px solid var(--gray-200);text-align:left;">
+          <th style="padding:8px 6px;">period</th>
+          <th style="padding:8px 6px;">currency</th>
+          <th style="padding:8px 6px;text-align:right;">accounts</th>
+          <th style="padding:8px 6px;text-align:right;">total debit</th>
+          <th style="padding:8px 6px;text-align:right;">total credit</th>
+          <th style="padding:8px 6px;">pulled</th>
+          <th style="padding:8px 6px;"></th>
+        </tr>
+      </thead>
+      <tbody>
+        ${list.map(s => `
+          <tr style="border-bottom:1px solid var(--gray-100);">
+            <td style="padding:8px 6px;">${escapeHtml(s.startDate)} → ${escapeHtml(s.endDate)}</td>
+            <td style="padding:8px 6px;">${escapeHtml(s.currency || '—')}</td>
+            <td style="padding:8px 6px;text-align:right;">${s.accountCount}</td>
+            <td style="padding:8px 6px;text-align:right;">${fmtMoney(s.totalDebit)}</td>
+            <td style="padding:8px 6px;text-align:right;">${fmtMoney(s.totalCredit)}</td>
+            <td style="padding:8px 6px;font-size:0.8rem;color:var(--gray-500);">${formatDate(s.createdAt)}</td>
+            <td style="padding:8px 6px;text-align:right;white-space:nowrap;">
+              <button class="btn-edit-client" data-snapshot-view="${s.id}">view</button>
+              <button class="btn-edit-client" data-snapshot-delete="${s.id}" style="color:var(--red-600,#c62828);">delete</button>
+            </td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+  el.querySelectorAll('[data-snapshot-view]').forEach(b => {
+    b.addEventListener('click', () => viewReportingSnapshot(b.dataset.snapshotView));
+  });
+  el.querySelectorAll('[data-snapshot-delete]').forEach(b => {
+    b.addEventListener('click', () => deleteReportingSnapshot(b.dataset.snapshotDelete));
+  });
+}
+
+async function viewReportingSnapshot(snapshotId) {
+  if (!reportingSelectedClientId) return;
+  try {
+    const res = await fetch(`/api/admin/clients/${reportingSelectedClientId}/reporting/tb-snapshots/${snapshotId}`, {
+      headers: { 'Authorization': getAuth() },
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    renderReportingDetail(data.snapshot);
+  } catch (e) {
+    alert('Failed to load snapshot: ' + e.message);
+  }
+}
+
+function renderReportingDetail(snap) {
+  const section = document.getElementById('reporting-detail-section');
+  const title = document.getElementById('reporting-detail-title');
+  const table = document.getElementById('reporting-detail-table');
+  title.textContent = `trial balance — ${snap.startDate} → ${snap.endDate}${snap.currency ? ' (' + snap.currency + ')' : ''}`;
+  const rows = (snap.accounts || []).map(a => `
+    <tr style="border-bottom:1px solid var(--gray-100);">
+      <td style="padding:6px 8px;font-size:0.85rem;">${escapeHtml(a.accountName)}</td>
+      <td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums;">${a.debit ? fmtMoney(a.debit) : ''}</td>
+      <td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums;">${a.credit ? fmtMoney(a.credit) : ''}</td>
+      <td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums;color:${a.net < 0 ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtMoney(a.net)}</td>
+    </tr>
+  `).join('');
+  table.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
+      <thead>
+        <tr style="border-bottom:1px solid var(--gray-300);text-align:left;">
+          <th style="padding:8px;">account</th>
+          <th style="padding:8px;text-align:right;">debit</th>
+          <th style="padding:8px;text-align:right;">credit</th>
+          <th style="padding:8px;text-align:right;">net</th>
+        </tr>
+      </thead>
+      <tbody>${rows || '<tr><td colspan="4" style="padding:16px;color:var(--gray-500);">no account rows</td></tr>'}</tbody>
+      <tfoot>
+        <tr style="border-top:1px solid var(--gray-300);font-weight:600;">
+          <td style="padding:8px;">totals</td>
+          <td style="padding:8px;text-align:right;">${fmtMoney(snap.totalDebit)}</td>
+          <td style="padding:8px;text-align:right;">${fmtMoney(snap.totalCredit)}</td>
+          <td style="padding:8px;text-align:right;">${fmtMoney((snap.totalDebit || 0) - (snap.totalCredit || 0))}</td>
+        </tr>
+      </tfoot>
+    </table>
+  `;
+  section.style.display = '';
+  section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function hideReportingDetail() {
+  const section = document.getElementById('reporting-detail-section');
+  if (section) section.style.display = 'none';
+}
+
+document.getElementById('btn-close-reporting-detail')?.addEventListener('click', hideReportingDetail);
+
+async function deleteReportingSnapshot(snapshotId) {
+  if (!reportingSelectedClientId) return;
+  if (!confirm('Delete this snapshot? This cannot be undone.')) return;
+  try {
+    const res = await fetch(`/api/admin/clients/${reportingSelectedClientId}/reporting/tb-snapshots/${snapshotId}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': getAuth() },
+    });
+    if (!res.ok) throw new Error(await res.text());
+    hideReportingDetail();
+    await loadReportingSnapshots();
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
+}
+
+document.getElementById('btn-pull-tb')?.addEventListener('click', async () => {
+  const clientId = document.getElementById('reporting-client-select').value;
+  const startDate = document.getElementById('reporting-start-date').value;
+  const endDate = document.getElementById('reporting-end-date').value;
+  if (!clientId) return setReportingStatus('select a client first', 'error');
+  if (!startDate || !endDate) return setReportingStatus('start and end dates are required', 'error');
+  if (startDate > endDate) return setReportingStatus('start date must be on or before end date', 'error');
+
+  reportingSelectedClientId = clientId;
+  const btn = document.getElementById('btn-pull-tb');
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'pulling...';
+  setReportingStatus('pulling trial balance from QuickBooks...');
+  try {
+    const res = await fetch(`/api/admin/clients/${clientId}/reporting/tb-snapshots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ startDate, endDate }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Pull failed');
+    setReportingStatus(`snapshot saved — ${data.snapshot.accounts.length} accounts, totals ${fmtMoney(data.snapshot.totalDebit)} / ${fmtMoney(data.snapshot.totalCredit)}`, 'success');
+    await loadReportingSnapshots();
+    renderReportingDetail(data.snapshot);
+  } catch (e) {
+    setReportingStatus('failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
+});
 
 // ========================================
 // INIT
