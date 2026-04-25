@@ -4198,6 +4198,12 @@ document.getElementById('btn-refresh-tokens').addEventListener('click', loadQboT
 let reportingClients = [];
 let reportingSelectedClientId = null;
 let reportingSnapshots = [];
+let reportingActiveTab = 'snapshots';
+// Mapping state — populated lazily when the user opens the mapping tab.
+let mappingDimensions = null;            // { "1": { id, name, description, isPrimary }, ... }
+let mappingAccountValues = {};           // keyed by `id:<id>` or `name:<name>` — server canonical
+let mappingQboAccounts = [];             // chart of accounts from /api/admin/accounts
+let mappingFilter = '';
 
 function fmtMoney(n) {
   const v = Number(n) || 0;
@@ -4206,6 +4212,15 @@ function fmtMoney(n) {
 
 function setReportingStatus(msg, kind) {
   const el = document.getElementById('reporting-status');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = kind === 'error' ? 'var(--red-600, #c62828)'
+    : kind === 'success' ? 'var(--green-600)'
+    : 'var(--gray-500)';
+}
+
+function setMappingStatus(msg, kind) {
+  const el = document.getElementById('mapping-status');
   if (!el) return;
   el.textContent = msg || '';
   el.style.color = kind === 'error' ? 'var(--red-600, #c62828)'
@@ -4241,20 +4256,55 @@ async function initReportingView() {
   // Restore previously chosen client if we have one
   if (reportingSelectedClientId && reportingClients.find(c => c.id === reportingSelectedClientId)) {
     sel.value = reportingSelectedClientId;
-    await loadReportingSnapshots();
+    await onReportingClientChanged();
   } else {
     renderReportingSnapshots([]);
+    renderMappingTable();
+    renderDimensionsSummary();
+  }
+}
+
+function switchReportingTab(tab) {
+  reportingActiveTab = tab;
+  document.querySelectorAll('[data-reporting-tab]').forEach(b => b.classList.toggle('active', b.dataset.reportingTab === tab));
+  document.querySelectorAll('.reporting-tab').forEach(el => el.style.display = 'none');
+  const target = document.getElementById('reporting-tab-' + tab);
+  if (target) target.style.display = '';
+  if (tab === 'mapping' && reportingSelectedClientId) {
+    loadMappingsAndAccounts();
+  }
+}
+
+document.querySelectorAll('[data-reporting-tab]').forEach(btn => {
+  btn.addEventListener('click', () => switchReportingTab(btn.dataset.reportingTab));
+});
+
+async function onReportingClientChanged() {
+  hideReportingDetail();
+  if (!reportingSelectedClientId) {
+    renderReportingSnapshots([]);
+    mappingDimensions = null;
+    mappingAccountValues = {};
+    mappingQboAccounts = [];
+    renderMappingTable();
+    renderDimensionsSummary();
+    return;
+  }
+  // Always refresh snapshots so the snapshots tab is current.
+  await loadReportingSnapshots();
+  if (reportingActiveTab === 'mapping') {
+    await loadMappingsAndAccounts();
+  } else {
+    // Reset cached mapping state — it'll reload when the user opens the tab.
+    mappingDimensions = null;
+    mappingAccountValues = {};
+    mappingQboAccounts = [];
   }
 }
 
 document.getElementById('reporting-client-select')?.addEventListener('change', async (e) => {
   reportingSelectedClientId = e.target.value || null;
-  hideReportingDetail();
-  if (reportingSelectedClientId) {
-    await loadReportingSnapshots();
-  } else {
-    renderReportingSnapshots([]);
-  }
+  await onReportingClientChanged();
 });
 
 async function loadReportingSnapshots() {
@@ -4395,6 +4445,239 @@ async function deleteReportingSnapshot(snapshotId) {
     alert('Delete failed: ' + e.message);
   }
 }
+
+// ---- GL mapping ----
+
+async function loadMappingsAndAccounts() {
+  if (!reportingSelectedClientId) return;
+  setMappingStatus('loading...');
+  try {
+    const [mapRes, acctRes] = await Promise.all([
+      fetch(`/api/admin/clients/${reportingSelectedClientId}/reporting/mappings`, { headers: { 'Authorization': getAuth() } }),
+      fetch(`/api/admin/accounts?clientId=${reportingSelectedClientId}`, { headers: { 'Authorization': getAuth() } }),
+    ]);
+    const mapData = await mapRes.json();
+    const acctData = await acctRes.json();
+    mappingDimensions = mapData.dimensions || {};
+    mappingAccountValues = mapData.accounts || {};
+    mappingQboAccounts = acctData.accounts || [];
+    renderDimensionsSummary();
+    renderMappingTable();
+    setMappingStatus(mappingQboAccounts.length === 0 ? 'no QBO accounts — connect QuickBooks to load the chart of accounts' : '');
+  } catch (e) {
+    console.error('Failed to load mappings:', e);
+    setMappingStatus('failed to load mappings: ' + e.message, 'error');
+  }
+}
+
+function dimensionList() {
+  if (!mappingDimensions) return [];
+  return Array.from({ length: 10 }, (_, i) => mappingDimensions[String(i + 1)] || { id: i + 1, name: '', description: '', isPrimary: i === 0 });
+}
+
+function activeDimensions() {
+  // Visible dimension columns = those with a non-empty name. Primary is always shown.
+  return dimensionList().filter(d => d.isPrimary || (d.name && d.name.trim()));
+}
+
+function renderDimensionsSummary() {
+  const el = document.getElementById('dimensions-summary');
+  if (!el) return;
+  if (!reportingSelectedClientId) { el.textContent = 'select a client to view its dimensions'; return; }
+  if (!mappingDimensions) { el.textContent = ''; return; }
+  const dims = dimensionList();
+  el.innerHTML = dims.map(d => {
+    const label = d.name || `(unnamed)`;
+    const tag = d.isPrimary ? '<span style="background:var(--blue-50);color:var(--blue-600);padding:1px 6px;border-radius:4px;font-size:0.72rem;font-weight:600;margin-left:4px;">PRIMARY</span>' : '';
+    return `<span style="display:inline-block;margin:2px 8px 2px 0;"><strong>${d.id}.</strong> ${escapeHtml(label)}${tag}</span>`;
+  }).join('');
+}
+
+function mappingKeyFor(acct) {
+  return acct.id ? `id:${acct.id}` : `name:${acct.name}`;
+}
+
+function renderMappingTable() {
+  const el = document.getElementById('mapping-table');
+  if (!el) return;
+  if (!reportingSelectedClientId) {
+    el.className = 'empty-state';
+    el.innerHTML = '<p>select a client above to map GL accounts</p>';
+    return;
+  }
+  if (!mappingQboAccounts.length) {
+    el.className = 'empty-state';
+    el.innerHTML = '<p>no QBO accounts loaded</p><span>connect QuickBooks for this client, or click "refresh accounts from QBO"</span>';
+    return;
+  }
+  const dims = activeDimensions();
+  const filter = mappingFilter.trim().toLowerCase();
+  const rows = mappingQboAccounts.filter(a => {
+    if (!filter) return true;
+    return (a.name || '').toLowerCase().includes(filter) || (a.type || '').toLowerCase().includes(filter) || (a.acctNum || '').toLowerCase().includes(filter);
+  });
+
+  el.className = '';
+  el.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:0.82rem;">
+      <thead>
+        <tr style="border-bottom:1px solid var(--gray-300);text-align:left;background:var(--gray-50);">
+          <th style="padding:8px 6px;position:sticky;left:0;background:var(--gray-50);z-index:1;min-width:240px;">account</th>
+          <th style="padding:8px 6px;min-width:140px;">type</th>
+          ${dims.map(d => `<th style="padding:8px 6px;min-width:140px;">${escapeHtml(d.name || `dim ${d.id}`)}${d.isPrimary ? ' *' : ''}</th>`).join('')}
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(a => {
+          const key = mappingKeyFor(a);
+          const stored = mappingAccountValues[key]?.values || {};
+          return `
+            <tr data-mapping-row="${escapeHtml(key)}" style="border-bottom:1px solid var(--gray-100);">
+              <td style="padding:6px;position:sticky;left:0;background:#fff;">
+                <div style="font-weight:500;">${escapeHtml(fmtAcct(a))}</div>
+              </td>
+              <td style="padding:6px;color:var(--gray-600);">${escapeHtml(a.type || '')}</td>
+              ${dims.map(d => `
+                <td style="padding:4px;">
+                  <input type="text" class="mapping-cell"
+                    data-account-id="${escapeHtml(a.id || '')}"
+                    data-account-name="${escapeHtml(a.name || '')}"
+                    data-account-type="${escapeHtml(a.type || '')}"
+                    data-dim="${d.id}"
+                    value="${escapeHtml(stored[String(d.id)] || '')}"
+                    style="width:100%;padding:4px 6px;border:1px solid var(--gray-200);border-radius:3px;font-size:0.82rem;background:#fff;">
+                </td>
+              `).join('')}
+            </tr>
+          `;
+        }).join('')}
+      </tbody>
+    </table>
+    <p style="font-size:0.78rem;color:var(--gray-500);margin-top:8px;">* primary dimension. ${rows.length} of ${mappingQboAccounts.length} accounts shown.</p>
+  `;
+
+  // Wire up auto-save on blur per cell. Only persist if the value changed.
+  el.querySelectorAll('input.mapping-cell').forEach(input => {
+    input.dataset.original = input.value;
+    input.addEventListener('blur', () => {
+      if (input.value === input.dataset.original) return;
+      saveMappingCell(input);
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') input.blur();
+    });
+  });
+}
+
+document.getElementById('mapping-account-filter')?.addEventListener('input', (e) => {
+  mappingFilter = e.target.value;
+  renderMappingTable();
+});
+
+async function saveMappingCell(input) {
+  const accountId = input.dataset.accountId;
+  const accountName = input.dataset.accountName;
+  const accountType = input.dataset.accountType;
+  const dimId = input.dataset.dim;
+  const value = input.value;
+
+  // Build full values object from the row's other inputs so the server doesn't
+  // need to merge — the row holds the canonical state for this account.
+  const row = input.closest('[data-mapping-row]');
+  const values = {};
+  row.querySelectorAll('input.mapping-cell').forEach(cell => {
+    values[cell.dataset.dim] = cell.value;
+  });
+
+  // Optimistic UI: tint the cell while saving.
+  input.style.background = '#fffbe6';
+  try {
+    const res = await fetch(`/api/admin/clients/${reportingSelectedClientId}/reporting/mappings/accounts`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ accountId, accountName, accountType, values }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    const data = await res.json();
+    mappingAccountValues[data.key] = data.account;
+    input.dataset.original = input.value;
+    input.style.background = '#e6ffed';
+    setTimeout(() => { input.style.background = '#fff'; }, 600);
+    setMappingStatus(`saved ${accountName} → ${dimensionList().find(d => String(d.id) === dimId)?.name || 'dim ' + dimId}`, 'success');
+  } catch (e) {
+    input.style.background = '#fff5f5';
+    setMappingStatus('save failed: ' + e.message, 'error');
+  }
+}
+
+document.getElementById('btn-refresh-mapping-accounts')?.addEventListener('click', async () => {
+  if (!reportingSelectedClientId) return setMappingStatus('select a client first', 'error');
+  await loadMappingsAndAccounts();
+});
+
+// ---- Configure Dimensions modal ----
+
+function openDimensionsModal() {
+  if (!reportingSelectedClientId) return setMappingStatus('select a client first', 'error');
+  const rowsEl = document.getElementById('dimensions-modal-rows');
+  const dims = dimensionList();
+  rowsEl.innerHTML = dims.map(d => `
+    <div class="form-group" style="margin-bottom:10px;">
+      <label style="font-size:0.82rem;color:var(--gray-700);">
+        <strong>${d.id}.</strong> ${d.isPrimary ? 'name (primary — drives statements)' : 'name'}
+      </label>
+      <input type="text" class="dimension-name-input" data-dim="${d.id}" value="${escapeHtml(d.name || '')}" placeholder="${d.isPrimary ? 'Financial Statement' : '(leave blank to hide)'}" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;">
+      <input type="text" class="dimension-desc-input" data-dim="${d.id}" value="${escapeHtml(d.description || '')}" placeholder="description (optional)" style="width:100%;padding:6px 8px;border:1px solid var(--gray-200);border-radius:4px;font-size:0.78rem;color:var(--gray-700);margin-top:4px;">
+    </div>
+  `).join('');
+  document.getElementById('dimensions-modal-error').style.display = 'none';
+  document.getElementById('dimensions-modal').style.display = '';
+}
+
+function closeDimensionsModal() {
+  document.getElementById('dimensions-modal').style.display = 'none';
+}
+
+async function saveDimensionsModal() {
+  const dimensions = {};
+  document.querySelectorAll('.dimension-name-input').forEach(inp => {
+    const id = inp.dataset.dim;
+    dimensions[id] = dimensions[id] || {};
+    dimensions[id].name = inp.value;
+  });
+  document.querySelectorAll('.dimension-desc-input').forEach(inp => {
+    const id = inp.dataset.dim;
+    dimensions[id] = dimensions[id] || {};
+    dimensions[id].description = inp.value;
+  });
+  const errEl = document.getElementById('dimensions-modal-error');
+  if (!dimensions['1']?.name?.trim()) {
+    errEl.textContent = 'dimension 1 (primary) must have a name';
+    errEl.style.display = '';
+    return;
+  }
+  try {
+    const res = await fetch(`/api/admin/clients/${reportingSelectedClientId}/reporting/mappings/dimensions`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ dimensions }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    const data = await res.json();
+    mappingDimensions = data.dimensions;
+    closeDimensionsModal();
+    renderDimensionsSummary();
+    renderMappingTable();
+    setMappingStatus('dimensions updated', 'success');
+  } catch (e) {
+    errEl.textContent = 'save failed: ' + e.message;
+    errEl.style.display = '';
+  }
+}
+
+document.getElementById('btn-configure-dimensions')?.addEventListener('click', openDimensionsModal);
+document.getElementById('dimensions-modal-cancel')?.addEventListener('click', closeDimensionsModal);
+document.getElementById('dimensions-modal-save')?.addEventListener('click', saveDimensionsModal);
 
 document.getElementById('btn-pull-tb')?.addEventListener('click', async () => {
   const clientId = document.getElementById('reporting-client-select').value;

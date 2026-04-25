@@ -451,47 +451,95 @@
 
     <!-- Reporting view -->
     <div class="admin-view" id="view-reporting" style="display:none;">
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
         <h2 class="settings-title" style="margin:0;">financial reporting</h2>
         <span style="font-size:0.82rem;color:var(--gray-500);">trial balance snapshots, GL mapping, statements, consolidation (coming)</span>
       </div>
 
-      <!-- Pull TB form -->
-      <div class="settings-section" style="margin-bottom:16px;">
-        <h3 style="margin:0 0 12px;font-size:0.95rem;">pull trial balance from QuickBooks</h3>
-        <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
-          <div class="form-group" style="flex:1;min-width:180px;margin:0;">
-            <label>client</label>
-            <select id="reporting-client-select" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;"></select>
-          </div>
-          <div class="form-group" style="min-width:150px;margin:0;">
-            <label>start date</label>
-            <input type="date" id="reporting-start-date" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;">
-          </div>
-          <div class="form-group" style="min-width:150px;margin:0;">
-            <label>end date</label>
-            <input type="date" id="reporting-end-date" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;">
-          </div>
-          <button class="btn-modal-save" id="btn-pull-tb">pull trial balance</button>
-        </div>
-        <div id="reporting-status" style="font-size:0.82rem;margin-top:10px;min-height:1em;"></div>
+      <!-- Shared client picker -->
+      <div class="settings-section" style="margin-bottom:12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+        <label style="font-size:0.82rem;color:var(--gray-600);margin:0;">client</label>
+        <select id="reporting-client-select" style="flex:1;min-width:200px;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;"></select>
       </div>
 
-      <!-- Saved snapshots list -->
-      <div class="settings-section">
-        <h3 style="margin:0 0 12px;font-size:0.95rem;">saved snapshots</h3>
-        <div id="reporting-snapshots-list">
-          <div class="empty-state"><p>select a client above to see saved snapshots</p></div>
+      <!-- Sub-tabs -->
+      <nav class="client-sub-nav">
+        <button class="sub-nav-btn active" data-reporting-tab="snapshots">trial balance</button>
+        <button class="sub-nav-btn" data-reporting-tab="mapping">GL mapping</button>
+      </nav>
+
+      <!-- Snapshots tab -->
+      <div class="reporting-tab" id="reporting-tab-snapshots">
+        <div class="settings-section" style="margin-bottom:16px;">
+          <h3 style="margin:0 0 12px;font-size:0.95rem;">pull trial balance from QuickBooks</h3>
+          <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+            <div class="form-group" style="min-width:150px;margin:0;">
+              <label>start date</label>
+              <input type="date" id="reporting-start-date" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;">
+            </div>
+            <div class="form-group" style="min-width:150px;margin:0;">
+              <label>end date</label>
+              <input type="date" id="reporting-end-date" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;">
+            </div>
+            <button class="btn-modal-save" id="btn-pull-tb">pull trial balance</button>
+          </div>
+          <div id="reporting-status" style="font-size:0.82rem;margin-top:10px;min-height:1em;"></div>
+        </div>
+
+        <div class="settings-section">
+          <h3 style="margin:0 0 12px;font-size:0.95rem;">saved snapshots</h3>
+          <div id="reporting-snapshots-list">
+            <div class="empty-state"><p>select a client above to see saved snapshots</p></div>
+          </div>
+        </div>
+
+        <div class="settings-section" id="reporting-detail-section" style="display:none;margin-top:16px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:12px;flex-wrap:wrap;">
+            <h3 style="margin:0;font-size:0.95rem;" id="reporting-detail-title">trial balance</h3>
+            <button class="btn-modal-cancel" id="btn-close-reporting-detail">close</button>
+          </div>
+          <div id="reporting-detail-table"></div>
         </div>
       </div>
 
-      <!-- Snapshot detail -->
-      <div class="settings-section" id="reporting-detail-section" style="display:none;margin-top:16px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:12px;flex-wrap:wrap;">
-          <h3 style="margin:0;font-size:0.95rem;" id="reporting-detail-title">trial balance</h3>
-          <button class="btn-modal-cancel" id="btn-close-reporting-detail">close</button>
+      <!-- GL Mapping tab -->
+      <div class="reporting-tab" id="reporting-tab-mapping" style="display:none;">
+        <div class="settings-section" style="margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+            <h3 style="margin:0;font-size:0.95rem;">reporting dimensions</h3>
+            <div style="display:flex;gap:8px;">
+              <button class="btn-edit-client" id="btn-configure-dimensions">configure dimensions</button>
+              <button class="btn-edit-client" id="btn-refresh-mapping-accounts">refresh accounts from QBO</button>
+            </div>
+          </div>
+          <p style="font-size:0.82rem;color:var(--gray-500);margin:0 0 8px;">each GL account can carry up to 10 reporting dimension values. dimension 1 is the primary mapping that drives the balance sheet and income statement; dimensions 2–10 power custom reports.</p>
+          <div id="dimensions-summary" style="font-size:0.82rem;color:var(--gray-700);"></div>
         </div>
-        <div id="reporting-detail-table"></div>
+
+        <div class="settings-section">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+            <h3 style="margin:0;font-size:0.95rem;">account mapping</h3>
+            <input type="text" id="mapping-account-filter" placeholder="filter by name or type..." style="flex:1;min-width:180px;max-width:320px;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;font-size:0.85rem;">
+          </div>
+          <div id="mapping-status" style="font-size:0.78rem;color:var(--gray-500);min-height:1em;margin-bottom:6px;"></div>
+          <div id="mapping-table-wrap" style="overflow-x:auto;">
+            <div id="mapping-table" class="empty-state"><p>select a client above to map GL accounts</p></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Configure Dimensions modal -->
+      <div class="modal-overlay" id="dimensions-modal" style="display:none;">
+        <div class="modal-card" style="max-width:640px;">
+          <h3>configure reporting dimensions</h3>
+          <p style="font-size:0.82rem;color:var(--gray-500);margin:-4px 0 12px;">name each of the 10 dimensions. leave a slot blank to hide it from the mapping table.</p>
+          <div id="dimensions-modal-rows" style="max-height:60vh;overflow-y:auto;"></div>
+          <div id="dimensions-modal-error" class="login-error" style="display:none;"></div>
+          <div class="modal-actions">
+            <button class="btn-modal-save" id="dimensions-modal-save">save</button>
+            <button class="btn-modal-cancel" id="dimensions-modal-cancel">cancel</button>
+          </div>
+        </div>
       </div>
     </div>
 

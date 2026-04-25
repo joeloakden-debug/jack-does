@@ -81,7 +81,7 @@ if (DATA_DIR !== __dirname) {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
   // Seed: copy any committed data files into the volume if they don't exist there yet
-  const seedFiles = ['clients.json', 'fixed-assets.json', 'prepaid-expenses.json', 'accrued-liabilities.json', 'shareholder-invoices.json'];
+  const seedFiles = ['clients.json', 'fixed-assets.json', 'prepaid-expenses.json', 'accrued-liabilities.json', 'shareholder-invoices.json', 'financial-reporting.json'];
   for (const f of seedFiles) {
     const dest = path.join(DATA_DIR, f);
     const src = path.join(__dirname, f);
@@ -5226,13 +5226,42 @@ function loadReporting() {
 
 function saveReporting() { writeJsonAtomic(REPORTING_FILE, reportingData); }
 
+// Default dimensions: 10 slots, dim 1 is the primary used by the financial-statement
+// builder. Names are placeholders that the user can rename via the dimensions modal.
+function getDefaultDimensions() {
+  const out = {};
+  for (let i = 1; i <= 10; i++) {
+    out[String(i)] = {
+      id: i,
+      name: i === 1 ? 'Financial Statement' : '',
+      description: i === 1 ? 'Primary mapping — drives the balance sheet and income statement.' : '',
+      isPrimary: i === 1,
+    };
+  }
+  return out;
+}
+
 function getClientReporting(clientId) {
   if (!reportingData[clientId]) {
-    reportingData[clientId] = { tbSnapshots: [], mappings: {}, fxRates: [], consolidation: {} };
+    reportingData[clientId] = { tbSnapshots: [], mappings: { dimensions: getDefaultDimensions(), accounts: {} }, fxRates: [], consolidation: {} };
   }
   const c = reportingData[clientId];
   c.tbSnapshots = c.tbSnapshots || [];
   c.mappings = c.mappings || {};
+  // Migration: older records had `mappings: {}`. Backfill the new shape without
+  // dropping anything a future writer might have stored under arbitrary keys.
+  if (!c.mappings.dimensions) c.mappings.dimensions = getDefaultDimensions();
+  if (!c.mappings.accounts) c.mappings.accounts = {};
+  // Ensure all 10 slots exist even if a partial save left some missing.
+  for (let i = 1; i <= 10; i++) {
+    const k = String(i);
+    if (!c.mappings.dimensions[k]) {
+      c.mappings.dimensions[k] = { id: i, name: '', description: '', isPrimary: i === 1 };
+    } else {
+      c.mappings.dimensions[k].id = i;
+      c.mappings.dimensions[k].isPrimary = (i === 1);
+    }
+  }
   c.fxRates = c.fxRates || [];
   c.consolidation = c.consolidation || {};
   return c;
@@ -5345,6 +5374,77 @@ app.delete('/api/admin/clients/:clientId/reporting/tb-snapshots/:snapshotId', re
   c.tbSnapshots.splice(idx, 1);
   saveReporting();
   res.json({ success: true });
+});
+
+// ---- GL account mapping (10 reporting dimensions) ----
+
+// Get the full mapping config for a client (dimensions + per-account values).
+app.get('/api/admin/clients/:clientId/reporting/mappings', requireAdmin, (req, res) => {
+  if (!CLIENTS[req.params.clientId]) return res.status(404).json({ error: 'Client not found' });
+  const c = getClientReporting(req.params.clientId);
+  res.json({ dimensions: c.mappings.dimensions, accounts: c.mappings.accounts });
+});
+
+// Update dimension definitions. Body: { dimensions: { "1": { name, description }, ... } }
+// We accept partial bodies — only the dimensions present are touched, isPrimary stays
+// pinned to slot 1, and missing slots are left intact. This keeps the modal save idempotent.
+app.put('/api/admin/clients/:clientId/reporting/mappings/dimensions', requireAdmin, (req, res) => {
+  if (!CLIENTS[req.params.clientId]) return res.status(404).json({ error: 'Client not found' });
+  const incoming = req.body?.dimensions;
+  if (!incoming || typeof incoming !== 'object') {
+    return res.status(400).json({ error: 'dimensions object required' });
+  }
+  const c = getClientReporting(req.params.clientId);
+  for (let i = 1; i <= 10; i++) {
+    const k = String(i);
+    const d = incoming[k];
+    if (!d) continue;
+    if (typeof d.name === 'string') c.mappings.dimensions[k].name = d.name.trim().slice(0, 80);
+    if (typeof d.description === 'string') c.mappings.dimensions[k].description = d.description.trim().slice(0, 240);
+    c.mappings.dimensions[k].id = i;
+    c.mappings.dimensions[k].isPrimary = (i === 1);
+  }
+  saveReporting();
+  res.json({ success: true, dimensions: c.mappings.dimensions });
+});
+
+// Upsert one account's mapping values. Body: { accountId, accountName, accountType, values: { "1": "...", ... } }
+// Account is keyed by accountId when available, otherwise by accountName as a fallback —
+// matching the way QBO TB rows expose either depending on the report variant.
+app.put('/api/admin/clients/:clientId/reporting/mappings/accounts', requireAdmin, (req, res) => {
+  if (!CLIENTS[req.params.clientId]) return res.status(404).json({ error: 'Client not found' });
+  const { accountId, accountName, accountType, values } = req.body || {};
+  if (!accountId && !accountName) {
+    return res.status(400).json({ error: 'accountId or accountName is required' });
+  }
+  const c = getClientReporting(req.params.clientId);
+  const key = accountId ? `id:${accountId}` : `name:${accountName}`;
+  const existing = c.mappings.accounts[key] || { values: {} };
+  const cleanValues = {};
+  if (values && typeof values === 'object') {
+    for (let i = 1; i <= 10; i++) {
+      const k = String(i);
+      if (Object.prototype.hasOwnProperty.call(values, k)) {
+        const v = values[k];
+        // Coerce nullish/empty to empty string so the storage shape stays uniform
+        // and a clear-on-blur action erases the cell rather than leaving stale data.
+        cleanValues[k] = typeof v === 'string' ? v.trim().slice(0, 120) : '';
+      } else if (existing.values && Object.prototype.hasOwnProperty.call(existing.values, k)) {
+        cleanValues[k] = existing.values[k];
+      }
+    }
+  } else {
+    Object.assign(cleanValues, existing.values || {});
+  }
+  c.mappings.accounts[key] = {
+    accountId: accountId || existing.accountId || '',
+    accountName: accountName || existing.accountName || '',
+    accountType: accountType || existing.accountType || '',
+    values: cleanValues,
+    updatedAt: new Date().toISOString(),
+  };
+  saveReporting();
+  res.json({ success: true, key, account: c.mappings.accounts[key] });
 });
 
 // ========================================
