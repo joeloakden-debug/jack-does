@@ -471,18 +471,9 @@
       <!-- Snapshots tab -->
       <div class="reporting-tab" id="reporting-tab-snapshots">
         <div class="settings-section" style="margin-bottom:16px;">
-          <h3 style="margin:0 0 12px;font-size:0.95rem;">pull trial balance from QuickBooks</h3>
-          <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
-            <div class="form-group" style="min-width:150px;margin:0;">
-              <label>start date</label>
-              <input type="date" id="reporting-start-date" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;">
-            </div>
-            <div class="form-group" style="min-width:150px;margin:0;">
-              <label>end date</label>
-              <input type="date" id="reporting-end-date" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;">
-            </div>
-            <button class="btn-modal-save" id="btn-pull-tb">pull trial balance</button>
-          </div>
+          <h3 style="margin:0 0 6px;font-size:0.95rem;">pull trial balance from QuickBooks</h3>
+          <p style="font-size:0.82rem;color:var(--gray-500);margin:0 0 10px;">monthly snapshots covering the current fiscal year (through the last closed period) and the two prior fiscal years. fiscal year is read from QBO; the close date set in QBO drives the cutoff.</p>
+          <button class="btn-modal-save" id="btn-pull-tb">pull trial balance</button>
           <div id="reporting-status" style="font-size:0.82rem;margin-top:10px;min-height:1em;"></div>
         </div>
 

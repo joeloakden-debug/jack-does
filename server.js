@@ -5269,6 +5269,91 @@ function getClientReporting(clientId) {
 
 let reportingData = loadReporting();
 
+// Map QBO's "FirstMonthOfFiscalYear" (e.g. "March") to a 1-12 month index.
+const QBO_MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+/**
+ * Resolve the fiscal-year start month for a client. Source of truth is
+ * QBO Preferences (AccountingInfoPrefs.FiscalYearStartMonth or
+ * FirstMonthOfFiscalYear, depending on QBO API minor version). Falls back
+ * to the client's stored fiscalYearEnd, then January.
+ */
+async function getFiscalYearStartMonth(clientId) {
+  try {
+    const prefs = await qbo.getPreferences(clientId);
+    const ai = prefs?.AccountingInfoPrefs || {};
+    const name = ai.FiscalYearStartMonth || ai.FirstMonthOfFiscalYear;
+    const idx = QBO_MONTH_NAMES.findIndex(n => n.toLowerCase() === String(name || '').toLowerCase());
+    if (idx >= 0) return idx + 1;
+  } catch (e) {
+    console.warn(`[reporting] could not read fiscal year from QBO for ${clientId}:`, e.message);
+  }
+  const fye = CLIENTS[clientId]?.fiscalYearEnd;
+  if (fye && /^\d{2}-\d{2}$/.test(fye)) {
+    const endMonth = parseInt(fye.split('-')[0], 10);
+    if (endMonth >= 1 && endMonth <= 12) return (endMonth % 12) + 1;
+  }
+  return 1;
+}
+
+// Returns { fyStart: Date, fyEnd: Date, label: "FYxxxx" } for the fiscal
+// year that begins in `fyStartYear` with start month `startMonth` (1-12).
+// Year-end is computed by subtracting one day from next year's start, so
+// leap years and month-length quirks resolve correctly.
+function fyBoundsByStartYear(startMonth, fyStartYear) {
+  const fyStart = new Date(Date.UTC(fyStartYear, startMonth - 1, 1));
+  const nextStart = new Date(Date.UTC(fyStartYear + 1, startMonth - 1, 1));
+  const fyEnd = new Date(nextStart.getTime() - 86400000);
+  return { fyStart, fyEnd, label: `FY${fyEnd.getUTCFullYear()}`, fyStartYear };
+}
+
+function fyContaining(startMonth, asOfDate) {
+  const y = asOfDate.getUTCFullYear();
+  const m = asOfDate.getUTCMonth() + 1;
+  const fyStartYear = m >= startMonth ? y : y - 1;
+  return fyBoundsByStartYear(startMonth, fyStartYear);
+}
+
+// Walk every full or partial month in [start, end] inclusive. Each entry
+// has a YYYY-MM key, ISO start/end dates clipped to the range, and a
+// human label like "Mar 2026".
+function monthsBetween(start, end) {
+  const out = [];
+  let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+  const cap = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
+  while (cursor <= cap) {
+    const y = cursor.getUTCFullYear();
+    const m = cursor.getUTCMonth();
+    const monthStart = new Date(Date.UTC(y, m, 1));
+    const monthEnd = new Date(Date.UTC(y, m + 1, 0));
+    const startClipped = monthStart < start ? start : monthStart;
+    const endClipped = monthEnd > end ? end : monthEnd;
+    out.push({
+      period: `${y}-${String(m + 1).padStart(2, '0')}`,
+      startDate: startClipped.toISOString().slice(0, 10),
+      endDate: endClipped.toISOString().slice(0, 10),
+      label: `${QBO_MONTH_NAMES[m].slice(0, 3)} ${y}`,
+    });
+    cursor = new Date(Date.UTC(y, m + 1, 1));
+  }
+  return out;
+}
+
+/**
+ * Round the QBO close-date down to the last day of the most recent
+ * fully-closed month. If close date is a month-end (or later), that
+ * month is the last closed period; otherwise the previous month is.
+ */
+function lastClosedMonthEnd(closeDateStr) {
+  if (!closeDateStr) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(closeDateStr);
+  if (!m) return null;
+  const y = parseInt(m[1], 10), mo = parseInt(m[2], 10), d = parseInt(m[3], 10);
+  const lastDayOfM = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+  if (d >= lastDayOfM) return new Date(Date.UTC(y, mo - 1, lastDayOfM));
+  return new Date(Date.UTC(y, mo - 1, 0));
+}
+
 // Flatten a QBO TrialBalance report into an array of account rows.
 // QBO reports return nested Rows.Row with ColData[0]=name (with id), [1]=debit, [2]=credit.
 function flattenTBReport(tb) {
@@ -5294,20 +5379,38 @@ function flattenTBReport(tb) {
   return out;
 }
 
-// List saved TB snapshots (summary only — no account detail).
+// List saved TB snapshots (summary only — no account detail). Returns both
+// the new multi-period shape and the legacy YTD shape so older snapshots
+// keep rendering in the list.
 app.get('/api/admin/clients/:clientId/reporting/tb-snapshots', requireAdmin, (req, res) => {
   const c = getClientReporting(req.params.clientId);
-  const list = c.tbSnapshots.map(s => ({
-    id: s.id,
-    startDate: s.startDate,
-    endDate: s.endDate,
-    currency: s.currency,
-    accountCount: s.accounts?.length || 0,
-    totalDebit: s.totalDebit,
-    totalCredit: s.totalCredit,
-    createdAt: s.createdAt,
-  }));
-  list.sort((a, b) => (b.endDate || '').localeCompare(a.endDate || '') || (b.createdAt || '').localeCompare(a.createdAt || ''));
+  const list = c.tbSnapshots.map(s => {
+    if (s.type === 'multi-period') {
+      const periodCount = (s.fiscalYears || []).reduce((sum, fy) => sum + (fy.months?.length || 0), 0);
+      return {
+        id: s.id,
+        type: 'multi-period',
+        closeDate: s.closeDate,
+        cutoffMonthEnd: s.cutoffMonthEnd,
+        fiscalYearLabels: (s.fiscalYears || []).map(fy => fy.label),
+        accountCount: s.accounts?.length || 0,
+        periodCount,
+        createdAt: s.createdAt,
+      };
+    }
+    return {
+      id: s.id,
+      type: 'ytd',
+      startDate: s.startDate,
+      endDate: s.endDate,
+      currency: s.currency,
+      accountCount: s.accounts?.length || 0,
+      totalDebit: s.totalDebit,
+      totalCredit: s.totalCredit,
+      createdAt: s.createdAt,
+    };
+  });
+  list.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   res.json({ snapshots: list });
 });
 
@@ -5319,49 +5422,119 @@ app.get('/api/admin/clients/:clientId/reporting/tb-snapshots/:snapshotId', requi
   res.json({ snapshot: snap });
 });
 
-// Pull a fresh TB from QBO and save it as a snapshot.
+/**
+ * Pull a multi-period TB snapshot: every month of the current fiscal year
+ * (through the last closed period) plus all 12 months of each of the
+ * two prior fiscal years. Fiscal year is read from QBO Preferences;
+ * cutoff is derived from QBO's BookCloseDate.
+ *
+ * Each cell stores the *net* movement for that month (debit − credit),
+ * so balance-sheet rows reflect period change and P&L rows reflect
+ * period activity. Trial balance for the date range is what QBO returns;
+ * if specific accounts come back as ending balances rather than period
+ * deltas, that's a QBO report-engine behavior and would need a switch
+ * to GeneralLedgerDetail in a follow-up.
+ */
 app.post('/api/admin/clients/:clientId/reporting/tb-snapshots', requireAdmin, async (req, res) => {
   const { clientId } = req.params;
-  const { startDate, endDate } = req.body || {};
-  if (!startDate || !endDate) {
-    return res.status(400).json({ error: 'startDate and endDate are required (YYYY-MM-DD)' });
-  }
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
-    return res.status(400).json({ error: 'Dates must be YYYY-MM-DD' });
-  }
-  if (startDate > endDate) {
-    return res.status(400).json({ error: 'startDate must be on or before endDate' });
-  }
-  if (!CLIENTS[clientId]) {
-    return res.status(404).json({ error: 'Client not found' });
-  }
+  if (!CLIENTS[clientId]) return res.status(404).json({ error: 'Client not found' });
   if (!qbo.isConnected(clientId)) {
     return res.status(400).json({ error: 'QuickBooks is not connected for this client' });
   }
 
   try {
-    const tb = await qbo.getTrialBalance(startDate, endDate, clientId);
-    const accounts = flattenTBReport(tb);
-    const totalDebit = accounts.reduce((s, a) => s + (a.debit || 0), 0);
-    const totalCredit = accounts.reduce((s, a) => s + (a.credit || 0), 0);
+    const closeDateStr = await qbo.getBookCloseDate(clientId);
+    if (!closeDateStr) {
+      return res.status(400).json({
+        error: 'No closing date set in QuickBooks. Set one under Account and Settings → Advanced → Close the books, then try again.',
+      });
+    }
+    const cutoff = lastClosedMonthEnd(closeDateStr);
+    if (!cutoff) {
+      return res.status(400).json({ error: `Could not parse QBO close date "${closeDateStr}".` });
+    }
+
+    const startMonth = await getFiscalYearStartMonth(clientId);
+    const currentFY = fyContaining(startMonth, cutoff);
+    const priorFY1 = fyBoundsByStartYear(startMonth, currentFY.fyStartYear - 1);
+    const priorFY2 = fyBoundsByStartYear(startMonth, currentFY.fyStartYear - 2);
+
+    // Current FY is capped at the last closed month so we don't pull
+    // partial / unposted months. If the close date is before the current
+    // FY even started (rare — fresh book just rolled), this returns [].
+    const currentMonths = cutoff < currentFY.fyStart ? [] : monthsBetween(currentFY.fyStart, cutoff);
+
+    const fiscalYears = [
+      {
+        label: priorFY2.label,
+        startDate: priorFY2.fyStart.toISOString().slice(0, 10),
+        endDate: priorFY2.fyEnd.toISOString().slice(0, 10),
+        isCurrent: false,
+        months: monthsBetween(priorFY2.fyStart, priorFY2.fyEnd),
+      },
+      {
+        label: priorFY1.label,
+        startDate: priorFY1.fyStart.toISOString().slice(0, 10),
+        endDate: priorFY1.fyEnd.toISOString().slice(0, 10),
+        isCurrent: false,
+        months: monthsBetween(priorFY1.fyStart, priorFY1.fyEnd),
+      },
+      {
+        label: currentFY.label,
+        startDate: currentFY.fyStart.toISOString().slice(0, 10),
+        endDate: currentFY.fyEnd.toISOString().slice(0, 10),
+        isCurrent: true,
+        months: currentMonths,
+      },
+    ];
+    const allMonths = fiscalYears.flatMap(fy => fy.months);
+    if (allMonths.length === 0) {
+      return res.status(400).json({ error: 'No closed months to pull. Set a closing date in QBO covering at least one prior month.' });
+    }
+
+    // Pull each month's TB sequentially. Concurrency would be faster but
+    // QBO has per-realm rate limits and this only runs on demand.
+    const accountsMap = new Map();
+    const totals = {};
+    for (const m of allMonths) {
+      let tb;
+      try {
+        tb = await qbo.getTrialBalance(m.startDate, m.endDate, clientId);
+      } catch (e) {
+        throw new Error(`Failed to pull ${m.label} (${m.startDate}…${m.endDate}): ${e.message}`);
+      }
+      const rows = flattenTBReport(tb);
+      let monthNet = 0;
+      for (const r of rows) {
+        const key = r.accountId ? `id:${r.accountId}` : `name:${r.accountName}`;
+        if (!accountsMap.has(key)) {
+          accountsMap.set(key, { accountId: r.accountId, accountName: r.accountName, nets: {} });
+        }
+        accountsMap.get(key).nets[m.period] = r.net;
+        monthNet += r.net;
+      }
+      totals[m.period] = Math.round(monthNet * 100) / 100;
+    }
+
+    const accounts = Array.from(accountsMap.values()).sort((a, b) => a.accountName.localeCompare(b.accountName));
 
     const c = getClientReporting(clientId);
     const snap = {
       id: 'tb_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
-      startDate,
-      endDate,
-      currency: tb?.Header?.Currency || tb?.Header?.ReportCurrency || null,
-      reportName: tb?.Header?.ReportName || 'TrialBalance',
+      type: 'multi-period',
+      closeDate: closeDateStr,
+      cutoffMonthEnd: cutoff.toISOString().slice(0, 10),
+      fiscalYearStartMonth: startMonth,
+      fiscalYears,
       accounts,
-      totalDebit: Math.round(totalDebit * 100) / 100,
-      totalCredit: Math.round(totalCredit * 100) / 100,
+      totals,
       createdAt: new Date().toISOString(),
     };
     c.tbSnapshots.push(snap);
     saveReporting();
     res.json({ success: true, snapshot: snap });
   } catch (e) {
-    console.error('[reporting] TB pull failed:', e.message);
+    console.error('[reporting] multi-period TB pull failed:', e.message);
     res.status(500).json({ error: e.message });
   }
 });

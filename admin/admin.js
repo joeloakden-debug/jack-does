@@ -4242,17 +4242,6 @@ async function initReportingView() {
   sel.innerHTML = '<option value="">— select client —</option>'
     + reportingClients.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
 
-  // Default end-of-last-month as the period end, first-of-this-year as start.
-  const endInput = document.getElementById('reporting-end-date');
-  const startInput = document.getElementById('reporting-start-date');
-  if (!endInput.value) {
-    const now = new Date();
-    const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0);
-    const yearStart = new Date(now.getFullYear(), 0, 1);
-    endInput.value = lastMonthEnd.toISOString().slice(0, 10);
-    startInput.value = yearStart.toISOString().slice(0, 10);
-  }
-
   // Restore previously chosen client if we have one
   if (reportingSelectedClientId && reportingClients.find(c => c.id === reportingSelectedClientId)) {
     sel.value = reportingSelectedClientId;
@@ -4329,37 +4318,43 @@ function renderReportingSnapshots(list) {
     return;
   }
   if (!list.length) {
-    el.innerHTML = '<div class="empty-state"><p>no snapshots yet</p><span>pull one using the form above</span></div>';
+    el.innerHTML = '<div class="empty-state"><p>no snapshots yet</p><span>pull one using the button above</span></div>';
     return;
   }
   el.innerHTML = `
     <table style="width:100%;border-collapse:collapse;font-size:0.88rem;">
       <thead>
         <tr style="border-bottom:1px solid var(--gray-200);text-align:left;">
-          <th style="padding:8px 6px;">period</th>
-          <th style="padding:8px 6px;">currency</th>
+          <th style="padding:8px 6px;">coverage</th>
+          <th style="padding:8px 6px;">close date</th>
           <th style="padding:8px 6px;text-align:right;">accounts</th>
-          <th style="padding:8px 6px;text-align:right;">total debit</th>
-          <th style="padding:8px 6px;text-align:right;">total credit</th>
+          <th style="padding:8px 6px;text-align:right;">months</th>
           <th style="padding:8px 6px;">pulled</th>
           <th style="padding:8px 6px;"></th>
         </tr>
       </thead>
       <tbody>
-        ${list.map(s => `
-          <tr style="border-bottom:1px solid var(--gray-100);">
-            <td style="padding:8px 6px;">${escapeHtml(s.startDate)} → ${escapeHtml(s.endDate)}</td>
-            <td style="padding:8px 6px;">${escapeHtml(s.currency || '—')}</td>
-            <td style="padding:8px 6px;text-align:right;">${s.accountCount}</td>
-            <td style="padding:8px 6px;text-align:right;">${fmtMoney(s.totalDebit)}</td>
-            <td style="padding:8px 6px;text-align:right;">${fmtMoney(s.totalCredit)}</td>
-            <td style="padding:8px 6px;font-size:0.8rem;color:var(--gray-500);">${formatDate(s.createdAt)}</td>
-            <td style="padding:8px 6px;text-align:right;white-space:nowrap;">
-              <button class="btn-edit-client" data-snapshot-view="${s.id}">view</button>
-              <button class="btn-edit-client" data-snapshot-delete="${s.id}" style="color:var(--red-600,#c62828);">delete</button>
-            </td>
-          </tr>
-        `).join('')}
+        ${list.map(s => {
+          const isMulti = s.type === 'multi-period';
+          const coverage = isMulti
+            ? `${escapeHtml((s.fiscalYearLabels || []).join(' · '))}`
+            : `${escapeHtml(s.startDate || '')} → ${escapeHtml(s.endDate || '')} <span style="color:var(--gray-500);font-size:0.78rem;">(YTD legacy)</span>`;
+          const cutoff = isMulti ? escapeHtml(s.closeDate || s.cutoffMonthEnd || '') : '—';
+          const months = isMulti ? s.periodCount : '—';
+          return `
+            <tr style="border-bottom:1px solid var(--gray-100);">
+              <td style="padding:8px 6px;">${coverage}</td>
+              <td style="padding:8px 6px;">${cutoff}</td>
+              <td style="padding:8px 6px;text-align:right;">${s.accountCount}</td>
+              <td style="padding:8px 6px;text-align:right;">${months}</td>
+              <td style="padding:8px 6px;font-size:0.8rem;color:var(--gray-500);">${formatDate(s.createdAt)}</td>
+              <td style="padding:8px 6px;text-align:right;white-space:nowrap;">
+                <button class="btn-edit-client" data-snapshot-view="${s.id}">view</button>
+                <button class="btn-edit-client" data-snapshot-delete="${s.id}" style="color:var(--red-600,#c62828);">delete</button>
+              </td>
+            </tr>
+          `;
+        }).join('')}
       </tbody>
     </table>
   `;
@@ -4385,42 +4380,129 @@ async function viewReportingSnapshot(snapshotId) {
   }
 }
 
+function fmtCell(n) {
+  if (n === null || n === undefined || n === 0) return '';
+  const v = Number(n) || 0;
+  const formatted = Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v < 0 ? `(${formatted})` : formatted;
+}
+
 function renderReportingDetail(snap) {
   const section = document.getElementById('reporting-detail-section');
   const title = document.getElementById('reporting-detail-title');
   const table = document.getElementById('reporting-detail-table');
-  title.textContent = `trial balance — ${snap.startDate} → ${snap.endDate}${snap.currency ? ' (' + snap.currency + ')' : ''}`;
-  const rows = (snap.accounts || []).map(a => `
-    <tr style="border-bottom:1px solid var(--gray-100);">
-      <td style="padding:6px 8px;font-size:0.85rem;">${escapeHtml(a.accountName)}</td>
-      <td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums;">${a.debit ? fmtMoney(a.debit) : ''}</td>
-      <td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums;">${a.credit ? fmtMoney(a.credit) : ''}</td>
-      <td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums;color:${a.net < 0 ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtMoney(a.net)}</td>
-    </tr>
-  `).join('');
-  table.innerHTML = `
-    <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
-      <thead>
-        <tr style="border-bottom:1px solid var(--gray-300);text-align:left;">
-          <th style="padding:8px;">account</th>
-          <th style="padding:8px;text-align:right;">debit</th>
-          <th style="padding:8px;text-align:right;">credit</th>
-          <th style="padding:8px;text-align:right;">net</th>
-        </tr>
-      </thead>
-      <tbody>${rows || '<tr><td colspan="4" style="padding:16px;color:var(--gray-500);">no account rows</td></tr>'}</tbody>
-      <tfoot>
-        <tr style="border-top:1px solid var(--gray-300);font-weight:600;">
-          <td style="padding:8px;">totals</td>
-          <td style="padding:8px;text-align:right;">${fmtMoney(snap.totalDebit)}</td>
-          <td style="padding:8px;text-align:right;">${fmtMoney(snap.totalCredit)}</td>
-          <td style="padding:8px;text-align:right;">${fmtMoney((snap.totalDebit || 0) - (snap.totalCredit || 0))}</td>
-        </tr>
-      </tfoot>
-    </table>
-  `;
+
+  if (snap.type === 'multi-period') {
+    const fyLabels = (snap.fiscalYears || []).map(fy => fy.label).join(' · ');
+    title.textContent = `trial balance — ${fyLabels} (close date ${snap.closeDate})`;
+    table.innerHTML = renderMultiPeriodTable(snap);
+  } else {
+    // Legacy YTD shape
+    title.textContent = `trial balance — ${snap.startDate} → ${snap.endDate}${snap.currency ? ' (' + snap.currency + ')' : ''}`;
+    const rows = (snap.accounts || []).map(a => `
+      <tr style="border-bottom:1px solid var(--gray-100);">
+        <td style="padding:6px 8px;font-size:0.85rem;">${escapeHtml(a.accountName)}</td>
+        <td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums;">${a.debit ? fmtMoney(a.debit) : ''}</td>
+        <td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums;">${a.credit ? fmtMoney(a.credit) : ''}</td>
+        <td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums;color:${a.net < 0 ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtMoney(a.net)}</td>
+      </tr>
+    `).join('');
+    table.innerHTML = `
+      <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
+        <thead>
+          <tr style="border-bottom:1px solid var(--gray-300);text-align:left;">
+            <th style="padding:8px;">account</th>
+            <th style="padding:8px;text-align:right;">debit</th>
+            <th style="padding:8px;text-align:right;">credit</th>
+            <th style="padding:8px;text-align:right;">net</th>
+          </tr>
+        </thead>
+        <tbody>${rows || '<tr><td colspan="4" style="padding:16px;color:var(--gray-500);">no account rows</td></tr>'}</tbody>
+        <tfoot>
+          <tr style="border-top:1px solid var(--gray-300);font-weight:600;">
+            <td style="padding:8px;">totals</td>
+            <td style="padding:8px;text-align:right;">${fmtMoney(snap.totalDebit)}</td>
+            <td style="padding:8px;text-align:right;">${fmtMoney(snap.totalCredit)}</td>
+            <td style="padding:8px;text-align:right;">${fmtMoney((snap.totalDebit || 0) - (snap.totalCredit || 0))}</td>
+          </tr>
+        </tfoot>
+      </table>
+    `;
+  }
   section.style.display = '';
   section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// Wide table: account rows × monthly columns grouped by fiscal year.
+// Each cell shows the period net (debit − credit) or blank for no activity.
+// First column is sticky so the account name stays visible while scrolling.
+function renderMultiPeriodTable(snap) {
+  const fys = snap.fiscalYears || [];
+  const allMonths = fys.flatMap(fy => fy.months || []);
+  if (!allMonths.length) {
+    return '<div class="empty-state"><p>no months in this snapshot</p></div>';
+  }
+  const colWidth = 92; // px per month column
+
+  const fyHeaderCells = fys.filter(fy => (fy.months || []).length > 0).map(fy => {
+    const span = fy.months.length;
+    const bg = fy.isCurrent ? 'var(--blue-50, #eff6ff)' : 'var(--gray-50)';
+    return `<th colspan="${span}" style="padding:6px 8px;background:${bg};border-left:1px solid var(--gray-200);text-align:center;font-weight:600;">${escapeHtml(fy.label)}${fy.isCurrent ? ' <span style="font-size:0.72rem;font-weight:500;color:var(--blue-600);">CURRENT</span>' : ''}</th>`;
+  }).join('');
+
+  const monthHeaderCells = fys.flatMap((fy, i) =>
+    (fy.months || []).map((m, j) => {
+      const isFirstOfFY = j === 0 && i > 0;
+      return `<th style="padding:6px 4px;font-size:0.72rem;font-weight:500;color:var(--gray-600);text-align:right;min-width:${colWidth}px;${isFirstOfFY ? 'border-left:1px solid var(--gray-300);' : ''}">${escapeHtml(m.label)}</th>`;
+    })
+  ).join('');
+
+  const accountRows = (snap.accounts || []).map(a => {
+    const cells = fys.flatMap((fy, i) =>
+      (fy.months || []).map((m, j) => {
+        const v = a.nets?.[m.period];
+        const isFirstOfFY = j === 0 && i > 0;
+        const isNeg = (v || 0) < 0;
+        return `<td style="padding:4px 6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.78rem;color:${isNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};${isFirstOfFY ? 'border-left:1px solid var(--gray-200);' : ''}">${fmtCell(v)}</td>`;
+      })
+    ).join('');
+    return `
+      <tr style="border-bottom:1px solid var(--gray-100);">
+        <td style="padding:6px 8px;font-size:0.82rem;position:sticky;left:0;background:#fff;border-right:1px solid var(--gray-200);min-width:240px;">${escapeHtml(a.accountName)}</td>
+        ${cells}
+      </tr>
+    `;
+  }).join('');
+
+  const totalCells = fys.flatMap((fy, i) =>
+    (fy.months || []).map((m, j) => {
+      const v = snap.totals?.[m.period];
+      const isFirstOfFY = j === 0 && i > 0;
+      return `<td style="padding:6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.78rem;font-weight:600;${isFirstOfFY ? 'border-left:1px solid var(--gray-300);' : ''}">${fmtCell(v)}</td>`;
+    })
+  ).join('');
+
+  return `
+    <div style="overflow-x:auto;border:1px solid var(--gray-200);border-radius:6px;">
+      <table style="border-collapse:collapse;font-size:0.82rem;width:max-content;min-width:100%;">
+        <thead>
+          <tr style="background:var(--gray-50);">
+            <th rowspan="2" style="padding:8px;text-align:left;position:sticky;left:0;background:var(--gray-50);border-right:1px solid var(--gray-200);min-width:240px;">account</th>
+            ${fyHeaderCells}
+          </tr>
+          <tr>${monthHeaderCells}</tr>
+        </thead>
+        <tbody>${accountRows || `<tr><td colspan="${allMonths.length + 1}" style="padding:16px;color:var(--gray-500);">no account rows</td></tr>`}</tbody>
+        <tfoot>
+          <tr style="border-top:2px solid var(--gray-300);background:var(--gray-50);">
+            <td style="padding:6px 8px;font-weight:600;position:sticky;left:0;background:var(--gray-50);border-right:1px solid var(--gray-200);">net total</td>
+            ${totalCells}
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+    <p style="font-size:0.78rem;color:var(--gray-500);margin-top:8px;">net change per period (debit − credit). negative values shown in parentheses. blank = no activity.</p>
+  `;
 }
 
 function hideReportingDetail() {
@@ -4681,29 +4763,27 @@ document.getElementById('dimensions-modal-save')?.addEventListener('click', save
 
 document.getElementById('btn-pull-tb')?.addEventListener('click', async () => {
   const clientId = document.getElementById('reporting-client-select').value;
-  const startDate = document.getElementById('reporting-start-date').value;
-  const endDate = document.getElementById('reporting-end-date').value;
   if (!clientId) return setReportingStatus('select a client first', 'error');
-  if (!startDate || !endDate) return setReportingStatus('start and end dates are required', 'error');
-  if (startDate > endDate) return setReportingStatus('start date must be on or before end date', 'error');
 
   reportingSelectedClientId = clientId;
   const btn = document.getElementById('btn-pull-tb');
   const originalLabel = btn.textContent;
   btn.disabled = true;
   btn.textContent = 'pulling...';
-  setReportingStatus('pulling trial balance from QuickBooks...');
+  setReportingStatus('pulling monthly trial balances — this can take 15-30 seconds for 30+ months...');
   try {
     const res = await fetch(`/api/admin/clients/${clientId}/reporting/tb-snapshots`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
-      body: JSON.stringify({ startDate, endDate }),
+      body: JSON.stringify({}),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Pull failed');
-    setReportingStatus(`snapshot saved — ${data.snapshot.accounts.length} accounts, totals ${fmtMoney(data.snapshot.totalDebit)} / ${fmtMoney(data.snapshot.totalCredit)}`, 'success');
+    const snap = data.snapshot;
+    const periodCount = (snap.fiscalYears || []).reduce((sum, fy) => sum + (fy.months?.length || 0), 0);
+    setReportingStatus(`snapshot saved — ${snap.accounts.length} accounts × ${periodCount} months · close date ${snap.closeDate}`, 'success');
     await loadReportingSnapshots();
-    renderReportingDetail(data.snapshot);
+    renderReportingDetail(snap);
   } catch (e) {
     setReportingStatus('failed: ' + e.message, 'error');
   } finally {
