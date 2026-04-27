@@ -4199,6 +4199,8 @@ let reportingClients = [];
 let reportingSelectedClientId = null;
 let reportingSnapshots = [];
 let reportingActiveTab = 'snapshots';
+let reportingDetailSnapshot = null;       // currently open snapshot in the fullscreen modal
+let reportingDetailSelectedFY = null;     // FY label being viewed
 // Mapping state — populated lazily when the user opens the mapping tab.
 let mappingDimensions = null;            // { "1": { id, name, description, isPrimary }, ... }
 let mappingAccountValues = {};           // keyed by `id:<id>` or `name:<name>` — server canonical
@@ -4388,17 +4390,48 @@ function fmtCell(n) {
 }
 
 function renderReportingDetail(snap) {
-  const section = document.getElementById('reporting-detail-section');
+  reportingDetailSnapshot = snap;
+  if (snap.type === 'multi-period') {
+    const fys = snap.fiscalYears || [];
+    const current = fys.find(fy => fy.isCurrent && (fy.months || []).length > 0);
+    const firstWithData = fys.find(fy => (fy.months || []).length > 0);
+    reportingDetailSelectedFY = (current || firstWithData || fys[0])?.label || null;
+  } else {
+    reportingDetailSelectedFY = null;
+  }
+  document.getElementById('reporting-detail-modal').style.display = 'flex';
+  drawReportingDetail();
+}
+
+function drawReportingDetail() {
+  const snap = reportingDetailSnapshot;
+  if (!snap) return;
   const title = document.getElementById('reporting-detail-title');
+  const tabsEl = document.getElementById('reporting-detail-fy-tabs');
   const table = document.getElementById('reporting-detail-table');
 
   if (snap.type === 'multi-period') {
-    const fyLabels = (snap.fiscalYears || []).map(fy => fy.label).join(' · ');
-    title.textContent = `trial balance — ${fyLabels} (close date ${snap.closeDate})`;
-    table.innerHTML = renderMultiPeriodTable(snap);
+    title.textContent = `trial balance · close date ${snap.closeDate}`;
+    const fys = snap.fiscalYears || [];
+    tabsEl.innerHTML = fys.map(fy => {
+      const isActive = fy.label === reportingDetailSelectedFY;
+      const hasData = (fy.months || []).length > 0;
+      const bg = isActive ? 'var(--blue-600, #2563eb)' : '#fff';
+      const color = isActive ? '#fff' : 'var(--gray-700)';
+      const border = isActive ? 'var(--blue-600, #2563eb)' : 'var(--gray-300)';
+      const opacity = hasData ? 1 : 0.5;
+      return `<button class="reporting-fy-tab" data-fy-label="${escapeHtml(fy.label)}" ${hasData ? '' : 'disabled'} style="padding:5px 12px;border:1px solid ${border};border-radius:14px;background:${bg};color:${color};font-size:0.78rem;font-weight:500;cursor:${hasData ? 'pointer' : 'not-allowed'};opacity:${opacity};">${escapeHtml(fy.label)}${fy.isCurrent ? ' · current' : ''}</button>`;
+    }).join('');
+    tabsEl.querySelectorAll('.reporting-fy-tab').forEach(b => {
+      b.addEventListener('click', () => {
+        reportingDetailSelectedFY = b.dataset.fyLabel;
+        drawReportingDetail();
+      });
+    });
+    table.innerHTML = renderSingleFYTable(snap, reportingDetailSelectedFY);
   } else {
-    // Legacy YTD shape
     title.textContent = `trial balance — ${snap.startDate} → ${snap.endDate}${snap.currency ? ' (' + snap.currency + ')' : ''}`;
+    tabsEl.innerHTML = '';
     const rows = (snap.accounts || []).map(a => `
       <tr style="border-bottom:1px solid var(--gray-100);">
         <td style="padding:6px 8px;font-size:0.85rem;">${escapeHtml(a.accountName)}</td>
@@ -4429,85 +4462,99 @@ function renderReportingDetail(snap) {
       </table>
     `;
   }
-  section.style.display = '';
-  section.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-// Wide table: account rows × monthly columns grouped by fiscal year.
-// Each cell shows the period net (debit − credit) or blank for no activity.
-// First column is sticky so the account name stays visible while scrolling.
-function renderMultiPeriodTable(snap) {
-  const fys = snap.fiscalYears || [];
-  const allMonths = fys.flatMap(fy => fy.months || []);
-  if (!allMonths.length) {
-    return '<div class="empty-state"><p>no months in this snapshot</p></div>';
+// Build the canonical 12-month axis for a fiscal year using its start/end
+// dates so we always show the full FY layout, even if QBO returned no
+// activity for some months (those columns just appear blank).
+function fyMonthAxis(fy) {
+  if (!fy?.startDate || !fy?.endDate) return fy?.months || [];
+  const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const out = [];
+  const [sy, sm] = fy.startDate.split('-').map(Number);
+  const [ey, em] = fy.endDate.split('-').map(Number);
+  let y = sy, m = sm;
+  while (y < ey || (y === ey && m <= em)) {
+    out.push({
+      period: `${y}-${String(m).padStart(2, '0')}`,
+      label: `${monthNames[m - 1]} ${y}`,
+    });
+    m++;
+    if (m > 12) { m = 1; y++; }
   }
-  const colWidth = 92; // px per month column
+  return out;
+}
 
-  const fyHeaderCells = fys.filter(fy => (fy.months || []).length > 0).map(fy => {
-    const span = fy.months.length;
-    const bg = fy.isCurrent ? 'var(--blue-50, #eff6ff)' : 'var(--gray-50)';
-    return `<th colspan="${span}" style="padding:6px 8px;background:${bg};border-left:1px solid var(--gray-200);text-align:center;font-weight:600;">${escapeHtml(fy.label)}${fy.isCurrent ? ' <span style="font-size:0.72rem;font-weight:500;color:var(--blue-600);">CURRENT</span>' : ''}</th>`;
-  }).join('');
+// Single-FY table: account rows × 12 month columns. Pulled-but-empty
+// months show a blank cell; not-yet-pulled months (current FY) also show
+// blank. Sticky first column for account name.
+function renderSingleFYTable(snap, fyLabel) {
+  const fys = snap.fiscalYears || [];
+  const fy = fys.find(f => f.label === fyLabel) || fys.find(f => (f.months || []).length > 0) || fys[0];
+  if (!fy) return '<div class="empty-state"><p>no fiscal years in this snapshot</p></div>';
 
-  const monthHeaderCells = fys.flatMap((fy, i) =>
-    (fy.months || []).map((m, j) => {
-      const isFirstOfFY = j === 0 && i > 0;
-      return `<th style="padding:6px 4px;font-size:0.72rem;font-weight:500;color:var(--gray-600);text-align:right;min-width:${colWidth}px;${isFirstOfFY ? 'border-left:1px solid var(--gray-300);' : ''}">${escapeHtml(m.label)}</th>`;
-    })
-  ).join('');
+  const months = fyMonthAxis(fy);
+  const pulledPeriods = new Set((fy.months || []).map(m => m.period));
 
-  const accountRows = (snap.accounts || []).map(a => {
-    const cells = fys.flatMap((fy, i) =>
-      (fy.months || []).map((m, j) => {
-        const v = a.nets?.[m.period];
-        const isFirstOfFY = j === 0 && i > 0;
-        const isNeg = (v || 0) < 0;
-        return `<td style="padding:4px 6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.78rem;color:${isNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};${isFirstOfFY ? 'border-left:1px solid var(--gray-200);' : ''}">${fmtCell(v)}</td>`;
-      })
-    ).join('');
+  const accountRows = (snap.accounts || []).filter(a => {
+    // Only show accounts with any activity in this FY — keeps the table
+    // readable when an account is brand new or fully retired.
+    return months.some(m => (a.nets?.[m.period] || 0) !== 0);
+  }).map(a => {
+    const cells = months.map(m => {
+      const v = a.nets?.[m.period];
+      const wasPulled = pulledPeriods.has(m.period);
+      const isNeg = (v || 0) < 0;
+      const bg = wasPulled ? '#fff' : 'var(--gray-50)';
+      return `<td style="padding:4px 6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;color:${isNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};background:${bg};">${fmtCell(v)}</td>`;
+    }).join('');
     return `
       <tr style="border-bottom:1px solid var(--gray-100);">
-        <td style="padding:6px 8px;font-size:0.82rem;position:sticky;left:0;background:#fff;border-right:1px solid var(--gray-200);min-width:240px;">${escapeHtml(a.accountName)}</td>
+        <td style="padding:6px 10px;font-size:0.85rem;position:sticky;left:0;background:#fff;border-right:1px solid var(--gray-200);min-width:280px;">${escapeHtml(a.accountName)}</td>
         ${cells}
       </tr>
     `;
   }).join('');
 
-  const totalCells = fys.flatMap((fy, i) =>
-    (fy.months || []).map((m, j) => {
-      const v = snap.totals?.[m.period];
-      const isFirstOfFY = j === 0 && i > 0;
-      return `<td style="padding:6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.78rem;font-weight:600;${isFirstOfFY ? 'border-left:1px solid var(--gray-300);' : ''}">${fmtCell(v)}</td>`;
-    })
-  ).join('');
+  const totalCells = months.map(m => {
+    const v = snap.totals?.[m.period];
+    const wasPulled = pulledPeriods.has(m.period);
+    const bg = wasPulled ? 'var(--gray-50)' : '#f3f4f6';
+    return `<td style="padding:6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;font-weight:600;background:${bg};">${fmtCell(v)}</td>`;
+  }).join('');
+
+  const monthHeaderCells = months.map(m => {
+    const wasPulled = pulledPeriods.has(m.period);
+    return `<th style="padding:8px 6px;font-size:0.78rem;font-weight:500;color:${wasPulled ? 'var(--gray-700)' : 'var(--gray-400)'};text-align:right;min-width:96px;background:var(--gray-50);">${escapeHtml(m.label)}${wasPulled ? '' : ' <span style="font-size:0.65rem;font-weight:400;">(unpulled)</span>'}</th>`;
+  }).join('');
 
   return `
-    <div style="overflow-x:auto;border:1px solid var(--gray-200);border-radius:6px;">
+    <div style="overflow:auto;border:1px solid var(--gray-200);border-radius:6px;">
       <table style="border-collapse:collapse;font-size:0.82rem;width:max-content;min-width:100%;">
-        <thead>
-          <tr style="background:var(--gray-50);">
-            <th rowspan="2" style="padding:8px;text-align:left;position:sticky;left:0;background:var(--gray-50);border-right:1px solid var(--gray-200);min-width:240px;">account</th>
-            ${fyHeaderCells}
+        <thead style="position:sticky;top:0;z-index:2;">
+          <tr>
+            <th style="padding:8px 10px;text-align:left;position:sticky;left:0;background:var(--gray-50);border-right:1px solid var(--gray-200);min-width:280px;z-index:3;">account · ${escapeHtml(fy.label)}${fy.isCurrent ? ' (current)' : ''}</th>
+            ${monthHeaderCells}
           </tr>
-          <tr>${monthHeaderCells}</tr>
         </thead>
-        <tbody>${accountRows || `<tr><td colspan="${allMonths.length + 1}" style="padding:16px;color:var(--gray-500);">no account rows</td></tr>`}</tbody>
+        <tbody>${accountRows || `<tr><td colspan="${months.length + 1}" style="padding:16px;color:var(--gray-500);">no accounts with activity in this fiscal year</td></tr>`}</tbody>
         <tfoot>
-          <tr style="border-top:2px solid var(--gray-300);background:var(--gray-50);">
-            <td style="padding:6px 8px;font-weight:600;position:sticky;left:0;background:var(--gray-50);border-right:1px solid var(--gray-200);">net total</td>
+          <tr style="border-top:2px solid var(--gray-300);">
+            <td style="padding:6px 10px;font-weight:600;position:sticky;left:0;background:var(--gray-50);border-right:1px solid var(--gray-200);">net total</td>
             ${totalCells}
           </tr>
         </tfoot>
       </table>
     </div>
-    <p style="font-size:0.78rem;color:var(--gray-500);margin-top:8px;">net change per period (debit − credit). negative values shown in parentheses. blank = no activity.</p>
+    <p style="font-size:0.78rem;color:var(--gray-500);margin-top:8px;">net change per period (debit − credit). negatives in parentheses. blank cells with grey background = month not yet pulled (current FY only goes through last closed period).</p>
   `;
 }
 
 function hideReportingDetail() {
-  const section = document.getElementById('reporting-detail-section');
-  if (section) section.style.display = 'none';
+  const modal = document.getElementById('reporting-detail-modal');
+  if (modal) modal.style.display = 'none';
+  reportingDetailSnapshot = null;
+  reportingDetailSelectedFY = null;
 }
 
 document.getElementById('btn-close-reporting-detail')?.addEventListener('click', hideReportingDetail);
