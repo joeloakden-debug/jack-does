@@ -4264,6 +4264,9 @@ function switchReportingTab(tab) {
   if (tab === 'mapping' && reportingSelectedClientId) {
     loadMappingsAndAccounts();
   }
+  if (tab === 'dimensions' && reportingSelectedClientId) {
+    loadDimensionsConfig();
+  }
 }
 
 document.querySelectorAll('[data-reporting-tab]').forEach(btn => {
@@ -4285,6 +4288,8 @@ async function onReportingClientChanged() {
   await loadReportingSnapshots();
   if (reportingActiveTab === 'mapping') {
     await loadMappingsAndAccounts();
+  } else if (reportingActiveTab === 'dimensions') {
+    await loadDimensionsConfig();
   } else {
     // Reset cached mapping state — it'll reload when the user opens the tab.
     mappingDimensions = null;
@@ -4618,12 +4623,67 @@ function renderDimensionsSummary() {
   el.innerHTML = dims.map(d => {
     const label = d.name || `(unnamed)`;
     const tag = d.isPrimary ? '<span style="background:var(--blue-50);color:var(--blue-600);padding:1px 6px;border-radius:4px;font-size:0.72rem;font-weight:600;margin-left:4px;">PRIMARY</span>' : '';
-    return `<span style="display:inline-block;margin:2px 8px 2px 0;"><strong>${d.id}.</strong> ${escapeHtml(label)}${tag}</span>`;
+    const opts = Array.isArray(d.options) ? d.options.map(optionShape).filter(Boolean) : [];
+    const optHint = opts.length ? ` <span style="color:var(--gray-500);font-size:0.78rem;">(${opts.length} option${opts.length === 1 ? '' : 's'})</span>` : '';
+    return `<span style="display:inline-block;margin:2px 8px 2px 0;"><strong>${d.id}.</strong> ${escapeHtml(label)}${tag}${optHint}</span>`;
   }).join('');
 }
 
 function mappingKeyFor(acct) {
   return acct.id ? `id:${acct.id}` : `name:${acct.name}`;
+}
+
+// Coerce a stored option (string from old shape, or {name, statementType})
+// into a canonical { name, statementType } pair. Renamed accounts hold
+// onto their value across this normalization.
+function optionShape(o) {
+  if (typeof o === 'string') return { name: o, statementType: null };
+  if (o && typeof o === 'object') return { name: String(o.name || ''), statementType: o.statementType || null };
+  return null;
+}
+
+const STMT_TYPE_LABEL = { balance_sheet: 'Balance Sheet', income_statement: 'Income Statement' };
+
+// Build the mapping-table cell for one (account × dimension):
+//   - <select> with <optgroup> grouping when the dimension has options
+//   - <input type="text"> when the dimension is free-text
+// Pre-existing mapped values that no longer match any option are kept
+// as a "⚠ legacy" entry so renames/removals don't silently drop data.
+function renderMappingSelectOrInput(d, cur, dataAttrs) {
+  const opts = (Array.isArray(d.options) ? d.options : []).map(optionShape).filter(Boolean);
+  if (opts.length === 0) {
+    return `<input type="text" class="mapping-cell" ${dataAttrs} value="${escapeHtml(cur)}" style="width:100%;padding:4px 6px;border:1px solid var(--gray-200);border-radius:3px;font-size:0.82rem;background:#fff;">`;
+  }
+  const inOpts = cur && opts.some(o => o.name.toLowerCase() === cur.toLowerCase());
+  // Group by statement type for the primary dimension; for non-primary,
+  // statement type is meaningless so collapse all options into a single group.
+  const groups = { balance_sheet: [], income_statement: [], unclassified: [] };
+  for (const o of opts) {
+    const key = o.statementType && groups[o.statementType] ? o.statementType : 'unclassified';
+    groups[key].push(o);
+  }
+  function renderOptionTag(o) {
+    const sel = o.name.toLowerCase() === cur.toLowerCase() ? ' selected' : '';
+    return `<option value="${escapeHtml(o.name)}"${sel}>${escapeHtml(o.name)}</option>`;
+  }
+  const groupHtml = d.isPrimary
+    ? [
+        groups.balance_sheet.length     ? `<optgroup label="${STMT_TYPE_LABEL.balance_sheet}">${groups.balance_sheet.map(renderOptionTag).join('')}</optgroup>` : '',
+        groups.income_statement.length  ? `<optgroup label="${STMT_TYPE_LABEL.income_statement}">${groups.income_statement.map(renderOptionTag).join('')}</optgroup>` : '',
+        groups.unclassified.length      ? `<optgroup label="Unclassified">${groups.unclassified.map(renderOptionTag).join('')}</optgroup>` : '',
+      ].join('')
+    : opts.map(renderOptionTag).join('');
+  const legacyOpt = cur && !inOpts
+    ? `<option value="${escapeHtml(cur)}" selected>⚠ ${escapeHtml(cur)} (not in options)</option>`
+    : '';
+  return `
+    <select class="mapping-cell" ${dataAttrs}
+      style="width:100%;padding:4px 6px;border:1px solid var(--gray-200);border-radius:3px;font-size:0.82rem;background:#fff;">
+      <option value=""${cur ? '' : ' selected'}>— unmapped —</option>
+      ${legacyOpt}
+      ${groupHtml}
+    </select>
+  `;
 }
 
 function renderMappingTable() {
@@ -4668,36 +4728,9 @@ function renderMappingTable() {
               <td style="padding:6px;color:var(--gray-600);">${escapeHtml(a.type || '')}</td>
               ${dims.map(d => {
                 const cur = stored[String(d.id)] || '';
-                const opts = Array.isArray(d.options) ? d.options : [];
                 const dataAttrs = `data-account-id="${escapeHtml(a.id || '')}" data-account-name="${escapeHtml(a.name || '')}" data-account-type="${escapeHtml(a.type || '')}" data-dim="${d.id}"`;
-                if (opts.length > 0) {
-                  // Dimension has a controlled vocabulary — render <select>.
-                  // Pre-existing values not in the option list are surfaced
-                  // as a "legacy" entry so a renamed/removed option doesn't
-                  // silently drop saved mappings.
-                  const inOpts = cur && opts.some(o => o.toLowerCase() === cur.toLowerCase());
-                  const legacyOpt = cur && !inOpts
-                    ? `<option value="${escapeHtml(cur)}" selected>⚠ ${escapeHtml(cur)} (not in options)</option>`
-                    : '';
-                  const optionsHtml = opts.map(o => `<option value="${escapeHtml(o)}"${o.toLowerCase() === cur.toLowerCase() ? ' selected' : ''}>${escapeHtml(o)}</option>`).join('');
-                  return `
-                    <td style="padding:4px;">
-                      <select class="mapping-cell" ${dataAttrs}
-                        style="width:100%;padding:4px 6px;border:1px solid var(--gray-200);border-radius:3px;font-size:0.82rem;background:#fff;">
-                        <option value=""${cur ? '' : ' selected'}>— unmapped —</option>
-                        ${legacyOpt}
-                        ${optionsHtml}
-                      </select>
-                    </td>
-                  `;
-                }
-                return `
-                  <td style="padding:4px;">
-                    <input type="text" class="mapping-cell" ${dataAttrs}
-                      value="${escapeHtml(cur)}"
-                      style="width:100%;padding:4px 6px;border:1px solid var(--gray-200);border-radius:3px;font-size:0.82rem;background:#fff;">
-                  </td>
-                `;
+                const cellHtml = renderMappingSelectOrInput(d, cur, dataAttrs);
+                return `<td style="padding:4px;">${cellHtml}</td>`;
               }).join('')}
             </tr>
           `;
@@ -4776,82 +4809,228 @@ document.getElementById('btn-refresh-mapping-accounts')?.addEventListener('click
   await loadMappingsAndAccounts();
 });
 
-// ---- Configure Dimensions modal ----
+// ---- Configure Dimensions tab ----
 
-function openDimensionsModal() {
-  if (!reportingSelectedClientId) return setMappingStatus('select a client first', 'error');
-  const rowsEl = document.getElementById('dimensions-modal-rows');
-  const dims = dimensionList();
-  rowsEl.innerHTML = dims.map(d => {
-    const optsText = (d.options || []).join('\n');
-    const optsCount = (d.options || []).length;
-    const namePh = d.isPrimary ? 'Financial Statement' : '(leave blank to hide)';
-    const optsPh = d.isPrimary
-      ? 'one per line — e.g. Cash and equivalents\\nTrade receivables\\nInventory\\nAccounts payable\\nRevenue\\nCost of goods sold'
-      : 'one per line (leave blank for free-text input)';
-    return `
-      <div class="form-group" style="margin-bottom:14px;border-bottom:1px solid var(--gray-100);padding-bottom:12px;">
-        <label style="font-size:0.82rem;color:var(--gray-700);">
-          <strong>${d.id}.</strong> ${d.isPrimary ? 'name (primary — drives statements)' : 'name'}
-        </label>
-        <input type="text" class="dimension-name-input" data-dim="${d.id}" value="${escapeHtml(d.name || '')}" placeholder="${namePh}" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;">
-        <input type="text" class="dimension-desc-input" data-dim="${d.id}" value="${escapeHtml(d.description || '')}" placeholder="description (optional)" style="width:100%;padding:6px 8px;border:1px solid var(--gray-200);border-radius:4px;font-size:0.78rem;color:var(--gray-700);margin-top:4px;">
-        <details style="margin-top:6px;" ${optsCount > 0 || d.isPrimary ? 'open' : ''}>
-          <summary style="font-size:0.78rem;color:var(--gray-600);cursor:pointer;user-select:none;">dropdown options <span class="dim-opts-count" data-dim="${d.id}" style="color:var(--gray-500);">(${optsCount})</span></summary>
-          <p style="font-size:0.74rem;color:var(--gray-500);margin:4px 0;">when set, the mapping table shows a dropdown for this dimension instead of free text.</p>
-          <textarea class="dimension-options-input" data-dim="${d.id}" rows="5" placeholder="${optsPh.replace(/\\n/g, '&#10;')}" style="width:100%;padding:6px 8px;border:1px solid var(--gray-200);border-radius:4px;font-size:0.78rem;font-family:inherit;resize:vertical;">${escapeHtml(optsText)}</textarea>
-        </details>
-      </div>
-    `;
-  }).join('');
-  // Live count update on each textarea so users see what they've entered.
-  document.querySelectorAll('.dimension-options-input').forEach(ta => {
-    ta.addEventListener('input', () => {
-      const dim = ta.dataset.dim;
-      const lines = ta.value.split('\n').map(l => l.trim()).filter(Boolean);
-      const seen = new Set();
-      const unique = lines.filter(l => {
-        const k = l.toLowerCase();
-        if (seen.has(k)) return false;
-        seen.add(k);
-        return true;
-      });
-      const counter = document.querySelector(`.dim-opts-count[data-dim="${dim}"]`);
-      if (counter) counter.textContent = `(${unique.length})`;
-    });
-  });
-  document.getElementById('dimensions-modal-error').style.display = 'none';
-  document.getElementById('dimensions-modal').style.display = '';
+function setDimensionsConfigStatus(msg, kind) {
+  const el = document.getElementById('dimensions-config-status');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = kind === 'error' ? 'var(--red-600, #c62828)'
+    : kind === 'success' ? 'var(--green-600)'
+    : 'var(--gray-500)';
 }
 
-function closeDimensionsModal() {
-  document.getElementById('dimensions-modal').style.display = 'none';
+async function loadDimensionsConfig() {
+  if (!reportingSelectedClientId) return;
+  // Reuse the mapping loader which already fetches dimensions+accounts.
+  // If we've never loaded, do it now.
+  if (!mappingDimensions) {
+    await loadMappingsAndAccounts();
+  }
+  renderDimensionsConfig();
 }
 
-async function saveDimensionsModal() {
-  const dimensions = {};
-  document.querySelectorAll('.dimension-name-input').forEach(inp => {
-    const id = inp.dataset.dim;
-    dimensions[id] = dimensions[id] || {};
-    dimensions[id].name = inp.value;
-  });
-  document.querySelectorAll('.dimension-desc-input').forEach(inp => {
-    const id = inp.dataset.dim;
-    dimensions[id] = dimensions[id] || {};
-    dimensions[id].description = inp.value;
-  });
-  document.querySelectorAll('.dimension-options-input').forEach(ta => {
-    const id = ta.dataset.dim;
-    dimensions[id] = dimensions[id] || {};
-    // Split lines, trim, drop empties. Server will dedupe and cap.
-    dimensions[id].options = ta.value.split('\n').map(l => l.trim()).filter(Boolean);
-  });
-  const errEl = document.getElementById('dimensions-modal-error');
-  if (!dimensions['1']?.name?.trim()) {
-    errEl.textContent = 'dimension 1 (primary) must have a name';
-    errEl.style.display = '';
+function renderDimensionsConfig() {
+  const container = document.getElementById('dimensions-config-container');
+  if (!container) return;
+  if (!reportingSelectedClientId) {
+    container.innerHTML = '<div class="empty-state"><p>select a client above to configure dimensions</p></div>';
     return;
   }
+  if (!mappingDimensions) {
+    container.innerHTML = '<div class="empty-state"><p>loading dimensions…</p></div>';
+    return;
+  }
+  const dims = dimensionList();
+  container.innerHTML = dims.map(d => renderDimensionCard(d)).join('');
+  wireDimensionCard();
+}
+
+// Each dimension is a card. Primary (dim 1) is expanded by default and
+// shows a statement-type column on the options table; others are collapsed
+// and use a simpler name-only options table.
+function renderDimensionCard(d) {
+  const opts = Array.isArray(d.options) ? d.options : [];
+  const expanded = d.isPrimary || opts.length > 0;
+  const headerLabel = d.name || (d.isPrimary ? 'Financial Statement (unnamed)' : `(unnamed)`);
+  const primaryBadge = d.isPrimary
+    ? '<span style="background:var(--blue-50);color:var(--blue-600);padding:1px 8px;border-radius:4px;font-size:0.7rem;font-weight:600;margin-left:8px;">PRIMARY</span>'
+    : '';
+  const countBadge = `<span style="font-size:0.78rem;color:var(--gray-500);margin-left:8px;">${opts.length} option${opts.length === 1 ? '' : 's'}</span>`;
+  return `
+    <details class="dim-card" data-dim="${d.id}" ${expanded ? 'open' : ''} style="border:1px solid var(--gray-200);border-radius:8px;margin-bottom:10px;background:#fff;">
+      <summary style="padding:12px 16px;cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px;font-size:0.92rem;font-weight:500;">
+        <strong>${d.id}.</strong>
+        <span class="dim-card-title">${escapeHtml(headerLabel)}</span>
+        ${primaryBadge}
+        ${countBadge}
+      </summary>
+      <div style="padding:0 16px 16px;">
+        <div class="form-group" style="margin-bottom:8px;">
+          <label style="font-size:0.78rem;color:var(--gray-600);">name${d.isPrimary ? ' (drives statements)' : ' (leave blank to hide from mapping table)'}</label>
+          <input type="text" class="dim-name-input" data-dim="${d.id}" value="${escapeHtml(d.name || '')}" placeholder="${d.isPrimary ? 'Financial Statement' : 'e.g. Department, Cost Center'}" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;">
+        </div>
+        <div class="form-group" style="margin-bottom:12px;">
+          <label style="font-size:0.78rem;color:var(--gray-600);">description (optional)</label>
+          <input type="text" class="dim-desc-input" data-dim="${d.id}" value="${escapeHtml(d.description || '')}" placeholder="what does this dimension represent?" style="width:100%;padding:6px 8px;border:1px solid var(--gray-200);border-radius:4px;font-size:0.82rem;">
+        </div>
+
+        <h4 style="margin:12px 0 6px;font-size:0.82rem;font-weight:600;color:var(--gray-700);">options <span style="font-weight:400;color:var(--gray-500);">— rendered as a dropdown on the GL mapping table when at least one is configured</span></h4>
+        ${renderOptionsTable(d)}
+        <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+          <button class="btn-edit-client dim-add-option" data-dim="${d.id}">+ add option</button>
+          <span style="font-size:0.78rem;color:var(--gray-500);">${d.isPrimary ? 'tag each option as Balance Sheet or Income Statement so we can split mapped accounts into the right statement.' : ''}</span>
+        </div>
+      </div>
+    </details>
+  `;
+}
+
+function renderOptionsTable(d) {
+  const opts = Array.isArray(d.options) ? d.options : [];
+  if (!opts.length) {
+    return '<div class="empty-state" style="padding:12px;font-size:0.82rem;"><p style="margin:0;">no options yet</p></div>';
+  }
+  const showType = d.isPrimary;
+  return `
+    <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
+      <thead>
+        <tr style="border-bottom:1px solid var(--gray-200);text-align:left;">
+          <th style="padding:6px 8px;font-weight:500;color:var(--gray-600);font-size:0.78rem;">option name</th>
+          ${showType ? '<th style="padding:6px 8px;font-weight:500;color:var(--gray-600);font-size:0.78rem;width:200px;">statement type</th>' : ''}
+          <th style="padding:6px 8px;width:60px;"></th>
+        </tr>
+      </thead>
+      <tbody>
+        ${opts.map((o, idx) => {
+          const name = typeof o === 'string' ? o : o.name;
+          const stmt = (typeof o === 'object' ? o.statementType : null) || '';
+          return `
+            <tr data-dim="${d.id}" data-opt-idx="${idx}" style="border-bottom:1px solid var(--gray-100);">
+              <td style="padding:4px 8px;">
+                <input type="text" class="dim-opt-name" data-dim="${d.id}" data-opt-idx="${idx}" value="${escapeHtml(name)}" style="width:100%;padding:4px 6px;border:1px solid var(--gray-200);border-radius:3px;font-size:0.82rem;">
+              </td>
+              ${showType ? `
+                <td style="padding:4px 8px;">
+                  <select class="dim-opt-stmt" data-dim="${d.id}" data-opt-idx="${idx}" style="width:100%;padding:4px 6px;border:1px solid var(--gray-200);border-radius:3px;font-size:0.82rem;background:#fff;">
+                    <option value=""${stmt === '' ? ' selected' : ''}>— unclassified —</option>
+                    <option value="balance_sheet"${stmt === 'balance_sheet' ? ' selected' : ''}>Balance Sheet</option>
+                    <option value="income_statement"${stmt === 'income_statement' ? ' selected' : ''}>Income Statement</option>
+                  </select>
+                </td>
+              ` : ''}
+              <td style="padding:4px 8px;text-align:right;">
+                <button class="btn-edit-client dim-opt-delete" data-dim="${d.id}" data-opt-idx="${idx}" title="remove option" style="color:var(--red-600,#c62828);padding:2px 8px;">×</button>
+              </td>
+            </tr>
+          `;
+        }).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function wireDimensionCard() {
+  // Name + description: save on blur if changed.
+  document.querySelectorAll('.dim-name-input').forEach(inp => {
+    inp.dataset.original = inp.value;
+    inp.addEventListener('blur', () => {
+      if (inp.value === inp.dataset.original) return;
+      saveDimensionMeta(inp.dataset.dim, { name: inp.value });
+    });
+  });
+  document.querySelectorAll('.dim-desc-input').forEach(inp => {
+    inp.dataset.original = inp.value;
+    inp.addEventListener('blur', () => {
+      if (inp.value === inp.dataset.original) return;
+      saveDimensionMeta(inp.dataset.dim, { description: inp.value });
+    });
+  });
+  // Option name: save the whole options array on blur.
+  document.querySelectorAll('.dim-opt-name').forEach(inp => {
+    inp.dataset.original = inp.value;
+    inp.addEventListener('blur', () => {
+      if (inp.value === inp.dataset.original) return;
+      saveDimensionOptions(inp.dataset.dim);
+    });
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') inp.blur(); });
+  });
+  // Statement type: save on change.
+  document.querySelectorAll('.dim-opt-stmt').forEach(sel => {
+    sel.dataset.original = sel.value;
+    sel.addEventListener('change', () => {
+      if (sel.value === sel.dataset.original) return;
+      saveDimensionOptions(sel.dataset.dim);
+    });
+  });
+  // Delete option.
+  document.querySelectorAll('.dim-opt-delete').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const dim = btn.dataset.dim;
+      const idx = parseInt(btn.dataset.optIdx, 10);
+      const d = mappingDimensions?.[String(dim)];
+      if (!d || !Array.isArray(d.options)) return;
+      d.options.splice(idx, 1);
+      // Re-render this card and persist.
+      renderDimensionsConfig();
+      saveDimensionOptions(dim);
+    });
+  });
+  // Add option.
+  document.querySelectorAll('.dim-add-option').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const dim = btn.dataset.dim;
+      const d = mappingDimensions?.[String(dim)];
+      if (!d) return;
+      d.options = Array.isArray(d.options) ? d.options : [];
+      d.options.push({ name: '', statementType: null });
+      renderDimensionsConfig();
+      // Focus the new row's name input so the user can start typing.
+      const newIdx = d.options.length - 1;
+      const focusEl = document.querySelector(`.dim-opt-name[data-dim="${dim}"][data-opt-idx="${newIdx}"]`);
+      if (focusEl) {
+        // Re-open the parent details if it collapsed during the rerender.
+        focusEl.closest('.dim-card')?.setAttribute('open', '');
+        focusEl.focus();
+      }
+    });
+  });
+}
+
+// Read current options from the rendered DOM for one dimension and persist.
+function collectDimensionOptionsFromDom(dimId) {
+  const rows = document.querySelectorAll(`tr[data-dim="${dimId}"][data-opt-idx]`);
+  const out = [];
+  rows.forEach(row => {
+    const nameEl = row.querySelector('.dim-opt-name');
+    const stmtEl = row.querySelector('.dim-opt-stmt');
+    if (!nameEl) return;
+    const name = (nameEl.value || '').trim();
+    if (!name) return; // server will drop blanks anyway, but skip locally to keep DOM index stable
+    out.push({ name, statementType: stmtEl ? (stmtEl.value || null) : null });
+  });
+  return out;
+}
+
+async function saveDimensionMeta(dimId, patch) {
+  const dimensions = { [dimId]: patch };
+  await persistDimensions(dimensions);
+}
+
+async function saveDimensionOptions(dimId) {
+  // Prefer the in-memory copy if a row was just spliced — that's the
+  // canonical post-delete/post-add state. Otherwise read from the DOM.
+  const inMem = mappingDimensions?.[String(dimId)]?.options;
+  const fromDom = collectDimensionOptionsFromDom(dimId);
+  const merged = (inMem && Array.isArray(inMem) && inMem.length === fromDom.length)
+    ? fromDom
+    : (inMem || fromDom);
+  const dimensions = { [dimId]: { options: merged } };
+  await persistDimensions(dimensions);
+}
+
+async function persistDimensions(dimensions) {
+  setDimensionsConfigStatus('saving…');
   try {
     const res = await fetch(`/api/admin/clients/${reportingSelectedClientId}/reporting/mappings/dimensions`, {
       method: 'PUT',
@@ -4861,19 +5040,20 @@ async function saveDimensionsModal() {
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
     const data = await res.json();
     mappingDimensions = data.dimensions;
-    closeDimensionsModal();
+    setDimensionsConfigStatus('saved ✓', 'success');
+    renderDimensionsConfig();
     renderDimensionsSummary();
-    renderMappingTable();
-    setMappingStatus('dimensions updated', 'success');
+    // The mapping table needs to re-render too because options/select rendering depends on this.
+    if (mappingQboAccounts && mappingQboAccounts.length) renderMappingTable();
   } catch (e) {
-    errEl.textContent = 'save failed: ' + e.message;
-    errEl.style.display = '';
+    setDimensionsConfigStatus('save failed: ' + e.message, 'error');
   }
 }
 
-document.getElementById('btn-configure-dimensions')?.addEventListener('click', openDimensionsModal);
-document.getElementById('dimensions-modal-cancel')?.addEventListener('click', closeDimensionsModal);
-document.getElementById('dimensions-modal-save')?.addEventListener('click', saveDimensionsModal);
+document.getElementById('btn-configure-dimensions')?.addEventListener('click', () => {
+  if (!reportingSelectedClientId) return setMappingStatus('select a client first', 'error');
+  switchReportingTab('dimensions');
+});
 
 document.getElementById('btn-pull-tb')?.addEventListener('click', async () => {
   const clientId = document.getElementById('reporting-client-select').value;

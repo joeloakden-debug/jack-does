@@ -466,6 +466,7 @@
       <nav class="client-sub-nav">
         <button class="sub-nav-btn active" data-reporting-tab="snapshots">trial balance</button>
         <button class="sub-nav-btn" data-reporting-tab="mapping">GL mapping</button>
+        <button class="sub-nav-btn" data-reporting-tab="dimensions">dimensions</button>
       </nav>
 
       <!-- Snapshots tab -->
@@ -504,11 +505,11 @@
           <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
             <h3 style="margin:0;font-size:0.95rem;">reporting dimensions</h3>
             <div style="display:flex;gap:8px;">
-              <button class="btn-edit-client" id="btn-configure-dimensions">configure dimensions</button>
+              <button class="btn-edit-client" id="btn-configure-dimensions">edit on dimensions tab →</button>
               <button class="btn-edit-client" id="btn-refresh-mapping-accounts">refresh accounts from QBO</button>
             </div>
           </div>
-          <p style="font-size:0.82rem;color:var(--gray-500);margin:0 0 8px;">each GL account can carry up to 10 reporting dimension values. dimension 1 is the primary mapping that drives the balance sheet and income statement; dimensions 2–10 power custom reports.</p>
+          <p style="font-size:0.82rem;color:var(--gray-500);margin:0 0 8px;">each GL account can carry up to 10 reporting dimension values. dimension 1 is the primary mapping that drives the balance sheet and income statement; dimensions 2–10 power custom reports. configure names, options, and BS/IS classification on the <strong>dimensions</strong> tab.</p>
           <div id="dimensions-summary" style="font-size:0.82rem;color:var(--gray-700);"></div>
         </div>
 
@@ -524,17 +525,16 @@
         </div>
       </div>
 
-      <!-- Configure Dimensions modal -->
-      <div class="modal-overlay" id="dimensions-modal" style="display:none;">
-        <div class="modal-card" style="max-width:640px;">
-          <h3>configure reporting dimensions</h3>
-          <p style="font-size:0.82rem;color:var(--gray-500);margin:-4px 0 12px;">name each of the 10 dimensions. leave a slot blank to hide it from the mapping table.</p>
-          <div id="dimensions-modal-rows" style="max-height:60vh;overflow-y:auto;"></div>
-          <div id="dimensions-modal-error" class="login-error" style="display:none;"></div>
-          <div class="modal-actions">
-            <button class="btn-modal-save" id="dimensions-modal-save">save</button>
-            <button class="btn-modal-cancel" id="dimensions-modal-cancel">cancel</button>
-          </div>
+      <!-- Dimensions configuration tab -->
+      <div class="reporting-tab" id="reporting-tab-dimensions" style="display:none;">
+        <div class="settings-section" style="margin-bottom:12px;">
+          <h3 style="margin:0 0 6px;font-size:0.95rem;">configure reporting dimensions</h3>
+          <p style="font-size:0.82rem;color:var(--gray-500);margin:0 0 6px;">each of the 10 dimensions can carry a name, description, and a controlled vocabulary of options. when a dimension has options, the GL mapping table shows a dropdown sourced from that list.</p>
+          <p style="font-size:0.82rem;color:var(--gray-500);margin:0;">dimension 1 is the <strong>primary</strong> mapping that drives statements — its options also carry a <strong>balance sheet / income statement</strong> tag, which classifies any GL account mapped to that option.</p>
+          <div id="dimensions-config-status" style="font-size:0.82rem;margin-top:8px;min-height:1em;"></div>
+        </div>
+        <div id="dimensions-config-container">
+          <div class="empty-state"><p>select a client above to configure dimensions</p></div>
         </div>
       </div>
     </div>

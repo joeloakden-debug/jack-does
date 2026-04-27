@@ -5244,20 +5244,38 @@ function getDefaultDimensions() {
   return out;
 }
 
-// Sanitize an incoming options array: strings only, trim, drop blanks,
-// dedupe (case-insensitive), cap each entry's length and the list size.
+// Each option is an object: { name, statementType }. statementType is only
+// meaningful on the primary dimension (drives BS vs IS classification on
+// statements); on other dimensions it's preserved but unused.
+const ALLOWED_STATEMENT_TYPES = new Set(['balance_sheet', 'income_statement']);
+
+// Sanitize an incoming options array. Accepts either string entries (legacy
+// shape) or { name, statementType } objects. Drops blanks, dedupes by
+// case-folded name, caps name length and list size, and validates the
+// statement-type enum.
 function sanitizeDimensionOptions(raw) {
   if (!Array.isArray(raw)) return [];
   const seen = new Set();
   const out = [];
   for (const v of raw) {
-    if (typeof v !== 'string') continue;
-    const trimmed = v.trim().slice(0, 80);
+    let name, statementType;
+    if (typeof v === 'string') {
+      name = v;
+      statementType = null;
+    } else if (v && typeof v === 'object') {
+      name = v.name;
+      statementType = v.statementType;
+    } else {
+      continue;
+    }
+    if (typeof name !== 'string') continue;
+    const trimmed = name.trim().slice(0, 80);
     if (!trimmed) continue;
     const fold = trimmed.toLowerCase();
     if (seen.has(fold)) continue;
     seen.add(fold);
-    out.push(trimmed);
+    const cleanType = ALLOWED_STATEMENT_TYPES.has(statementType) ? statementType : null;
+    out.push({ name: trimmed, statementType: cleanType });
     if (out.length >= 200) break;
   }
   return out;
@@ -5275,7 +5293,8 @@ function getClientReporting(clientId) {
   if (!c.mappings.dimensions) c.mappings.dimensions = getDefaultDimensions();
   if (!c.mappings.accounts) c.mappings.accounts = {};
   // Ensure all 10 slots exist even if a partial save left some missing.
-  // Backfill `options: []` on any slot saved before the field existed.
+  // Backfill `options: []` on any slot saved before the field existed,
+  // and migrate legacy string options to { name, statementType } objects.
   for (let i = 1; i <= 10; i++) {
     const k = String(i);
     if (!c.mappings.dimensions[k]) {
@@ -5285,6 +5304,25 @@ function getClientReporting(clientId) {
       c.mappings.dimensions[k].isPrimary = (i === 1);
       if (!Array.isArray(c.mappings.dimensions[k].options)) {
         c.mappings.dimensions[k].options = [];
+      } else {
+        // In-place migrate any legacy string entries to the object shape.
+        const opts = c.mappings.dimensions[k].options;
+        let dirty = false;
+        for (let j = 0; j < opts.length; j++) {
+          if (typeof opts[j] === 'string') {
+            opts[j] = { name: opts[j], statementType: null };
+            dirty = true;
+          } else if (opts[j] && typeof opts[j] === 'object') {
+            if (!('statementType' in opts[j])) {
+              opts[j].statementType = null;
+              dirty = true;
+            }
+          }
+        }
+        // Persist the migration so the on-disk shape catches up; this
+        // makes the file self-explanatory after the first read on a server
+        // that already had legacy string options stored.
+        if (dirty) saveReporting();
       }
     }
   }
