@@ -467,6 +467,7 @@
         <button class="sub-nav-btn active" data-reporting-tab="snapshots">trial balance</button>
         <button class="sub-nav-btn" data-reporting-tab="mapping">GL mapping</button>
         <button class="sub-nav-btn" data-reporting-tab="dimensions">dimensions</button>
+        <button class="sub-nav-btn" data-reporting-tab="statements">statements</button>
       </nav>
 
       <!-- Snapshots tab -->
@@ -523,6 +524,23 @@
             <div id="mapping-table" class="empty-state"><p>select a client above to map GL accounts</p></div>
           </div>
         </div>
+      </div>
+
+      <!-- Statements tab -->
+      <div class="reporting-tab" id="reporting-tab-statements" style="display:none;">
+        <div class="settings-section" style="margin-bottom:12px;">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+            <h3 style="margin:0;font-size:0.95rem;">balance sheet &amp; income statement</h3>
+          </div>
+          <p style="font-size:0.82rem;color:var(--gray-500);margin:0 0 10px;">accounts are grouped by their <strong>Financial Statement</strong> mapping (dimension 1). Each option's BS / IS classification splits it into the right statement. Values are signed nets (debit +, credit −); net income is shown as the sign-flipped IS total.</p>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <label style="font-size:0.82rem;color:var(--gray-600);margin:0;">snapshot</label>
+            <select id="statements-snapshot-select" style="flex:1;min-width:240px;max-width:480px;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;"></select>
+            <div id="statements-fy-tabs" style="display:flex;gap:4px;flex-wrap:wrap;"></div>
+          </div>
+          <div id="statements-status" style="font-size:0.82rem;margin-top:10px;min-height:1em;"></div>
+        </div>
+        <div id="statements-content"></div>
       </div>
 
       <!-- Dimensions configuration tab -->

@@ -4267,6 +4267,9 @@ function switchReportingTab(tab) {
   if (tab === 'dimensions' && reportingSelectedClientId) {
     loadDimensionsConfig();
   }
+  if (tab === 'statements' && reportingSelectedClientId) {
+    loadStatementsTab();
+  }
 }
 
 document.querySelectorAll('[data-reporting-tab]').forEach(btn => {
@@ -4290,6 +4293,8 @@ async function onReportingClientChanged() {
     await loadMappingsAndAccounts();
   } else if (reportingActiveTab === 'dimensions') {
     await loadDimensionsConfig();
+  } else if (reportingActiveTab === 'statements') {
+    await loadStatementsTab();
   } else {
     // Reset cached mapping state — it'll reload when the user opens the tab.
     mappingDimensions = null;
@@ -5053,6 +5058,241 @@ async function persistDimensions(dimensions) {
 document.getElementById('btn-configure-dimensions')?.addEventListener('click', () => {
   if (!reportingSelectedClientId) return setMappingStatus('select a client first', 'error');
   switchReportingTab('dimensions');
+});
+
+// ========================================
+// FINANCIAL STATEMENTS
+// ========================================
+let statementsLoadedSnapshotId = null;
+let statementsResult = null;     // server response
+let statementsSelectedFY = null;
+
+function setStatementsStatus(msg, kind) {
+  const el = document.getElementById('statements-status');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = kind === 'error' ? 'var(--red-600, #c62828)'
+    : kind === 'success' ? 'var(--green-600)'
+    : 'var(--gray-500)';
+}
+
+async function loadStatementsTab() {
+  if (!reportingSelectedClientId) return;
+  // Make sure the snapshot list and dimensions are warm — both feed the picker.
+  if (!reportingSnapshots) reportingSnapshots = [];
+  await loadReportingSnapshots();
+  if (!mappingDimensions) await loadMappingsAndAccounts();
+
+  const sel = document.getElementById('statements-snapshot-select');
+  // Only multi-period snapshots can drive monthly statements.
+  const usable = (reportingSnapshots || []).filter(s => s.type === 'multi-period');
+  if (usable.length === 0) {
+    sel.innerHTML = '<option value="">(no snapshots — pull a trial balance first)</option>';
+    sel.disabled = true;
+    document.getElementById('statements-fy-tabs').innerHTML = '';
+    document.getElementById('statements-content').innerHTML = `
+      <div class="empty-state" style="padding:24px;">
+        <p>no trial balance snapshots yet</p>
+        <span>switch to the <strong>trial balance</strong> tab and pull one — once that's done, come back here.</span>
+        <div style="margin-top:12px;"><button class="btn-edit-client" onclick="switchReportingTab('snapshots')">go to trial balance →</button></div>
+      </div>`;
+    setStatementsStatus('');
+    return;
+  }
+  sel.disabled = false;
+  sel.innerHTML = usable.map(s => {
+    const label = `${(s.fiscalYearLabels || []).join(' · ')} — close ${s.closeDate || s.cutoffMonthEnd} · ${s.accountCount} accounts`;
+    return `<option value="${escapeHtml(s.id)}">${escapeHtml(label)}</option>`;
+  }).join('');
+  // Default to most recent (server returns sorted desc by createdAt).
+  if (!statementsLoadedSnapshotId || !usable.find(s => s.id === statementsLoadedSnapshotId)) {
+    statementsLoadedSnapshotId = usable[0].id;
+  }
+  sel.value = statementsLoadedSnapshotId;
+
+  // Check that dim-1 has options before fetching.
+  const dim1 = mappingDimensions?.['1'];
+  const optCount = Array.isArray(dim1?.options) ? dim1.options.length : 0;
+  if (optCount === 0) {
+    document.getElementById('statements-fy-tabs').innerHTML = '';
+    document.getElementById('statements-content').innerHTML = `
+      <div class="empty-state" style="padding:24px;">
+        <p>no Financial Statement options configured</p>
+        <span>open the <strong>dimensions</strong> tab and add at least one option to dimension 1, tagging each as Balance Sheet or Income Statement.</span>
+        <div style="margin-top:12px;"><button class="btn-edit-client" onclick="switchReportingTab('dimensions')">go to dimensions →</button></div>
+      </div>`;
+    setStatementsStatus('');
+    return;
+  }
+
+  await fetchAndRenderStatements();
+}
+
+async function fetchAndRenderStatements() {
+  setStatementsStatus('computing statements…');
+  try {
+    const url = `/api/admin/clients/${reportingSelectedClientId}/reporting/statements?snapshotId=${encodeURIComponent(statementsLoadedSnapshotId)}`;
+    const res = await fetch(url, { headers: { 'Authorization': getAuth() } });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    statementsResult = data;
+    // Default selected FY: current; fall back to last FY with months.
+    const fys = data.fiscalYears || [];
+    const cur = fys.find(fy => fy.isCurrent && (fy.months || []).length > 0);
+    const firstWithData = fys.find(fy => (fy.months || []).length > 0);
+    statementsSelectedFY = (cur || firstWithData || fys[0])?.label || null;
+    setStatementsStatus('');
+    drawStatements();
+  } catch (e) {
+    statementsResult = null;
+    setStatementsStatus('failed: ' + e.message, 'error');
+    document.getElementById('statements-content').innerHTML = '';
+    document.getElementById('statements-fy-tabs').innerHTML = '';
+  }
+}
+
+function drawStatements() {
+  if (!statementsResult) return;
+  const fys = statementsResult.fiscalYears || [];
+  const tabsEl = document.getElementById('statements-fy-tabs');
+  tabsEl.innerHTML = fys.map(fy => {
+    const isActive = fy.label === statementsSelectedFY;
+    const hasData = (fy.months || []).length > 0;
+    const bg = isActive ? 'var(--blue-600, #2563eb)' : '#fff';
+    const color = isActive ? '#fff' : 'var(--gray-700)';
+    const border = isActive ? 'var(--blue-600, #2563eb)' : 'var(--gray-300)';
+    return `<button class="statements-fy-tab" data-fy-label="${escapeHtml(fy.label)}" ${hasData ? '' : 'disabled'} style="padding:5px 12px;border:1px solid ${border};border-radius:14px;background:${bg};color:${color};font-size:0.78rem;font-weight:500;cursor:${hasData ? 'pointer' : 'not-allowed'};opacity:${hasData ? 1 : 0.5};">${escapeHtml(fy.label)}${fy.isCurrent ? ' · current' : ''}</button>`;
+  }).join('');
+  tabsEl.querySelectorAll('.statements-fy-tab').forEach(b => {
+    b.addEventListener('click', () => {
+      statementsSelectedFY = b.dataset.fyLabel;
+      drawStatements();
+    });
+  });
+
+  const fy = fys.find(f => f.label === statementsSelectedFY) || fys[0];
+  const content = document.getElementById('statements-content');
+  if (!fy) {
+    content.innerHTML = '<div class="empty-state"><p>no fiscal year selected</p></div>';
+    return;
+  }
+
+  content.innerHTML = `
+    ${renderStatementSection('Balance Sheet', fy.balanceSheet, fy.months, fy.totals.balanceSheet, { totalLabel: 'Net assets / equity check', balancedHint: true })}
+    ${renderStatementSection('Income Statement', fy.incomeStatement, fy.months, fy.totals.incomeStatement, { totalLabel: 'IS total (signed net)', netIncome: fy.totals.netIncome })}
+    ${fy.unclassified.length ? renderStatementSection('Unclassified options', fy.unclassified, fy.months, null, { warning: true }) : ''}
+    ${renderUnmappedSection(statementsResult.unmappedAccounts, fy.label)}
+  `;
+}
+
+function renderStatementSection(title, rows, months, totals, opts = {}) {
+  const colWidth = 96;
+  const monthHeaders = months.map(m => `<th style="padding:6px;font-size:0.74rem;font-weight:500;color:var(--gray-600);text-align:right;min-width:${colWidth}px;background:var(--gray-50);">${escapeHtml(m.label)}</th>`).join('');
+  const yearTotalHeader = `<th style="padding:6px;font-size:0.74rem;font-weight:500;color:var(--gray-700);text-align:right;min-width:110px;background:var(--gray-100);border-left:1px solid var(--gray-300);">FY total</th>`;
+
+  if (!rows.length) {
+    return `
+      <details open style="margin-bottom:16px;border:1px solid ${opts.warning ? 'var(--amber-300, #fcd34d)' : 'var(--gray-200)'};border-radius:8px;background:#fff;">
+        <summary style="padding:10px 14px;cursor:pointer;user-select:none;font-weight:600;font-size:0.92rem;${opts.warning ? 'color:var(--amber-700, #b45309);' : ''}">${escapeHtml(title)}</summary>
+        <div style="padding:0 14px 14px;color:var(--gray-500);font-size:0.85rem;">no rows.</div>
+      </details>
+    `;
+  }
+
+  const rowHtml = rows.map(r => {
+    const cells = months.map(m => {
+      const v = r.nets[m.period];
+      const isNeg = (v || 0) < 0;
+      return `<td style="padding:4px 6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.8rem;color:${isNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtCell(v)}</td>`;
+    }).join('');
+    const total = r.total || 0;
+    const totalNeg = total < 0;
+    return `
+      <tr style="border-bottom:1px solid var(--gray-100);">
+        <td style="padding:6px 10px;font-size:0.85rem;position:sticky;left:0;background:#fff;border-right:1px solid var(--gray-200);min-width:280px;">${escapeHtml(r.optionName)}</td>
+        ${cells}
+        <td style="padding:6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;font-weight:500;background:var(--gray-50);border-left:1px solid var(--gray-200);color:${totalNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtCell(total)}</td>
+      </tr>
+    `;
+  }).join('');
+
+  let totalsRowHtml = '';
+  if (totals) {
+    const totalCells = months.map(m => {
+      const v = totals[m.period];
+      const isNeg = (v || 0) < 0;
+      return `<td style="padding:6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;font-weight:600;background:var(--gray-50);color:${isNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtCell(v)}</td>`;
+    }).join('');
+    let yearSum = 0;
+    for (const m of months) yearSum += (totals[m.period] || 0);
+    yearSum = Math.round(yearSum * 100) / 100;
+    const totalLabel = opts.totalLabel || 'Total';
+    const balancedNote = opts.balancedHint
+      ? ` <span style="font-weight:400;color:var(--gray-500);font-size:0.74rem;">(should be ~0 — non-zero means unclassified or unmapped activity)</span>`
+      : '';
+    totalsRowHtml = `
+      <tr style="border-top:2px solid var(--gray-300);">
+        <td style="padding:8px 10px;font-weight:600;position:sticky;left:0;background:var(--gray-50);border-right:1px solid var(--gray-200);">${escapeHtml(totalLabel)}${balancedNote}</td>
+        ${totalCells}
+        <td style="padding:8px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;font-weight:700;background:var(--gray-100);border-left:1px solid var(--gray-300);color:${yearSum < 0 ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtCell(yearSum)}</td>
+      </tr>
+    `;
+    if (opts.netIncome) {
+      const netIncomeCells = months.map(m => {
+        const v = opts.netIncome[m.period];
+        const isNeg = (v || 0) < 0;
+        return `<td style="padding:6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;font-weight:700;background:var(--blue-50, #eff6ff);color:${isNeg ? 'var(--red-600,#c62828)' : 'var(--blue-700, #1d4ed8)'};">${fmtCell(v)}</td>`;
+      }).join('');
+      let netIncYear = 0;
+      for (const m of months) netIncYear += (opts.netIncome[m.period] || 0);
+      netIncYear = Math.round(netIncYear * 100) / 100;
+      totalsRowHtml += `
+        <tr>
+          <td style="padding:8px 10px;font-weight:700;position:sticky;left:0;background:var(--blue-50, #eff6ff);border-right:1px solid var(--gray-200);color:var(--blue-700, #1d4ed8);">Net income</td>
+          ${netIncomeCells}
+          <td style="padding:8px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;font-weight:700;background:var(--blue-100, #dbeafe);border-left:1px solid var(--gray-300);color:${netIncYear < 0 ? 'var(--red-600,#c62828)' : 'var(--blue-700, #1d4ed8)'};">${fmtCell(netIncYear)}</td>
+        </tr>
+      `;
+    }
+  }
+
+  return `
+    <details open style="margin-bottom:16px;border:1px solid ${opts.warning ? 'var(--amber-300, #fcd34d)' : 'var(--gray-200)'};border-radius:8px;background:#fff;overflow:hidden;">
+      <summary style="padding:10px 14px;cursor:pointer;user-select:none;font-weight:600;font-size:0.92rem;${opts.warning ? 'color:var(--amber-700, #b45309);' : ''}">${escapeHtml(title)} <span style="font-weight:400;color:var(--gray-500);">(${rows.length})</span>${opts.warning ? ' — these options have no Balance Sheet / Income Statement tag' : ''}</summary>
+      <div style="overflow-x:auto;">
+        <table style="border-collapse:collapse;font-size:0.82rem;width:max-content;min-width:100%;">
+          <thead>
+            <tr>
+              <th style="padding:8px 10px;text-align:left;position:sticky;left:0;background:var(--gray-50);border-right:1px solid var(--gray-200);min-width:280px;z-index:1;">option</th>
+              ${monthHeaders}
+              ${yearTotalHeader}
+            </tr>
+          </thead>
+          <tbody>${rowHtml}</tbody>
+          ${totalsRowHtml ? `<tfoot>${totalsRowHtml}</tfoot>` : ''}
+        </table>
+      </div>
+    </details>
+  `;
+}
+
+function renderUnmappedSection(unmapped, fyLabel) {
+  const inThisFY = (unmapped || []).filter(u => u.fiscalYears.includes(fyLabel));
+  if (inThisFY.length === 0) return '';
+  return `
+    <details style="margin-bottom:16px;border:1px solid var(--amber-300, #fcd34d);border-radius:8px;background:#fffbeb;">
+      <summary style="padding:10px 14px;cursor:pointer;user-select:none;font-weight:600;font-size:0.92rem;color:var(--amber-700, #b45309);">unmapped accounts with activity in ${escapeHtml(fyLabel)} (${inThisFY.length}) — these are excluded from the statements</summary>
+      <ul style="margin:0;padding:8px 28px 14px;font-size:0.85rem;color:var(--gray-700);">
+        ${inThisFY.map(u => `<li>${escapeHtml(u.accountName)}${u.accountId ? ` <span style="color:var(--gray-500);font-size:0.78rem;">(id ${escapeHtml(u.accountId)})</span>` : ''}</li>`).join('')}
+      </ul>
+      <p style="margin:0 14px 12px;font-size:0.78rem;color:var(--gray-600);">→ open the <strong>GL mapping</strong> tab to assign each of these to a Financial Statement option.</p>
+    </details>
+  `;
+}
+
+document.getElementById('statements-snapshot-select')?.addEventListener('change', (e) => {
+  statementsLoadedSnapshotId = e.target.value;
+  fetchAndRenderStatements();
 });
 
 document.getElementById('btn-pull-tb')?.addEventListener('click', async () => {

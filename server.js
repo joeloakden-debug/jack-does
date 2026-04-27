@@ -5687,6 +5687,165 @@ app.put('/api/admin/clients/:clientId/reporting/mappings/accounts', requireAdmin
   res.json({ success: true, key, account: c.mappings.accounts[key] });
 });
 
+/**
+ * Build a balance-sheet / income-statement view for one TB snapshot, using
+ * the client's primary-dimension mapping ("Financial Statement") to group
+ * accounts into options, and the per-option statementType tag to split
+ * options between the BS and IS.
+ *
+ * Sign convention is the QBO TB's signed net (debit positive, credit
+ * negative). For a properly mapped book the per-month sum across BS lines
+ * is ~0 and the IS sum equals the negative of net income — we expose the
+ * sign-flipped value as `netIncome` so callers don't have to remember to
+ * flip it themselves.
+ */
+function buildStatements(snapshot, dimensions, accountsMap) {
+  const dim1 = dimensions?.['1'] || {};
+  const optionMeta = new Map(); // case-folded name -> { name, statementType }
+  for (const o of (dim1.options || [])) {
+    const oo = (typeof o === 'string') ? { name: o, statementType: null } : o;
+    if (oo && oo.name) optionMeta.set(String(oo.name).toLowerCase(), oo);
+  }
+
+  const fyResults = [];
+  // Track unmapped accounts (any FY where they had activity) so the user
+  // sees what's still falling outside the financial statements.
+  const unmapped = new Map(); // key -> { accountId, accountName, periods: Set }
+
+  for (const fy of (snapshot.fiscalYears || [])) {
+    const months = fy.months || [];
+    const buckets = { balance_sheet: new Map(), income_statement: new Map(), unclassified: new Map() };
+
+    function addToBucket(bucketKey, optionName, statementType, period, value) {
+      const map = buckets[bucketKey];
+      if (!map.has(optionName)) {
+        map.set(optionName, { optionName, statementType, nets: {}, total: 0 });
+      }
+      const row = map.get(optionName);
+      row.nets[period] = (row.nets[period] || 0) + value;
+    }
+
+    for (const acct of (snapshot.accounts || [])) {
+      const acctKey = acct.accountId ? `id:${acct.accountId}` : `name:${acct.accountName}`;
+      const mapping = accountsMap[acctKey];
+      const dim1Value = (mapping?.values?.['1'] || '').trim();
+
+      if (!dim1Value) {
+        // Unmapped — collect once per account, but only report in this FY
+        // if the account had any activity in the FY's pulled months.
+        const hadActivity = months.some(m => acct.nets?.[m.period]);
+        if (hadActivity) {
+          if (!unmapped.has(acctKey)) {
+            unmapped.set(acctKey, { accountId: acct.accountId || '', accountName: acct.accountName, fiscalYears: new Set() });
+          }
+          unmapped.get(acctKey).fiscalYears.add(fy.label);
+        }
+        continue;
+      }
+
+      const meta = optionMeta.get(dim1Value.toLowerCase());
+      const statementType = meta?.statementType || null;
+      const bucketKey = statementType === 'balance_sheet' ? 'balance_sheet'
+        : statementType === 'income_statement' ? 'income_statement'
+        : 'unclassified';
+
+      for (const m of months) {
+        const v = acct.nets?.[m.period];
+        if (v === null || v === undefined || v === 0) continue;
+        addToBucket(bucketKey, dim1Value, statementType, m.period, v);
+      }
+    }
+
+    // Compute per-line totals across the FY (sum of monthly nets).
+    function finishBucket(map) {
+      const arr = [];
+      for (const row of map.values()) {
+        let total = 0;
+        for (const m of months) total += (row.nets[m.period] || 0);
+        row.total = Math.round(total * 100) / 100;
+        for (const m of months) {
+          if (row.nets[m.period] !== undefined) {
+            row.nets[m.period] = Math.round(row.nets[m.period] * 100) / 100;
+          }
+        }
+        arr.push(row);
+      }
+      arr.sort((a, b) => a.optionName.localeCompare(b.optionName));
+      return arr;
+    }
+
+    const balanceSheet = finishBucket(buckets.balance_sheet);
+    const incomeStatement = finishBucket(buckets.income_statement);
+    const unclassified = finishBucket(buckets.unclassified);
+
+    // Per-month totals across all rows in each statement.
+    const bsTotals = {}, isTotals = {}, netIncome = {};
+    for (const m of months) {
+      let bs = 0, is = 0;
+      for (const r of balanceSheet) bs += (r.nets[m.period] || 0);
+      for (const r of incomeStatement) is += (r.nets[m.period] || 0);
+      bsTotals[m.period] = Math.round(bs * 100) / 100;
+      isTotals[m.period] = Math.round(is * 100) / 100;
+      // Net income = revenue (credit, neg) − expense (debit, pos), and the
+      // signed-net IS total is `expense − revenue`, so we negate to flip.
+      netIncome[m.period] = Math.round(-is * 100) / 100;
+    }
+
+    fyResults.push({
+      label: fy.label,
+      isCurrent: !!fy.isCurrent,
+      months,
+      balanceSheet,
+      incomeStatement,
+      unclassified,
+      totals: { balanceSheet: bsTotals, incomeStatement: isTotals, netIncome },
+    });
+  }
+
+  // Flatten unmapped tracker to a stable array.
+  const unmappedAccounts = Array.from(unmapped.values()).map(x => ({
+    accountId: x.accountId,
+    accountName: x.accountName,
+    fiscalYears: Array.from(x.fiscalYears).sort(),
+  })).sort((a, b) => a.accountName.localeCompare(b.accountName));
+
+  return { fiscalYears: fyResults, unmappedAccounts };
+}
+
+// Compute statements from a saved TB snapshot. The snapshot must be the
+// multi-period shape — legacy YTD snapshots can't be split monthly.
+app.get('/api/admin/clients/:clientId/reporting/statements', requireAdmin, (req, res) => {
+  const { clientId } = req.params;
+  if (!CLIENTS[clientId]) return res.status(404).json({ error: 'Client not found' });
+  const snapshotId = req.query.snapshotId;
+  if (!snapshotId) return res.status(400).json({ error: 'snapshotId is required' });
+
+  const c = getClientReporting(clientId);
+  const snap = c.tbSnapshots.find(s => s.id === snapshotId);
+  if (!snap) return res.status(404).json({ error: 'Snapshot not found' });
+  if (snap.type !== 'multi-period') {
+    return res.status(400).json({ error: 'Statements require a multi-period snapshot. Pull a fresh trial balance first.' });
+  }
+
+  const dim1 = c.mappings?.dimensions?.['1'];
+  if (!dim1 || !Array.isArray(dim1.options) || dim1.options.length === 0) {
+    return res.status(400).json({
+      error: 'Dimension 1 (Financial Statement) has no options configured. Add at least one option on the Dimensions tab and tag it Balance Sheet or Income Statement.',
+    });
+  }
+
+  const result = buildStatements(snap, c.mappings.dimensions, c.mappings.accounts || {});
+  res.json({
+    snapshot: {
+      id: snap.id,
+      closeDate: snap.closeDate,
+      fiscalYears: (snap.fiscalYears || []).map(fy => ({ label: fy.label, isCurrent: !!fy.isCurrent, monthCount: (fy.months || []).length })),
+    },
+    primaryDimension: { id: dim1.id, name: dim1.name, optionCount: dim1.options.length },
+    ...result,
+  });
+});
+
 // ========================================
 // START SERVER
 // ========================================
