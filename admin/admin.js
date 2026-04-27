@@ -4666,17 +4666,39 @@ function renderMappingTable() {
                 <div style="font-weight:500;">${escapeHtml(fmtAcct(a))}</div>
               </td>
               <td style="padding:6px;color:var(--gray-600);">${escapeHtml(a.type || '')}</td>
-              ${dims.map(d => `
-                <td style="padding:4px;">
-                  <input type="text" class="mapping-cell"
-                    data-account-id="${escapeHtml(a.id || '')}"
-                    data-account-name="${escapeHtml(a.name || '')}"
-                    data-account-type="${escapeHtml(a.type || '')}"
-                    data-dim="${d.id}"
-                    value="${escapeHtml(stored[String(d.id)] || '')}"
-                    style="width:100%;padding:4px 6px;border:1px solid var(--gray-200);border-radius:3px;font-size:0.82rem;background:#fff;">
-                </td>
-              `).join('')}
+              ${dims.map(d => {
+                const cur = stored[String(d.id)] || '';
+                const opts = Array.isArray(d.options) ? d.options : [];
+                const dataAttrs = `data-account-id="${escapeHtml(a.id || '')}" data-account-name="${escapeHtml(a.name || '')}" data-account-type="${escapeHtml(a.type || '')}" data-dim="${d.id}"`;
+                if (opts.length > 0) {
+                  // Dimension has a controlled vocabulary — render <select>.
+                  // Pre-existing values not in the option list are surfaced
+                  // as a "legacy" entry so a renamed/removed option doesn't
+                  // silently drop saved mappings.
+                  const inOpts = cur && opts.some(o => o.toLowerCase() === cur.toLowerCase());
+                  const legacyOpt = cur && !inOpts
+                    ? `<option value="${escapeHtml(cur)}" selected>⚠ ${escapeHtml(cur)} (not in options)</option>`
+                    : '';
+                  const optionsHtml = opts.map(o => `<option value="${escapeHtml(o)}"${o.toLowerCase() === cur.toLowerCase() ? ' selected' : ''}>${escapeHtml(o)}</option>`).join('');
+                  return `
+                    <td style="padding:4px;">
+                      <select class="mapping-cell" ${dataAttrs}
+                        style="width:100%;padding:4px 6px;border:1px solid var(--gray-200);border-radius:3px;font-size:0.82rem;background:#fff;">
+                        <option value=""${cur ? '' : ' selected'}>— unmapped —</option>
+                        ${legacyOpt}
+                        ${optionsHtml}
+                      </select>
+                    </td>
+                  `;
+                }
+                return `
+                  <td style="padding:4px;">
+                    <input type="text" class="mapping-cell" ${dataAttrs}
+                      value="${escapeHtml(cur)}"
+                      style="width:100%;padding:4px 6px;border:1px solid var(--gray-200);border-radius:3px;font-size:0.82rem;background:#fff;">
+                  </td>
+                `;
+              }).join('')}
             </tr>
           `;
         }).join('')}
@@ -4685,7 +4707,9 @@ function renderMappingTable() {
     <p style="font-size:0.78rem;color:var(--gray-500);margin-top:8px;">* primary dimension. ${rows.length} of ${mappingQboAccounts.length} accounts shown.</p>
   `;
 
-  // Wire up auto-save on blur per cell. Only persist if the value changed.
+  // Auto-save per cell. Inputs save on blur (lets the user finish typing);
+  // selects save on change (single-click commit). All cells skip the save
+  // when value didn't actually change.
   el.querySelectorAll('input.mapping-cell').forEach(input => {
     input.dataset.original = input.value;
     input.addEventListener('blur', () => {
@@ -4694,6 +4718,13 @@ function renderMappingTable() {
     });
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') input.blur();
+    });
+  });
+  el.querySelectorAll('select.mapping-cell').forEach(sel => {
+    sel.dataset.original = sel.value;
+    sel.addEventListener('change', () => {
+      if (sel.value === sel.dataset.original) return;
+      saveMappingCell(sel);
     });
   });
 }
@@ -4710,11 +4741,12 @@ async function saveMappingCell(input) {
   const dimId = input.dataset.dim;
   const value = input.value;
 
-  // Build full values object from the row's other inputs so the server doesn't
-  // need to merge — the row holds the canonical state for this account.
+  // Build full values object from the row's other cells (inputs and selects)
+  // so the server doesn't need to merge — the row holds the canonical state
+  // for this account.
   const row = input.closest('[data-mapping-row]');
   const values = {};
-  row.querySelectorAll('input.mapping-cell').forEach(cell => {
+  row.querySelectorAll('.mapping-cell').forEach(cell => {
     values[cell.dataset.dim] = cell.value;
   });
 
@@ -4750,15 +4782,44 @@ function openDimensionsModal() {
   if (!reportingSelectedClientId) return setMappingStatus('select a client first', 'error');
   const rowsEl = document.getElementById('dimensions-modal-rows');
   const dims = dimensionList();
-  rowsEl.innerHTML = dims.map(d => `
-    <div class="form-group" style="margin-bottom:10px;">
-      <label style="font-size:0.82rem;color:var(--gray-700);">
-        <strong>${d.id}.</strong> ${d.isPrimary ? 'name (primary — drives statements)' : 'name'}
-      </label>
-      <input type="text" class="dimension-name-input" data-dim="${d.id}" value="${escapeHtml(d.name || '')}" placeholder="${d.isPrimary ? 'Financial Statement' : '(leave blank to hide)'}" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;">
-      <input type="text" class="dimension-desc-input" data-dim="${d.id}" value="${escapeHtml(d.description || '')}" placeholder="description (optional)" style="width:100%;padding:6px 8px;border:1px solid var(--gray-200);border-radius:4px;font-size:0.78rem;color:var(--gray-700);margin-top:4px;">
-    </div>
-  `).join('');
+  rowsEl.innerHTML = dims.map(d => {
+    const optsText = (d.options || []).join('\n');
+    const optsCount = (d.options || []).length;
+    const namePh = d.isPrimary ? 'Financial Statement' : '(leave blank to hide)';
+    const optsPh = d.isPrimary
+      ? 'one per line — e.g. Cash and equivalents\\nTrade receivables\\nInventory\\nAccounts payable\\nRevenue\\nCost of goods sold'
+      : 'one per line (leave blank for free-text input)';
+    return `
+      <div class="form-group" style="margin-bottom:14px;border-bottom:1px solid var(--gray-100);padding-bottom:12px;">
+        <label style="font-size:0.82rem;color:var(--gray-700);">
+          <strong>${d.id}.</strong> ${d.isPrimary ? 'name (primary — drives statements)' : 'name'}
+        </label>
+        <input type="text" class="dimension-name-input" data-dim="${d.id}" value="${escapeHtml(d.name || '')}" placeholder="${namePh}" style="width:100%;padding:6px 8px;border:1px solid var(--gray-300);border-radius:4px;">
+        <input type="text" class="dimension-desc-input" data-dim="${d.id}" value="${escapeHtml(d.description || '')}" placeholder="description (optional)" style="width:100%;padding:6px 8px;border:1px solid var(--gray-200);border-radius:4px;font-size:0.78rem;color:var(--gray-700);margin-top:4px;">
+        <details style="margin-top:6px;" ${optsCount > 0 || d.isPrimary ? 'open' : ''}>
+          <summary style="font-size:0.78rem;color:var(--gray-600);cursor:pointer;user-select:none;">dropdown options <span class="dim-opts-count" data-dim="${d.id}" style="color:var(--gray-500);">(${optsCount})</span></summary>
+          <p style="font-size:0.74rem;color:var(--gray-500);margin:4px 0;">when set, the mapping table shows a dropdown for this dimension instead of free text.</p>
+          <textarea class="dimension-options-input" data-dim="${d.id}" rows="5" placeholder="${optsPh.replace(/\\n/g, '&#10;')}" style="width:100%;padding:6px 8px;border:1px solid var(--gray-200);border-radius:4px;font-size:0.78rem;font-family:inherit;resize:vertical;">${escapeHtml(optsText)}</textarea>
+        </details>
+      </div>
+    `;
+  }).join('');
+  // Live count update on each textarea so users see what they've entered.
+  document.querySelectorAll('.dimension-options-input').forEach(ta => {
+    ta.addEventListener('input', () => {
+      const dim = ta.dataset.dim;
+      const lines = ta.value.split('\n').map(l => l.trim()).filter(Boolean);
+      const seen = new Set();
+      const unique = lines.filter(l => {
+        const k = l.toLowerCase();
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+      const counter = document.querySelector(`.dim-opts-count[data-dim="${dim}"]`);
+      if (counter) counter.textContent = `(${unique.length})`;
+    });
+  });
   document.getElementById('dimensions-modal-error').style.display = 'none';
   document.getElementById('dimensions-modal').style.display = '';
 }
@@ -4778,6 +4839,12 @@ async function saveDimensionsModal() {
     const id = inp.dataset.dim;
     dimensions[id] = dimensions[id] || {};
     dimensions[id].description = inp.value;
+  });
+  document.querySelectorAll('.dimension-options-input').forEach(ta => {
+    const id = ta.dataset.dim;
+    dimensions[id] = dimensions[id] || {};
+    // Split lines, trim, drop empties. Server will dedupe and cap.
+    dimensions[id].options = ta.value.split('\n').map(l => l.trim()).filter(Boolean);
   });
   const errEl = document.getElementById('dimensions-modal-error');
   if (!dimensions['1']?.name?.trim()) {

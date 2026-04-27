@@ -5228,6 +5228,8 @@ function saveReporting() { writeJsonAtomic(REPORTING_FILE, reportingData); }
 
 // Default dimensions: 10 slots, dim 1 is the primary used by the financial-statement
 // builder. Names are placeholders that the user can rename via the dimensions modal.
+// `options` is an optional controlled vocabulary — when set, the mapping UI renders
+// a dropdown (instead of free-text input) sourced from this list.
 function getDefaultDimensions() {
   const out = {};
   for (let i = 1; i <= 10; i++) {
@@ -5236,7 +5238,27 @@ function getDefaultDimensions() {
       name: i === 1 ? 'Financial Statement' : '',
       description: i === 1 ? 'Primary mapping — drives the balance sheet and income statement.' : '',
       isPrimary: i === 1,
+      options: [],
     };
+  }
+  return out;
+}
+
+// Sanitize an incoming options array: strings only, trim, drop blanks,
+// dedupe (case-insensitive), cap each entry's length and the list size.
+function sanitizeDimensionOptions(raw) {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const v of raw) {
+    if (typeof v !== 'string') continue;
+    const trimmed = v.trim().slice(0, 80);
+    if (!trimmed) continue;
+    const fold = trimmed.toLowerCase();
+    if (seen.has(fold)) continue;
+    seen.add(fold);
+    out.push(trimmed);
+    if (out.length >= 200) break;
   }
   return out;
 }
@@ -5253,13 +5275,17 @@ function getClientReporting(clientId) {
   if (!c.mappings.dimensions) c.mappings.dimensions = getDefaultDimensions();
   if (!c.mappings.accounts) c.mappings.accounts = {};
   // Ensure all 10 slots exist even if a partial save left some missing.
+  // Backfill `options: []` on any slot saved before the field existed.
   for (let i = 1; i <= 10; i++) {
     const k = String(i);
     if (!c.mappings.dimensions[k]) {
-      c.mappings.dimensions[k] = { id: i, name: '', description: '', isPrimary: i === 1 };
+      c.mappings.dimensions[k] = { id: i, name: '', description: '', isPrimary: i === 1, options: [] };
     } else {
       c.mappings.dimensions[k].id = i;
       c.mappings.dimensions[k].isPrimary = (i === 1);
+      if (!Array.isArray(c.mappings.dimensions[k].options)) {
+        c.mappings.dimensions[k].options = [];
+      }
     }
   }
   c.fxRates = c.fxRates || [];
@@ -5574,6 +5600,9 @@ app.put('/api/admin/clients/:clientId/reporting/mappings/dimensions', requireAdm
     if (!d) continue;
     if (typeof d.name === 'string') c.mappings.dimensions[k].name = d.name.trim().slice(0, 80);
     if (typeof d.description === 'string') c.mappings.dimensions[k].description = d.description.trim().slice(0, 240);
+    if (Object.prototype.hasOwnProperty.call(d, 'options')) {
+      c.mappings.dimensions[k].options = sanitizeDimensionOptions(d.options);
+    }
     c.mappings.dimensions[k].id = i;
     c.mappings.dimensions[k].isPrimary = (i === 1);
   }
