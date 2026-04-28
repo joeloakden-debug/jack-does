@@ -4638,12 +4638,16 @@ function mappingKeyFor(acct) {
   return acct.id ? `id:${acct.id}` : `name:${acct.name}`;
 }
 
-// Coerce a stored option (string from old shape, or {name, statementType})
-// into a canonical { name, statementType } pair. Renamed accounts hold
-// onto their value across this normalization.
+// Coerce a stored option (legacy string, or {name, statementType, subtype})
+// into a canonical shape. Preserves subtype so downstream renderers can use
+// it for grouping if they want.
 function optionShape(o) {
-  if (typeof o === 'string') return { name: o, statementType: null };
-  if (o && typeof o === 'object') return { name: String(o.name || ''), statementType: o.statementType || null };
+  if (typeof o === 'string') return { name: o, statementType: null, subtype: null };
+  if (o && typeof o === 'object') return {
+    name: String(o.name || ''),
+    statementType: o.statementType || null,
+    subtype: o.subtype || null,
+  };
   return null;
 }
 
@@ -4891,6 +4895,24 @@ function renderDimensionCard(d) {
   `;
 }
 
+// Subtype catalog for the primary dimension. Each entry maps a subtype id to
+// its UI label and which statement it implies. Order matches the canonical
+// statement layout; the Section column dropdown surfaces both BS and IS
+// groups together so a single pick fully classifies an option.
+const FS_SUBTYPES = [
+  { id: 'current_asset',         label: 'Current Asset',         stmt: 'balance_sheet' },
+  { id: 'non_current_asset',     label: 'Non-current Asset',     stmt: 'balance_sheet' },
+  { id: 'current_liability',     label: 'Current Liability',     stmt: 'balance_sheet' },
+  { id: 'non_current_liability', label: 'Non-current Liability', stmt: 'balance_sheet' },
+  { id: 'equity',                label: 'Equity',                stmt: 'balance_sheet' },
+  { id: 'revenue',               label: 'Revenue',               stmt: 'income_statement' },
+  { id: 'cost_of_sales',         label: 'Cost of Sales',         stmt: 'income_statement' },
+  { id: 'operating_expense',     label: 'Operating Expense',     stmt: 'income_statement' },
+  { id: 'other_income',          label: 'Other Income',          stmt: 'income_statement' },
+  { id: 'other_expense',         label: 'Other Expense',         stmt: 'income_statement' },
+  { id: 'tax_expense',           label: 'Tax Expense',           stmt: 'income_statement' },
+];
+
 function renderOptionsTable(d) {
   const opts = Array.isArray(d.options) ? d.options : [];
   if (!opts.length) {
@@ -4902,7 +4924,10 @@ function renderOptionsTable(d) {
       <thead>
         <tr style="border-bottom:1px solid var(--gray-200);text-align:left;">
           <th style="padding:6px 8px;font-weight:500;color:var(--gray-600);font-size:0.78rem;">option name</th>
-          ${showType ? '<th style="padding:6px 8px;font-weight:500;color:var(--gray-600);font-size:0.78rem;width:200px;">statement type</th>' : ''}
+          ${showType ? `
+            <th style="padding:6px 8px;font-weight:500;color:var(--gray-600);font-size:0.78rem;width:160px;">statement</th>
+            <th style="padding:6px 8px;font-weight:500;color:var(--gray-600);font-size:0.78rem;width:200px;">section (subtype)</th>
+          ` : ''}
           <th style="padding:6px 8px;width:60px;"></th>
         </tr>
       </thead>
@@ -4910,6 +4935,7 @@ function renderOptionsTable(d) {
         ${opts.map((o, idx) => {
           const name = typeof o === 'string' ? o : o.name;
           const stmt = (typeof o === 'object' ? o.statementType : null) || '';
+          const sub = (typeof o === 'object' ? o.subtype : null) || '';
           return `
             <tr data-dim="${d.id}" data-opt-idx="${idx}" style="border-bottom:1px solid var(--gray-100);">
               <td style="padding:4px 8px;">
@@ -4921,6 +4947,19 @@ function renderOptionsTable(d) {
                     <option value=""${stmt === '' ? ' selected' : ''}>— unclassified —</option>
                     <option value="balance_sheet"${stmt === 'balance_sheet' ? ' selected' : ''}>Balance Sheet</option>
                     <option value="income_statement"${stmt === 'income_statement' ? ' selected' : ''}>Income Statement</option>
+                  </select>
+                </td>
+                <td style="padding:4px 8px;">
+                  <select class="dim-opt-subtype" data-dim="${d.id}" data-opt-idx="${idx}" style="width:100%;padding:4px 6px;border:1px solid var(--gray-200);border-radius:3px;font-size:0.82rem;background:#fff;">
+                    <option value=""${sub === '' ? ' selected' : ''}>— none —</option>
+                    <optgroup label="Balance Sheet">
+                      ${FS_SUBTYPES.filter(s => s.stmt === 'balance_sheet').map(s =>
+                        `<option value="${s.id}"${sub === s.id ? ' selected' : ''}>${escapeHtml(s.label)}</option>`).join('')}
+                    </optgroup>
+                    <optgroup label="Income Statement">
+                      ${FS_SUBTYPES.filter(s => s.stmt === 'income_statement').map(s =>
+                        `<option value="${s.id}"${sub === s.id ? ' selected' : ''}>${escapeHtml(s.label)}</option>`).join('')}
+                    </optgroup>
                   </select>
                 </td>
               ` : ''}
@@ -4960,12 +4999,41 @@ function wireDimensionCard() {
     });
     inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') inp.blur(); });
   });
-  // Statement type: save on change.
+  // Statement type: save on change. When the user picks a different
+  // statement, we also need to clear any subtype that no longer matches —
+  // e.g. switching from BS to IS on a row that had `current_asset` set.
   document.querySelectorAll('.dim-opt-stmt').forEach(sel => {
     sel.dataset.original = sel.value;
     sel.addEventListener('change', () => {
       if (sel.value === sel.dataset.original) return;
-      saveDimensionOptions(sel.dataset.dim);
+      const dim = sel.dataset.dim;
+      const idx = parseInt(sel.dataset.optIdx, 10);
+      const subSel = document.querySelector(`.dim-opt-subtype[data-dim="${dim}"][data-opt-idx="${idx}"]`);
+      if (subSel) {
+        const cur = subSel.value;
+        const meta = FS_SUBTYPES.find(s => s.id === cur);
+        if (meta && meta.stmt !== sel.value) {
+          subSel.value = '';
+        }
+      }
+      saveDimensionOptions(dim);
+    });
+  });
+  // Subtype: save on change. Also auto-set the statement-type field to
+  // match so the two columns always agree (the server enforces this on
+  // save, but updating the UI immediately avoids a flicker).
+  document.querySelectorAll('.dim-opt-subtype').forEach(sel => {
+    sel.dataset.original = sel.value;
+    sel.addEventListener('change', () => {
+      if (sel.value === sel.dataset.original) return;
+      const dim = sel.dataset.dim;
+      const idx = parseInt(sel.dataset.optIdx, 10);
+      const meta = FS_SUBTYPES.find(s => s.id === sel.value);
+      if (meta) {
+        const stmtSel = document.querySelector(`.dim-opt-stmt[data-dim="${dim}"][data-opt-idx="${idx}"]`);
+        if (stmtSel) stmtSel.value = meta.stmt;
+      }
+      saveDimensionOptions(dim);
     });
   });
   // Delete option.
@@ -4988,7 +5056,7 @@ function wireDimensionCard() {
       const d = mappingDimensions?.[String(dim)];
       if (!d) return;
       d.options = Array.isArray(d.options) ? d.options : [];
-      d.options.push({ name: '', statementType: null });
+      d.options.push({ name: '', statementType: null, subtype: null });
       renderDimensionsConfig();
       // Focus the new row's name input so the user can start typing.
       const newIdx = d.options.length - 1;
@@ -5009,10 +5077,15 @@ function collectDimensionOptionsFromDom(dimId) {
   rows.forEach(row => {
     const nameEl = row.querySelector('.dim-opt-name');
     const stmtEl = row.querySelector('.dim-opt-stmt');
+    const subEl  = row.querySelector('.dim-opt-subtype');
     if (!nameEl) return;
     const name = (nameEl.value || '').trim();
-    if (!name) return; // server will drop blanks anyway, but skip locally to keep DOM index stable
-    out.push({ name, statementType: stmtEl ? (stmtEl.value || null) : null });
+    if (!name) return;
+    out.push({
+      name,
+      statementType: stmtEl ? (stmtEl.value || null) : null,
+      subtype: subEl ? (subEl.value || null) : null,
+    });
   });
   return out;
 }
@@ -5178,98 +5251,149 @@ function drawStatements() {
   }
 
   content.innerHTML = `
-    ${renderStatementSection('Balance Sheet', fy.balanceSheet, fy.months, fy.totals.balanceSheet, { totalLabel: 'Net assets / equity check', balancedHint: true })}
-    ${renderStatementSection('Income Statement', fy.incomeStatement, fy.months, fy.totals.incomeStatement, { totalLabel: 'IS total (signed net)', netIncome: fy.totals.netIncome })}
-    ${fy.unclassified.length ? renderStatementSection('Unclassified options', fy.unclassified, fy.months, null, { warning: true }) : ''}
+    ${renderHierarchicalStatement('Balance Sheet', fy.balanceSheet, fy.months)}
+    ${renderHierarchicalStatement('Income Statement', fy.incomeStatement, fy.months)}
+    ${fy.unclassified.length ? renderUnclassifiedSection(fy.unclassified, fy.months) : ''}
     ${renderUnmappedSection(statementsResult.unmappedAccounts, fy.label)}
   `;
 }
 
-function renderStatementSection(title, rows, months, totals, opts = {}) {
+// Render one statement (BS or IS) from the backend's flat hierarchical row
+// list. Row kinds: header (section title), data (option line), subtotal
+// (running tally with top border + extra weight at lower levels). Indent
+// is driven by `level` (1 = major, 2 = section, 3 = data line).
+function renderHierarchicalStatement(title, rows, months) {
   const colWidth = 96;
-  const monthHeaders = months.map(m => `<th style="padding:6px;font-size:0.74rem;font-weight:500;color:var(--gray-600);text-align:right;min-width:${colWidth}px;background:var(--gray-50);">${escapeHtml(m.label)}</th>`).join('');
-  const yearTotalHeader = `<th style="padding:6px;font-size:0.74rem;font-weight:500;color:var(--gray-700);text-align:right;min-width:110px;background:var(--gray-100);border-left:1px solid var(--gray-300);">FY total</th>`;
-
   if (!rows.length) {
     return `
-      <details open style="margin-bottom:16px;border:1px solid ${opts.warning ? 'var(--amber-300, #fcd34d)' : 'var(--gray-200)'};border-radius:8px;background:#fff;">
-        <summary style="padding:10px 14px;cursor:pointer;user-select:none;font-weight:600;font-size:0.92rem;${opts.warning ? 'color:var(--amber-700, #b45309);' : ''}">${escapeHtml(title)}</summary>
-        <div style="padding:0 14px 14px;color:var(--gray-500);font-size:0.85rem;">no rows.</div>
+      <details open style="margin-bottom:16px;border:1px solid var(--gray-200);border-radius:8px;background:#fff;">
+        <summary style="padding:10px 14px;cursor:pointer;user-select:none;font-weight:600;font-size:0.92rem;">${escapeHtml(title)}</summary>
+        <div style="padding:12px 14px;color:var(--gray-500);font-size:0.85rem;">no rows.</div>
       </details>
     `;
   }
+  const monthHeaders = months.map(m =>
+    `<th style="padding:6px;font-size:0.74rem;font-weight:500;color:var(--gray-600);text-align:right;min-width:${colWidth}px;background:var(--gray-50);">${escapeHtml(m.label)}</th>`
+  ).join('');
+  const yearTotalHeader = `<th style="padding:6px;font-size:0.74rem;font-weight:500;color:var(--gray-700);text-align:right;min-width:110px;background:var(--gray-100);border-left:1px solid var(--gray-300);">FY total</th>`;
 
-  const rowHtml = rows.map(r => {
+  function renderHeader(r) {
+    const level = r.level;
+    const padLeft = level === 1 ? 10 : level === 2 ? 28 : 46;
+    const fontSize = level === 1 ? '0.9rem' : '0.82rem';
+    const fontWeight = level === 1 ? 700 : 600;
+    const colorTone = level === 1 ? 'var(--gray-900, #111827)' : 'var(--gray-700)';
+    const tt = level === 1 ? 'uppercase' : 'none';
+    const ls = level === 1 ? '0.5px' : 'normal';
+    const bg = level === 1 ? 'var(--gray-100)' : '#fff';
+    return `
+      <tr>
+        <td style="padding:${level === 1 ? 10 : 6}px 8px ${level === 1 ? 6 : 4}px ${padLeft}px;font-size:${fontSize};font-weight:${fontWeight};color:${colorTone};text-transform:${tt};letter-spacing:${ls};position:sticky;left:0;background:${bg};border-right:1px solid var(--gray-200);min-width:280px;">${escapeHtml(r.label)}</td>
+        ${months.map(() => `<td style="background:${bg};"></td>`).join('')}
+        <td style="background:${bg};border-left:1px solid var(--gray-200);"></td>
+      </tr>
+    `;
+  }
+  function renderData(r) {
+    const padLeft = r.level === 3 ? 46 : r.level === 2 ? 28 : 10;
     const cells = months.map(m => {
       const v = r.nets[m.period];
       const isNeg = (v || 0) < 0;
-      return `<td style="padding:4px 6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.8rem;color:${isNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtCell(v)}</td>`;
+      return `<td style="padding:4px 6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;color:${isNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtCell(v)}</td>`;
     }).join('');
     const total = r.total || 0;
     const totalNeg = total < 0;
     return `
       <tr style="border-bottom:1px solid var(--gray-100);">
-        <td style="padding:6px 10px;font-size:0.85rem;position:sticky;left:0;background:#fff;border-right:1px solid var(--gray-200);min-width:280px;">${escapeHtml(r.optionName)}</td>
+        <td style="padding:5px 8px 5px ${padLeft}px;font-size:0.84rem;color:var(--gray-700);position:sticky;left:0;background:#fff;border-right:1px solid var(--gray-200);min-width:280px;">${escapeHtml(r.label)}</td>
         ${cells}
-        <td style="padding:6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;font-weight:500;background:var(--gray-50);border-left:1px solid var(--gray-200);color:${totalNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtCell(total)}</td>
+        <td style="padding:5px 6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;background:var(--gray-50);border-left:1px solid var(--gray-200);color:${totalNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtCell(total)}</td>
+      </tr>
+    `;
+  }
+  function renderSubtotal(r) {
+    const padLeft = r.level === 0 ? 10 : r.level === 1 ? 10 : 28;
+    const fontSize = r.level === 0 ? '0.9rem' : r.level === 1 ? '0.86rem' : '0.84rem';
+    const fontWeight = r.level === 0 || r.accent ? 700 : 600;
+    const topBorder = r.level === 0 ? '2px solid var(--gray-700)' : r.level === 1 ? '1.5px solid var(--gray-400)' : '1px solid var(--gray-300)';
+    const bottomBorder = r.level === 0 ? '2px double var(--gray-700)' : 'none';
+    const bg = r.level === 0 ? 'var(--blue-50, #eff6ff)' : r.level === 1 ? 'var(--gray-50)' : 'transparent';
+    const labelColor = r.level === 0 ? 'var(--blue-700, #1d4ed8)' : 'var(--gray-900, #111827)';
+    const cells = months.map(m => {
+      const v = r.nets[m.period];
+      const isNeg = (v || 0) < 0;
+      return `<td style="padding:6px;text-align:right;font-variant-numeric:tabular-nums;font-size:${fontSize};font-weight:${fontWeight};border-top:${topBorder};border-bottom:${bottomBorder};background:${bg};color:${isNeg ? 'var(--red-600,#c62828)' : labelColor};">${fmtCell(v)}</td>`;
+    }).join('');
+    return `
+      <tr>
+        <td style="padding:6px 8px 6px ${padLeft}px;font-size:${fontSize};font-weight:${fontWeight};color:${labelColor};border-top:${topBorder};border-bottom:${bottomBorder};background:${bg};position:sticky;left:0;border-right:1px solid var(--gray-200);min-width:280px;">${escapeHtml(r.label)}</td>
+        ${cells}
+        <td style="padding:6px;text-align:right;font-variant-numeric:tabular-nums;font-size:${fontSize};font-weight:${fontWeight};border-top:${topBorder};border-bottom:${bottomBorder};background:${bg};border-left:1px solid var(--gray-300);color:${(r.total || 0) < 0 ? 'var(--red-600,#c62828)' : labelColor};">${fmtCell(r.total)}</td>
+      </tr>
+    `;
+  }
+
+  const rowHtml = rows.map(r => {
+    if (r.kind === 'header') return renderHeader(r);
+    if (r.kind === 'subtotal') return renderSubtotal(r);
+    return renderData(r);
+  }).join('');
+
+  return `
+    <details open style="margin-bottom:16px;border:1px solid var(--gray-200);border-radius:8px;background:#fff;overflow:hidden;">
+      <summary style="padding:10px 14px;cursor:pointer;user-select:none;font-weight:600;font-size:0.92rem;">${escapeHtml(title)}</summary>
+      <div style="overflow-x:auto;">
+        <table style="border-collapse:collapse;font-size:0.82rem;width:max-content;min-width:100%;">
+          <thead>
+            <tr>
+              <th style="padding:8px 10px;text-align:left;position:sticky;left:0;background:var(--gray-50);border-right:1px solid var(--gray-200);min-width:280px;z-index:1;">line</th>
+              ${monthHeaders}
+              ${yearTotalHeader}
+            </tr>
+          </thead>
+          <tbody>${rowHtml}</tbody>
+        </table>
+      </div>
+    </details>
+  `;
+}
+
+// Unclassified (options without a Balance Sheet / Income Statement tag).
+// Different from the BS/IS sections — these still need the user's
+// attention to be classified. Keeps the warning style from before.
+function renderUnclassifiedSection(rows, months) {
+  const colWidth = 96;
+  const monthHeaders = months.map(m =>
+    `<th style="padding:6px;font-size:0.74rem;font-weight:500;color:var(--gray-600);text-align:right;min-width:${colWidth}px;background:var(--gray-50);">${escapeHtml(m.label)}</th>`
+  ).join('');
+  const rowHtml = rows.map(r => {
+    const cells = months.map(m => {
+      const v = r.nets[m.period];
+      const isNeg = (v || 0) < 0;
+      return `<td style="padding:4px 6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;color:${isNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtCell(v)}</td>`;
+    }).join('');
+    const total = r.total || 0;
+    return `
+      <tr style="border-bottom:1px solid var(--gray-100);">
+        <td style="padding:6px 10px;font-size:0.85rem;position:sticky;left:0;background:#fff;border-right:1px solid var(--gray-200);min-width:280px;">${escapeHtml(r.label)}</td>
+        ${cells}
+        <td style="padding:6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;background:var(--gray-50);border-left:1px solid var(--gray-200);color:${total < 0 ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtCell(total)}</td>
       </tr>
     `;
   }).join('');
-
-  let totalsRowHtml = '';
-  if (totals) {
-    const totalCells = months.map(m => {
-      const v = totals[m.period];
-      const isNeg = (v || 0) < 0;
-      return `<td style="padding:6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;font-weight:600;background:var(--gray-50);color:${isNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtCell(v)}</td>`;
-    }).join('');
-    let yearSum = 0;
-    for (const m of months) yearSum += (totals[m.period] || 0);
-    yearSum = Math.round(yearSum * 100) / 100;
-    const totalLabel = opts.totalLabel || 'Total';
-    const balancedNote = opts.balancedHint
-      ? ` <span style="font-weight:400;color:var(--gray-500);font-size:0.74rem;">(should be ~0 — non-zero means unclassified or unmapped activity)</span>`
-      : '';
-    totalsRowHtml = `
-      <tr style="border-top:2px solid var(--gray-300);">
-        <td style="padding:8px 10px;font-weight:600;position:sticky;left:0;background:var(--gray-50);border-right:1px solid var(--gray-200);">${escapeHtml(totalLabel)}${balancedNote}</td>
-        ${totalCells}
-        <td style="padding:8px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;font-weight:700;background:var(--gray-100);border-left:1px solid var(--gray-300);color:${yearSum < 0 ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtCell(yearSum)}</td>
-      </tr>
-    `;
-    if (opts.netIncome) {
-      const netIncomeCells = months.map(m => {
-        const v = opts.netIncome[m.period];
-        const isNeg = (v || 0) < 0;
-        return `<td style="padding:6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;font-weight:700;background:var(--blue-50, #eff6ff);color:${isNeg ? 'var(--red-600,#c62828)' : 'var(--blue-700, #1d4ed8)'};">${fmtCell(v)}</td>`;
-      }).join('');
-      let netIncYear = 0;
-      for (const m of months) netIncYear += (opts.netIncome[m.period] || 0);
-      netIncYear = Math.round(netIncYear * 100) / 100;
-      totalsRowHtml += `
-        <tr>
-          <td style="padding:8px 10px;font-weight:700;position:sticky;left:0;background:var(--blue-50, #eff6ff);border-right:1px solid var(--gray-200);color:var(--blue-700, #1d4ed8);">Net income</td>
-          ${netIncomeCells}
-          <td style="padding:8px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;font-weight:700;background:var(--blue-100, #dbeafe);border-left:1px solid var(--gray-300);color:${netIncYear < 0 ? 'var(--red-600,#c62828)' : 'var(--blue-700, #1d4ed8)'};">${fmtCell(netIncYear)}</td>
-        </tr>
-      `;
-    }
-  }
-
   return `
-    <details open style="margin-bottom:16px;border:1px solid ${opts.warning ? 'var(--amber-300, #fcd34d)' : 'var(--gray-200)'};border-radius:8px;background:#fff;overflow:hidden;">
-      <summary style="padding:10px 14px;cursor:pointer;user-select:none;font-weight:600;font-size:0.92rem;${opts.warning ? 'color:var(--amber-700, #b45309);' : ''}">${escapeHtml(title)} <span style="font-weight:400;color:var(--gray-500);">(${rows.length})</span>${opts.warning ? ' — these options have no Balance Sheet / Income Statement tag' : ''}</summary>
+    <details open style="margin-bottom:16px;border:1px solid var(--amber-300, #fcd34d);border-radius:8px;background:#fffbeb;overflow:hidden;">
+      <summary style="padding:10px 14px;cursor:pointer;user-select:none;font-weight:600;font-size:0.92rem;color:var(--amber-700, #b45309);">Unclassified options (${rows.length}) — these options have no Balance Sheet / Income Statement tag</summary>
       <div style="overflow-x:auto;">
         <table style="border-collapse:collapse;font-size:0.82rem;width:max-content;min-width:100%;">
           <thead>
             <tr>
               <th style="padding:8px 10px;text-align:left;position:sticky;left:0;background:var(--gray-50);border-right:1px solid var(--gray-200);min-width:280px;z-index:1;">option</th>
               ${monthHeaders}
-              ${yearTotalHeader}
+              <th style="padding:6px;font-size:0.74rem;font-weight:500;color:var(--gray-700);text-align:right;min-width:110px;background:var(--gray-100);border-left:1px solid var(--gray-300);">FY total</th>
             </tr>
           </thead>
           <tbody>${rowHtml}</tbody>
-          ${totalsRowHtml ? `<tfoot>${totalsRowHtml}</tfoot>` : ''}
         </table>
       </div>
     </details>

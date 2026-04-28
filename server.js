@@ -5244,27 +5244,58 @@ function getDefaultDimensions() {
   return out;
 }
 
-// Each option is an object: { name, statementType }. statementType is only
-// meaningful on the primary dimension (drives BS vs IS classification on
-// statements); on other dimensions it's preserved but unused.
+// Each option is an object: { name, statementType, subtype }. statementType is
+// only meaningful on the primary dimension (drives BS vs IS classification);
+// on other dimensions it's preserved but unused. subtype, when set, places
+// the option in a specific section of the statement (e.g. current_asset,
+// operating_expense) and is what drives sign-flipping on display.
 const ALLOWED_STATEMENT_TYPES = new Set(['balance_sheet', 'income_statement']);
 
+// Subtype → which statement it belongs on. Setting a subtype implicitly
+// pins statementType, so they can't drift out of sync.
+const SUBTYPE_TO_STATEMENT = {
+  current_asset: 'balance_sheet',
+  non_current_asset: 'balance_sheet',
+  current_liability: 'balance_sheet',
+  non_current_liability: 'balance_sheet',
+  equity: 'balance_sheet',
+  revenue: 'income_statement',
+  cost_of_sales: 'income_statement',
+  operating_expense: 'income_statement',
+  other_income: 'income_statement',
+  other_expense: 'income_statement',
+  tax_expense: 'income_statement',
+};
+const ALLOWED_SUBTYPES = new Set(Object.keys(SUBTYPE_TO_STATEMENT));
+
+// Subtypes whose natural balance is *credit* — these get sign-flipped for
+// display so liabilities/equity show as positive on the BS and revenue/other
+// income show as positive on the IS. Expense-like subtypes ALSO get flipped
+// (debit→shown negative/bracketed) so the IS sums to net income directly.
+// Effectively: for IS we flip every line; for BS we flip only credit-natured
+// subtypes. See buildStatements for application.
+const CREDIT_NATURAL_SUBTYPES = new Set([
+  'current_liability', 'non_current_liability', 'equity',
+  'revenue', 'other_income',
+]);
+
 // Sanitize an incoming options array. Accepts either string entries (legacy
-// shape) or { name, statementType } objects. Drops blanks, dedupes by
-// case-folded name, caps name length and list size, and validates the
-// statement-type enum.
+// shape) or { name, statementType, subtype } objects. Drops blanks, dedupes
+// by case-folded name, caps name length and list size, validates both
+// statementType and subtype against their enums, and forces statementType
+// to match subtype when both are set so they can't disagree.
 function sanitizeDimensionOptions(raw) {
   if (!Array.isArray(raw)) return [];
   const seen = new Set();
   const out = [];
   for (const v of raw) {
-    let name, statementType;
+    let name, statementType, subtype;
     if (typeof v === 'string') {
-      name = v;
-      statementType = null;
+      name = v; statementType = null; subtype = null;
     } else if (v && typeof v === 'object') {
       name = v.name;
       statementType = v.statementType;
+      subtype = v.subtype;
     } else {
       continue;
     }
@@ -5274,8 +5305,18 @@ function sanitizeDimensionOptions(raw) {
     const fold = trimmed.toLowerCase();
     if (seen.has(fold)) continue;
     seen.add(fold);
-    const cleanType = ALLOWED_STATEMENT_TYPES.has(statementType) ? statementType : null;
-    out.push({ name: trimmed, statementType: cleanType });
+    const cleanSubtype = ALLOWED_SUBTYPES.has(subtype) ? subtype : null;
+    // statementType derives from subtype when set; otherwise honour the
+    // explicit value (so an option can be "BS / Other" with no subtype yet).
+    let cleanType;
+    if (cleanSubtype) {
+      cleanType = SUBTYPE_TO_STATEMENT[cleanSubtype];
+    } else if (ALLOWED_STATEMENT_TYPES.has(statementType)) {
+      cleanType = statementType;
+    } else {
+      cleanType = null;
+    }
+    out.push({ name: trimmed, statementType: cleanType, subtype: cleanSubtype });
     if (out.length >= 200) break;
   }
   return out;
@@ -5305,16 +5346,22 @@ function getClientReporting(clientId) {
       if (!Array.isArray(c.mappings.dimensions[k].options)) {
         c.mappings.dimensions[k].options = [];
       } else {
-        // In-place migrate any legacy string entries to the object shape.
+        // In-place migrate any legacy string entries to the object shape,
+        // and backfill `subtype: null` on entries saved before the field
+        // existed.
         const opts = c.mappings.dimensions[k].options;
         let dirty = false;
         for (let j = 0; j < opts.length; j++) {
           if (typeof opts[j] === 'string') {
-            opts[j] = { name: opts[j], statementType: null };
+            opts[j] = { name: opts[j], statementType: null, subtype: null };
             dirty = true;
           } else if (opts[j] && typeof opts[j] === 'object') {
             if (!('statementType' in opts[j])) {
               opts[j].statementType = null;
+              dirty = true;
+            }
+            if (!('subtype' in opts[j])) {
+              opts[j].subtype = null;
               dirty = true;
             }
           }
@@ -5687,42 +5734,71 @@ app.put('/api/admin/clients/:clientId/reporting/mappings/accounts', requireAdmin
   res.json({ success: true, key, account: c.mappings.accounts[key] });
 });
 
+// Canonical layout per statement. Each entry is one section the renderer
+// will draw if any options match that subtype. `subtotalLabel` is shown
+// after the section's data rows; `keystoneLabel` (when set) emits a
+// running-total line at level 1 (e.g. "Gross profit", "Operating income"),
+// summing every row up to that point.
+const BS_LAYOUT = [
+  { groupLabel: 'Assets', level: 1, subtypes: [
+    { subtype: 'current_asset',     header: 'Current Assets',     subtotalLabel: 'Total current assets' },
+    { subtype: 'non_current_asset', header: 'Non-current Assets', subtotalLabel: 'Total non-current assets' },
+  ], groupSubtotalLabel: 'Total assets' },
+  { groupLabel: 'Liabilities and Equity', level: 1, subtypes: [
+    { subtype: 'current_liability',     header: 'Current Liabilities',     subtotalLabel: 'Total current liabilities' },
+    { subtype: 'non_current_liability', header: 'Non-current Liabilities', subtotalLabel: 'Total non-current liabilities' },
+    { subtype: 'equity',                header: 'Equity',                  subtotalLabel: 'Total equity' },
+  ], groupSubtotalLabel: 'Total liabilities and equity' },
+];
+
+const IS_LAYOUT = [
+  { subtype: 'revenue',           header: 'Revenue',            subtotalLabel: 'Total revenue', keystoneAfter: null },
+  { subtype: 'cost_of_sales',     header: 'Cost of Sales',      subtotalLabel: 'Total cost of sales', keystoneAfter: 'Gross profit' },
+  { subtype: 'operating_expense', header: 'Operating Expenses', subtotalLabel: 'Total operating expenses', keystoneAfter: 'Operating income' },
+  { subtype: 'other_income',      header: 'Other Income',       subtotalLabel: 'Total other income' },
+  { subtype: 'other_expense',     header: 'Other Expense',      subtotalLabel: 'Total other expense', keystoneAfter: 'Income before tax' },
+  { subtype: 'tax_expense',       header: 'Tax',                subtotalLabel: 'Total tax', keystoneAfter: null },
+];
+
+function round2(v) { return Math.round(v * 100) / 100; }
+
 /**
  * Build a balance-sheet / income-statement view for one TB snapshot, using
  * the client's primary-dimension mapping ("Financial Statement") to group
- * accounts into options, and the per-option statementType tag to split
- * options between the BS and IS.
+ * accounts into options. Each option's `subtype` (current_asset, revenue,
+ * etc.) determines its section in the canonical statement layout, and
+ * also drives sign-flipping on display. After flipping, every subtotal is
+ * a simple sum and Net income is just the IS grand total.
  *
- * Sign convention is the QBO TB's signed net (debit positive, credit
- * negative). For a properly mapped book the per-month sum across BS lines
- * is ~0 and the IS sum equals the negative of net income — we expose the
- * sign-flipped value as `netIncome` so callers don't have to remember to
- * flip it themselves.
+ * Backwards-compatible with options that have only `statementType` and no
+ * `subtype` — those get parked under an "Other" subtype within their
+ * statement so users see their data immediately and can refine the
+ * classification on the dimensions tab.
  */
 function buildStatements(snapshot, dimensions, accountsMap) {
   const dim1 = dimensions?.['1'] || {};
-  const optionMeta = new Map(); // case-folded name -> { name, statementType }
+  const optionMeta = new Map();
   for (const o of (dim1.options || [])) {
-    const oo = (typeof o === 'string') ? { name: o, statementType: null } : o;
+    const oo = (typeof o === 'string') ? { name: o, statementType: null, subtype: null } : o;
     if (oo && oo.name) optionMeta.set(String(oo.name).toLowerCase(), oo);
   }
 
   const fyResults = [];
-  // Track unmapped accounts (any FY where they had activity) so the user
-  // sees what's still falling outside the financial statements.
-  const unmapped = new Map(); // key -> { accountId, accountName, periods: Set }
+  const unmapped = new Map();
 
   for (const fy of (snapshot.fiscalYears || [])) {
     const months = fy.months || [];
-    const buckets = { balance_sheet: new Map(), income_statement: new Map(), unclassified: new Map() };
 
-    function addToBucket(bucketKey, optionName, statementType, period, value) {
-      const map = buckets[bucketKey];
-      if (!map.has(optionName)) {
-        map.set(optionName, { optionName, statementType, nets: {}, total: 0 });
+    // signedRows[bucket][optionName] = { nets, statementType, subtype }
+    // bucket keys: any subtype name, plus 'bs_other', 'is_other', 'unclassified'
+    const signedRows = new Map();
+    function addRow(bucket, optionName, statementType, subtype, period, value) {
+      const key = `${bucket}::${optionName}`;
+      if (!signedRows.has(key)) {
+        signedRows.set(key, { bucket, optionName, statementType, subtype, nets: {} });
       }
-      const row = map.get(optionName);
-      row.nets[period] = (row.nets[period] || 0) + value;
+      const r = signedRows.get(key);
+      r.nets[period] = (r.nets[period] || 0) + value;
     }
 
     for (const acct of (snapshot.accounts || [])) {
@@ -5731,8 +5807,6 @@ function buildStatements(snapshot, dimensions, accountsMap) {
       const dim1Value = (mapping?.values?.['1'] || '').trim();
 
       if (!dim1Value) {
-        // Unmapped — collect once per account, but only report in this FY
-        // if the account had any activity in the FY's pulled months.
         const hadActivity = months.some(m => acct.nets?.[m.period]);
         if (hadActivity) {
           if (!unmapped.has(acctKey)) {
@@ -5742,67 +5816,220 @@ function buildStatements(snapshot, dimensions, accountsMap) {
         }
         continue;
       }
-
       const meta = optionMeta.get(dim1Value.toLowerCase());
       const statementType = meta?.statementType || null;
-      const bucketKey = statementType === 'balance_sheet' ? 'balance_sheet'
-        : statementType === 'income_statement' ? 'income_statement'
-        : 'unclassified';
+      const subtype = meta?.subtype || null;
+      // Bucket precedence: subtype (specific section) → "<stmt>_other" if
+      // statementType is set but subtype isn't → 'unclassified' otherwise.
+      const bucket = subtype
+        || (statementType === 'balance_sheet' ? 'bs_other'
+          : statementType === 'income_statement' ? 'is_other'
+          : 'unclassified');
 
       for (const m of months) {
         const v = acct.nets?.[m.period];
         if (v === null || v === undefined || v === 0) continue;
-        addToBucket(bucketKey, dim1Value, statementType, m.period, v);
+        addRow(bucket, dim1Value, statementType, subtype, m.period, v);
       }
     }
 
-    // Compute per-line totals across the FY (sum of monthly nets).
-    function finishBucket(map) {
-      const arr = [];
-      for (const row of map.values()) {
-        let total = 0;
-        for (const m of months) total += (row.nets[m.period] || 0);
-        row.total = Math.round(total * 100) / 100;
-        for (const m of months) {
-          if (row.nets[m.period] !== undefined) {
-            row.nets[m.period] = Math.round(row.nets[m.period] * 100) / 100;
-          }
+    // Flip signs for display. BS: only credit-natured subtypes flip.
+    // IS: every line flips (revenue's credit balance becomes positive,
+    // expenses' debit balance becomes the bracketed deduction). After
+    // this transform, "displayed" values across an FY sum cleanly to the
+    // expected subtotals.
+    function flipForDisplay(bucket, signedNet) {
+      const isIS = bucket === 'is_other'
+        || ['revenue','cost_of_sales','operating_expense','other_income','other_expense','tax_expense'].includes(bucket);
+      if (isIS) return -signedNet;
+      // BS: flip only credit-natural subtypes; assets and "bs_other" stay as-is.
+      if (CREDIT_NATURAL_SUBTYPES.has(bucket)) return -signedNet;
+      return signedNet;
+    }
+
+    const displayedRows = []; // [{ bucket, optionName, statementType, subtype, nets, total }]
+    for (const r of signedRows.values()) {
+      const flipped = {};
+      for (const m of months) {
+        const v = r.nets[m.period];
+        if (v === undefined) continue;
+        flipped[m.period] = round2(flipForDisplay(r.bucket, v));
+      }
+      let total = 0;
+      for (const m of months) total += (flipped[m.period] || 0);
+      displayedRows.push({ ...r, nets: flipped, total: round2(total) });
+    }
+
+    // ---- Build the BS row list ----
+    const bsRows = [];
+    function pushPeriodSums(target, source) {
+      for (const m of months) target[m.period] = round2((target[m.period] || 0) + (source[m.period] || 0));
+    }
+    function emptyPeriods() {
+      const o = {};
+      for (const m of months) o[m.period] = 0;
+      return o;
+    }
+    function pushHeader(rows, label, level) { rows.push({ kind: 'header', label, level }); }
+    function pushData(rows, r, level) { rows.push({ kind: 'data', label: r.optionName, nets: r.nets, total: r.total, level }); }
+    function pushSubtotal(rows, label, nets, level, accent) {
+      let yt = 0; for (const m of months) yt += (nets[m.period] || 0);
+      rows.push({ kind: 'subtotal', label, nets, total: round2(yt), level, accent: accent || false });
+    }
+
+    function rowsByBucket(b) {
+      return displayedRows.filter(r => r.bucket === b).sort((a, b2) => a.optionName.localeCompare(b2.optionName));
+    }
+
+    let assetsRunning = emptyPeriods();
+    let liabRunning = emptyPeriods();
+    let equityRunning = emptyPeriods();
+    let bsOtherRunning = emptyPeriods();
+
+    // Major group: Assets
+    const assetSubtypes = BS_LAYOUT[0].subtypes; // current_asset, non_current_asset
+    let anyAsset = false;
+    pushHeader(bsRows, BS_LAYOUT[0].groupLabel, 1);
+    for (const sec of assetSubtypes) {
+      const rows = rowsByBucket(sec.subtype);
+      if (!rows.length) continue;
+      anyAsset = true;
+      pushHeader(bsRows, sec.header, 2);
+      const sectionTotals = emptyPeriods();
+      for (const r of rows) {
+        pushData(bsRows, r, 3);
+        pushPeriodSums(sectionTotals, r.nets);
+      }
+      pushSubtotal(bsRows, sec.subtotalLabel, sectionTotals, 2);
+      pushPeriodSums(assetsRunning, sectionTotals);
+    }
+    // BS-other parked under Assets too if statementType=BS but no subtype
+    // and the option has a debit-natural feel. Without that signal we just
+    // park bs_other under "Assets — Other" so the user notices.
+    const bsOtherRows = rowsByBucket('bs_other');
+    if (bsOtherRows.length) {
+      pushHeader(bsRows, 'Other (uncategorized BS)', 2);
+      const sectionTotals = emptyPeriods();
+      for (const r of bsOtherRows) { pushData(bsRows, r, 3); pushPeriodSums(sectionTotals, r.nets); }
+      pushSubtotal(bsRows, 'Total other', sectionTotals, 2);
+      pushPeriodSums(bsOtherRunning, sectionTotals);
+      anyAsset = true;
+    }
+    if (anyAsset) {
+      const totalAssets = emptyPeriods();
+      pushPeriodSums(totalAssets, assetsRunning);
+      pushPeriodSums(totalAssets, bsOtherRunning);
+      pushSubtotal(bsRows, 'Total assets', totalAssets, 1, true);
+    }
+
+    // Major group: Liabilities and Equity
+    const lEqSubtypes = BS_LAYOUT[1].subtypes;
+    let anyLE = false;
+    if (lEqSubtypes.some(s => rowsByBucket(s.subtype).length)) {
+      pushHeader(bsRows, BS_LAYOUT[1].groupLabel, 1);
+      // Liabilities first
+      const liabSubtypes = lEqSubtypes.filter(s => s.subtype !== 'equity');
+      let anyLiab = false;
+      for (const sec of liabSubtypes) {
+        const rows = rowsByBucket(sec.subtype);
+        if (!rows.length) continue;
+        anyLiab = true;
+        anyLE = true;
+        pushHeader(bsRows, sec.header, 2);
+        const sectionTotals = emptyPeriods();
+        for (const r of rows) {
+          pushData(bsRows, r, 3);
+          pushPeriodSums(sectionTotals, r.nets);
         }
-        arr.push(row);
+        pushSubtotal(bsRows, sec.subtotalLabel, sectionTotals, 2);
+        pushPeriodSums(liabRunning, sectionTotals);
       }
-      arr.sort((a, b) => a.optionName.localeCompare(b.optionName));
-      return arr;
+      if (anyLiab) {
+        pushSubtotal(bsRows, 'Total liabilities', liabRunning, 1);
+      }
+      // Equity
+      const equityRows = rowsByBucket('equity');
+      if (equityRows.length) {
+        anyLE = true;
+        pushHeader(bsRows, 'Equity', 2);
+        const equitySection = emptyPeriods();
+        for (const r of equityRows) {
+          pushData(bsRows, r, 3);
+          pushPeriodSums(equitySection, r.nets);
+        }
+        pushSubtotal(bsRows, 'Total equity', equitySection, 2);
+        pushPeriodSums(equityRunning, equitySection);
+      }
+      if (anyLE) {
+        const tle = emptyPeriods();
+        pushPeriodSums(tle, liabRunning);
+        pushPeriodSums(tle, equityRunning);
+        pushSubtotal(bsRows, 'Total liabilities and equity', tle, 1, true);
+      }
     }
 
-    const balanceSheet = finishBucket(buckets.balance_sheet);
-    const incomeStatement = finishBucket(buckets.income_statement);
-    const unclassified = finishBucket(buckets.unclassified);
-
-    // Per-month totals across all rows in each statement.
-    const bsTotals = {}, isTotals = {}, netIncome = {};
-    for (const m of months) {
-      let bs = 0, is = 0;
-      for (const r of balanceSheet) bs += (r.nets[m.period] || 0);
-      for (const r of incomeStatement) is += (r.nets[m.period] || 0);
-      bsTotals[m.period] = Math.round(bs * 100) / 100;
-      isTotals[m.period] = Math.round(is * 100) / 100;
-      // Net income = revenue (credit, neg) − expense (debit, pos), and the
-      // signed-net IS total is `expense − revenue`, so we negate to flip.
-      netIncome[m.period] = Math.round(-is * 100) / 100;
+    // ---- Build the IS row list ----
+    const isRows = [];
+    let isRunning = emptyPeriods(); // running net income (sum of all displayed IS rows so far)
+    for (const sec of IS_LAYOUT) {
+      const rows = rowsByBucket(sec.subtype);
+      if (rows.length) {
+        pushHeader(isRows, sec.header, 2);
+        const sectionTotals = emptyPeriods();
+        for (const r of rows) {
+          pushData(isRows, r, 3);
+          pushPeriodSums(sectionTotals, r.nets);
+        }
+        pushSubtotal(isRows, sec.subtotalLabel, sectionTotals, 2);
+        pushPeriodSums(isRunning, sectionTotals);
+      }
+      if (sec.keystoneAfter) {
+        // Even if this section was empty, we emit the keystone if any
+        // earlier IS data exists; the running total is still meaningful.
+        const haveAnyData = displayedRows.some(r =>
+          ['revenue','cost_of_sales','operating_expense','other_income','other_expense','tax_expense','is_other']
+            .includes(r.bucket)
+        );
+        if (haveAnyData) {
+          const snapshot = emptyPeriods();
+          pushPeriodSums(snapshot, isRunning);
+          pushSubtotal(isRows, sec.keystoneAfter, snapshot, 1);
+        }
+      }
     }
+    // is_other (statementType=IS but no subtype) at the bottom before NI
+    const isOtherRows = rowsByBucket('is_other');
+    if (isOtherRows.length) {
+      pushHeader(isRows, 'Other (uncategorized IS)', 2);
+      const sectionTotals = emptyPeriods();
+      for (const r of isOtherRows) {
+        pushData(isRows, r, 3);
+        pushPeriodSums(sectionTotals, r.nets);
+      }
+      pushSubtotal(isRows, 'Total other', sectionTotals, 2);
+      pushPeriodSums(isRunning, sectionTotals);
+    }
+    // Final net income — emit only if there were any IS rows at all.
+    if (isRows.length) {
+      pushSubtotal(isRows, 'Net income', isRunning, 0, true);
+    }
+
+    // Unclassified — options with no statementType yet. Shown to the user
+    // so they know what's still missing classification.
+    const unclassifiedRows = displayedRows.filter(r => r.bucket === 'unclassified')
+      .sort((a, b) => a.optionName.localeCompare(b.optionName))
+      .map(r => ({ kind: 'data', label: r.optionName, nets: r.nets, total: r.total, level: 3 }));
 
     fyResults.push({
       label: fy.label,
       isCurrent: !!fy.isCurrent,
       months,
-      balanceSheet,
-      incomeStatement,
-      unclassified,
-      totals: { balanceSheet: bsTotals, incomeStatement: isTotals, netIncome },
+      balanceSheet: bsRows,
+      incomeStatement: isRows,
+      unclassified: unclassifiedRows,
     });
   }
 
-  // Flatten unmapped tracker to a stable array.
   const unmappedAccounts = Array.from(unmapped.values()).map(x => ({
     accountId: x.accountId,
     accountName: x.accountName,
