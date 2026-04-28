@@ -5296,39 +5296,62 @@ function renderHierarchicalStatement(title, rows, months) {
   }
   function renderData(r) {
     const padLeft = r.level === 3 ? 46 : r.level === 2 ? 28 : 10;
+    // Synthetic auto-computed rows (e.g. "Current year earnings" injected
+    // into the equity section) get an italic label + a small "auto" tag
+    // so the user can see it's not a mapped GL account.
+    const isAuto = !!r.isAuto;
+    const labelStyle = isAuto ? 'font-style:italic;color:var(--gray-600);' : '';
+    const autoTag = isAuto
+      ? `<span title="${escapeHtml(r.note || 'Auto-computed — not mapped to a GL account')}" style="margin-left:6px;font-size:0.66rem;font-weight:600;color:var(--blue-700,#1d4ed8);background:var(--blue-50,#eff6ff);padding:1px 6px;border-radius:3px;letter-spacing:0.3px;text-transform:uppercase;font-style:normal;">auto</span>`
+      : '';
     const cells = months.map(m => {
       const v = r.nets[m.period];
       const isNeg = (v || 0) < 0;
-      return `<td style="padding:4px 6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;color:${isNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtCell(v)}</td>`;
+      return `<td style="padding:4px 6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;color:${isNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};${isAuto ? 'font-style:italic;' : ''}">${fmtCell(v)}</td>`;
     }).join('');
     const total = r.total || 0;
     const totalNeg = total < 0;
     return `
       <tr style="border-bottom:1px solid var(--gray-100);">
-        <td style="padding:5px 8px 5px ${padLeft}px;font-size:0.84rem;color:var(--gray-700);position:sticky;left:0;background:#fff;border-right:1px solid var(--gray-200);min-width:280px;">${escapeHtml(r.label)}</td>
+        <td style="padding:5px 8px 5px ${padLeft}px;font-size:0.84rem;color:var(--gray-700);position:sticky;left:0;background:#fff;border-right:1px solid var(--gray-200);min-width:280px;${labelStyle}">${escapeHtml(r.label)}${autoTag}</td>
         ${cells}
-        <td style="padding:5px 6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;background:var(--gray-50);border-left:1px solid var(--gray-200);color:${totalNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};">${fmtCell(total)}</td>
+        <td style="padding:5px 6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;background:var(--gray-50);border-left:1px solid var(--gray-200);color:${totalNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};${isAuto ? 'font-style:italic;' : ''}">${fmtCell(total)}</td>
       </tr>
     `;
   }
   function renderSubtotal(r) {
     const padLeft = r.level === 0 ? 10 : r.level === 1 ? 10 : 28;
     const fontSize = r.level === 0 ? '0.9rem' : r.level === 1 ? '0.86rem' : '0.84rem';
-    const fontWeight = r.level === 0 || r.accent ? 700 : 600;
-    const topBorder = r.level === 0 ? '2px solid var(--gray-700)' : r.level === 1 ? '1.5px solid var(--gray-400)' : '1px solid var(--gray-300)';
-    const bottomBorder = r.level === 0 ? '2px double var(--gray-700)' : 'none';
-    const bg = r.level === 0 ? 'var(--blue-50, #eff6ff)' : r.level === 1 ? 'var(--gray-50)' : 'transparent';
-    const labelColor = r.level === 0 ? 'var(--blue-700, #1d4ed8)' : 'var(--gray-900, #111827)';
+    const fontWeight = r.level === 0 || r.accent || r.warning ? 700 : 600;
+    // Warning rows (e.g. "⚠ Out of balance") use a red-tinted treatment
+    // regardless of level so they can't be mistaken for a normal subtotal.
+    const topBorder = r.warning ? '2px solid var(--red-600,#c62828)'
+      : r.level === 0 ? '2px solid var(--gray-700)'
+      : r.level === 1 ? '1.5px solid var(--gray-400)'
+      : '1px solid var(--gray-300)';
+    const bottomBorder = r.warning ? '2px solid var(--red-600,#c62828)'
+      : r.level === 0 ? '2px double var(--gray-700)'
+      : 'none';
+    const bg = r.warning ? '#fef2f2'
+      : r.level === 0 ? 'var(--blue-50, #eff6ff)'
+      : r.level === 1 ? 'var(--gray-50)'
+      : 'transparent';
+    const labelColor = r.warning ? 'var(--red-700,#b91c1c)'
+      : r.level === 0 ? 'var(--blue-700, #1d4ed8)'
+      : 'var(--gray-900, #111827)';
+    const noteAttr = r.note ? ` title="${escapeHtml(r.note)}"` : '';
     const cells = months.map(m => {
       const v = r.nets[m.period];
       const isNeg = (v || 0) < 0;
-      return `<td style="padding:6px;text-align:right;font-variant-numeric:tabular-nums;font-size:${fontSize};font-weight:${fontWeight};border-top:${topBorder};border-bottom:${bottomBorder};background:${bg};color:${isNeg ? 'var(--red-600,#c62828)' : labelColor};">${fmtCell(v)}</td>`;
+      const valColor = r.warning ? 'var(--red-700,#b91c1c)' : (isNeg ? 'var(--red-600,#c62828)' : labelColor);
+      return `<td style="padding:6px;text-align:right;font-variant-numeric:tabular-nums;font-size:${fontSize};font-weight:${fontWeight};border-top:${topBorder};border-bottom:${bottomBorder};background:${bg};color:${valColor};">${fmtCell(v)}</td>`;
     }).join('');
+    const totalColor = r.warning ? 'var(--red-700,#b91c1c)' : ((r.total || 0) < 0 ? 'var(--red-600,#c62828)' : labelColor);
     return `
       <tr>
-        <td style="padding:6px 8px 6px ${padLeft}px;font-size:${fontSize};font-weight:${fontWeight};color:${labelColor};border-top:${topBorder};border-bottom:${bottomBorder};background:${bg};position:sticky;left:0;border-right:1px solid var(--gray-200);min-width:280px;">${escapeHtml(r.label)}</td>
+        <td${noteAttr} style="padding:6px 8px 6px ${padLeft}px;font-size:${fontSize};font-weight:${fontWeight};color:${labelColor};border-top:${topBorder};border-bottom:${bottomBorder};background:${bg};position:sticky;left:0;border-right:1px solid var(--gray-200);min-width:280px;">${escapeHtml(r.label)}</td>
         ${cells}
-        <td style="padding:6px;text-align:right;font-variant-numeric:tabular-nums;font-size:${fontSize};font-weight:${fontWeight};border-top:${topBorder};border-bottom:${bottomBorder};background:${bg};border-left:1px solid var(--gray-300);color:${(r.total || 0) < 0 ? 'var(--red-600,#c62828)' : labelColor};">${fmtCell(r.total)}</td>
+        <td style="padding:6px;text-align:right;font-variant-numeric:tabular-nums;font-size:${fontSize};font-weight:${fontWeight};border-top:${topBorder};border-bottom:${bottomBorder};background:${bg};border-left:1px solid var(--gray-300);color:${totalColor};">${fmtCell(r.total)}</td>
       </tr>
     `;
   }

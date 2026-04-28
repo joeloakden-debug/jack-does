@@ -5860,6 +5860,22 @@ function buildStatements(snapshot, dimensions, accountsMap) {
       displayedRows.push({ ...r, nets: flipped, total: round2(total) });
     }
 
+    // ---- Pre-compute current-year-earnings per period for the BS ----
+    // Net income for each period = sum of all displayed IS rows for that
+    // period. We inject this into the equity section as a synthetic row so
+    // the BS actually balances against the IS — current year P&L has to land
+    // in equity for Assets = Liab + Equity to hold.
+    const IS_BUCKETS = new Set(['revenue','cost_of_sales','operating_expense','other_income','other_expense','tax_expense','is_other']);
+    const cyEarningsByPeriod = {};
+    for (const m of months) cyEarningsByPeriod[m.period] = 0;
+    for (const r of displayedRows) {
+      if (!IS_BUCKETS.has(r.bucket)) continue;
+      for (const m of months) {
+        cyEarningsByPeriod[m.period] = round2((cyEarningsByPeriod[m.period] || 0) + (r.nets[m.period] || 0));
+      }
+    }
+    const hasCYEarnings = Object.values(cyEarningsByPeriod).some(v => Math.abs(v) > 0.005);
+
     // ---- Build the BS row list ----
     const bsRows = [];
     function pushPeriodSums(target, source) {
@@ -5922,10 +5938,13 @@ function buildStatements(snapshot, dimensions, accountsMap) {
       pushSubtotal(bsRows, 'Total assets', totalAssets, 1, true);
     }
 
-    // Major group: Liabilities and Equity
+    // Major group: Liabilities and Equity. Open this section when there's
+    // any liability/equity row OR when the IS has activity (the synthetic
+    // current-year-earnings row needs an Equity section to live in even
+    // when no real equity GL accounts have been mapped).
     const lEqSubtypes = BS_LAYOUT[1].subtypes;
     let anyLE = false;
-    if (lEqSubtypes.some(s => rowsByBucket(s.subtype).length)) {
+    if (lEqSubtypes.some(s => rowsByBucket(s.subtype).length) || hasCYEarnings) {
       pushHeader(bsRows, BS_LAYOUT[1].groupLabel, 1);
       // Liabilities first
       const liabSubtypes = lEqSubtypes.filter(s => s.subtype !== 'equity');
@@ -5947,15 +5966,33 @@ function buildStatements(snapshot, dimensions, accountsMap) {
       if (anyLiab) {
         pushSubtotal(bsRows, 'Total liabilities', liabRunning, 1);
       }
-      // Equity
+      // Equity — real GL-mapped equity rows + synthetic current-year
+      // earnings line so the BS actually balances against the IS.
       const equityRows = rowsByBucket('equity');
-      if (equityRows.length) {
+      if (equityRows.length || hasCYEarnings) {
         anyLE = true;
         pushHeader(bsRows, 'Equity', 2);
         const equitySection = emptyPeriods();
         for (const r of equityRows) {
           pushData(bsRows, r, 3);
           pushPeriodSums(equitySection, r.nets);
+        }
+        if (hasCYEarnings) {
+          // Synthetic, auto-computed from the IS. Marked isAuto so the
+          // frontend can render it differently (italic, "auto" tag) and
+          // make clear that no GL account maps to it.
+          let cyTotal = 0;
+          for (const m of months) cyTotal += (cyEarningsByPeriod[m.period] || 0);
+          bsRows.push({
+            kind: 'data',
+            label: 'Current year earnings',
+            nets: { ...cyEarningsByPeriod },
+            total: round2(cyTotal),
+            level: 3,
+            isAuto: true,
+            note: 'Auto-computed = sum of income-statement rows for the period. Cannot be mapped to a GL account.',
+          });
+          pushPeriodSums(equitySection, cyEarningsByPeriod);
         }
         pushSubtotal(bsRows, 'Total equity', equitySection, 2);
         pushPeriodSums(equityRunning, equitySection);
@@ -5965,6 +6002,36 @@ function buildStatements(snapshot, dimensions, accountsMap) {
         pushPeriodSums(tle, liabRunning);
         pushPeriodSums(tle, equityRunning);
         pushSubtotal(bsRows, 'Total liabilities and equity', tle, 1, true);
+
+        // Balance check: Assets vs L+E. With the synthetic CY earnings row
+        // these should match unless the user has misclassified rows (e.g.
+        // a liability mapped to an option with no subtype, which gets
+        // bucketed as bs_other and shows up under Assets). Surface the
+        // delta as a warning row so any mismatch is loud.
+        if (anyAsset) {
+          const totalAssets = emptyPeriods();
+          pushPeriodSums(totalAssets, assetsRunning);
+          pushPeriodSums(totalAssets, bsOtherRunning);
+          const diff = emptyPeriods();
+          let anyDiff = false;
+          for (const m of months) {
+            const d = round2((totalAssets[m.period] || 0) - (tle[m.period] || 0));
+            diff[m.period] = d;
+            if (Math.abs(d) > 0.5) anyDiff = true;
+          }
+          if (anyDiff) {
+            let yt = 0; for (const m of months) yt += (diff[m.period] || 0);
+            bsRows.push({
+              kind: 'subtotal',
+              label: '⚠ Out of balance (Assets − L&E)',
+              nets: diff,
+              total: round2(yt),
+              level: 1,
+              warning: true,
+              note: 'Non-zero means some accounts are misclassified — usually liabilities or equity items mapped to options without a subtype, which fall into "Other (uncategorized BS)" and get treated as assets. Set the section on those options on the Dimensions tab.',
+            });
+          }
+        }
       }
     }
 
