@@ -5985,12 +5985,16 @@ function buildStatements(snapshot, dimensions, accountsMap) {
           for (const m of months) cyTotal += (cyEarningsByPeriod[m.period] || 0);
           bsRows.push({
             kind: 'data',
-            label: 'Current year earnings',
+            label: 'Retained Earnings - Current Year',
             nets: { ...cyEarningsByPeriod },
             total: round2(cyTotal),
             level: 3,
+            // Computed from the IS rather than mapped from a GL account, so
+            // we don't expose it as a clickable/editable line. Frontend used
+            // to surface this with an "AUTO" pill — removed for the
+            // audit-grade look. The flag stays on the row in case a later
+            // export needs to skip it from mapping-validation passes.
             isAuto: true,
-            note: 'Auto-computed = sum of income-statement rows for the period. Cannot be mapped to a GL account.',
           });
           pushPeriodSums(equitySection, cyEarningsByPeriod);
         }

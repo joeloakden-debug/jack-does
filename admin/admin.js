@@ -5263,7 +5263,10 @@ function drawStatements() {
 // (running tally with top border + extra weight at lower levels). Indent
 // is driven by `level` (1 = major, 2 = section, 3 = data line).
 function renderHierarchicalStatement(title, rows, months) {
-  const colWidth = 96;
+  // Uniform width across every period column AND the FY total — keeps the
+  // statement visually steady when scanning across periods, and matches
+  // how audited statements typically render comparative columns.
+  const colWidth = 92;
   if (!rows.length) {
     return `
       <details open style="margin-bottom:16px;border:1px solid var(--gray-200);border-radius:8px;background:#fff;">
@@ -5273,9 +5276,9 @@ function renderHierarchicalStatement(title, rows, months) {
     `;
   }
   const monthHeaders = months.map(m =>
-    `<th style="padding:6px;font-size:0.74rem;font-weight:500;color:var(--gray-600);text-align:right;min-width:${colWidth}px;background:var(--gray-50);">${escapeHtml(m.label)}</th>`
+    `<th style="padding:6px 8px;font-size:0.74rem;font-weight:500;color:var(--gray-600);text-align:right;width:${colWidth}px;background:var(--gray-50);">${escapeHtml(m.label)}</th>`
   ).join('');
-  const yearTotalHeader = `<th style="padding:6px;font-size:0.74rem;font-weight:500;color:var(--gray-700);text-align:right;min-width:110px;background:var(--gray-100);border-left:1px solid var(--gray-300);">FY total</th>`;
+  const yearTotalHeader = `<th style="padding:6px 8px;font-size:0.74rem;font-weight:500;color:var(--gray-700);text-align:right;width:${colWidth}px;background:var(--gray-100);border-left:1px solid var(--gray-300);">FY total</th>`;
 
   function renderHeader(r) {
     const level = r.level;
@@ -5296,26 +5299,18 @@ function renderHierarchicalStatement(title, rows, months) {
   }
   function renderData(r) {
     const padLeft = r.level === 3 ? 46 : r.level === 2 ? 28 : 10;
-    // Synthetic auto-computed rows (e.g. "Current year earnings" injected
-    // into the equity section) get an italic label + a small "auto" tag
-    // so the user can see it's not a mapped GL account.
-    const isAuto = !!r.isAuto;
-    const labelStyle = isAuto ? 'font-style:italic;color:var(--gray-600);' : '';
-    const autoTag = isAuto
-      ? `<span title="${escapeHtml(r.note || 'Auto-computed — not mapped to a GL account')}" style="margin-left:6px;font-size:0.66rem;font-weight:600;color:var(--blue-700,#1d4ed8);background:var(--blue-50,#eff6ff);padding:1px 6px;border-radius:3px;letter-spacing:0.3px;text-transform:uppercase;font-style:normal;">auto</span>`
-      : '';
     const cells = months.map(m => {
       const v = r.nets[m.period];
       const isNeg = (v || 0) < 0;
-      return `<td style="padding:4px 6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;color:${isNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};${isAuto ? 'font-style:italic;' : ''}">${fmtCell(v)}</td>`;
+      return `<td style="padding:4px 8px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;color:${isNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};width:${colWidth}px;">${fmtCell(v)}</td>`;
     }).join('');
     const total = r.total || 0;
     const totalNeg = total < 0;
     return `
       <tr style="border-bottom:1px solid var(--gray-100);">
-        <td style="padding:5px 8px 5px ${padLeft}px;font-size:0.84rem;color:var(--gray-700);position:sticky;left:0;background:#fff;border-right:1px solid var(--gray-200);min-width:280px;${labelStyle}">${escapeHtml(r.label)}${autoTag}</td>
+        <td style="padding:5px 8px 5px ${padLeft}px;font-size:0.84rem;color:var(--gray-700);position:sticky;left:0;background:#fff;border-right:1px solid var(--gray-200);min-width:280px;">${escapeHtml(r.label)}</td>
         ${cells}
-        <td style="padding:5px 6px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;background:var(--gray-50);border-left:1px solid var(--gray-200);color:${totalNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};${isAuto ? 'font-style:italic;' : ''}">${fmtCell(total)}</td>
+        <td style="padding:5px 8px;text-align:right;font-variant-numeric:tabular-nums;font-size:0.82rem;background:var(--gray-50);border-left:1px solid var(--gray-200);color:${totalNeg ? 'var(--red-600,#c62828)' : 'var(--gray-700)'};width:${colWidth}px;">${fmtCell(total)}</td>
       </tr>
     `;
   }
@@ -5369,7 +5364,7 @@ function renderHierarchicalStatement(title, rows, months) {
         <table style="border-collapse:collapse;font-size:0.82rem;width:max-content;min-width:100%;">
           <thead>
             <tr>
-              <th style="padding:8px 10px;text-align:left;position:sticky;left:0;background:var(--gray-50);border-right:1px solid var(--gray-200);min-width:280px;z-index:1;">line</th>
+              <th style="padding:8px 10px;text-align:left;position:sticky;left:0;background:var(--gray-50);border-right:1px solid var(--gray-200);min-width:280px;z-index:1;">&nbsp;</th>
               ${monthHeaders}
               ${yearTotalHeader}
             </tr>
