@@ -5760,6 +5760,24 @@ const IS_LAYOUT = [
   { subtype: 'tax_expense',       header: 'Tax',                subtotalLabel: 'Total tax', keystoneAfter: null },
 ];
 
+// Net-income contribution sign per IS section. Audit-style display shows
+// every line and section subtotal as a natural positive figure (revenue
+// positive after flipping; expenses positive when in their normal debit
+// balance). The keystone math — Gross profit, Operating income, Net income
+// — has to subtract expenses from revenue, so we apply this sign when
+// rolling section totals into the running net-income tally. is_other items
+// are by definition misclassified; +1 is a best guess until the user
+// resolves them on the dimensions tab.
+const IS_SECTION_SIGNS = {
+  revenue: +1,
+  other_income: +1,
+  cost_of_sales: -1,
+  operating_expense: -1,
+  other_expense: -1,
+  tax_expense: -1,
+  is_other: +1,
+};
+
 function round2(v) { return Math.round(v * 100) / 100; }
 
 /**
@@ -5833,16 +5851,15 @@ function buildStatements(snapshot, dimensions, accountsMap) {
       }
     }
 
-    // Flip signs for display. BS: only credit-natured subtypes flip.
-    // IS: every line flips (revenue's credit balance becomes positive,
-    // expenses' debit balance becomes the bracketed deduction). After
-    // this transform, "displayed" values across an FY sum cleanly to the
-    // expected subtotals.
+    // Flip signs for display. Audit-style convention: revenue and other-
+    // income flip (credit-natural TB-net becomes positive); expenses stay
+    // un-flipped so they read as positive when in their normal debit
+    // balance and as negative when unexpectedly in a credit position
+    // (e.g. a refund or vendor credit). BS credit-natural subtypes flip
+    // (liab/equity); BS debit-natural subtypes (assets, bs_other) don't.
+    // The sign math for keystones (Gross profit, Operating income, Net
+    // income) is handled separately via IS_SECTION_SIGNS.
     function flipForDisplay(bucket, signedNet) {
-      const isIS = bucket === 'is_other'
-        || ['revenue','cost_of_sales','operating_expense','other_income','other_expense','tax_expense'].includes(bucket);
-      if (isIS) return -signedNet;
-      // BS: flip only credit-natural subtypes; assets and "bs_other" stay as-is.
       if (CREDIT_NATURAL_SUBTYPES.has(bucket)) return -signedNet;
       return signedNet;
     }
@@ -5861,17 +5878,19 @@ function buildStatements(snapshot, dimensions, accountsMap) {
     }
 
     // ---- Pre-compute current-year-earnings per period for the BS ----
-    // Net income for each period = sum of all displayed IS rows for that
-    // period. We inject this into the equity section as a synthetic row so
-    // the BS actually balances against the IS — current year P&L has to land
-    // in equity for Assets = Liab + Equity to hold.
-    const IS_BUCKETS = new Set(['revenue','cost_of_sales','operating_expense','other_income','other_expense','tax_expense','is_other']);
+    // Net income for each period = Σ (sign × displayed IS row) where sign
+    // is +1 for revenue/other-income and −1 for the four expense buckets.
+    // (Display now shows expenses as positive figures, so the running NI
+    // has to subtract them rather than just sum the displayed row.) This
+    // value is what we inject as a synthetic equity row on the BS so
+    // Assets = Liab + Equity actually holds.
     const cyEarningsByPeriod = {};
     for (const m of months) cyEarningsByPeriod[m.period] = 0;
     for (const r of displayedRows) {
-      if (!IS_BUCKETS.has(r.bucket)) continue;
+      const sign = IS_SECTION_SIGNS[r.bucket];
+      if (sign === undefined) continue;
       for (const m of months) {
-        cyEarningsByPeriod[m.period] = round2((cyEarningsByPeriod[m.period] || 0) + (r.nets[m.period] || 0));
+        cyEarningsByPeriod[m.period] = round2((cyEarningsByPeriod[m.period] || 0) + sign * (r.nets[m.period] || 0));
       }
     }
     const hasCYEarnings = Object.values(cyEarningsByPeriod).some(v => Math.abs(v) > 0.005);
@@ -6041,7 +6060,15 @@ function buildStatements(snapshot, dimensions, accountsMap) {
 
     // ---- Build the IS row list ----
     const isRows = [];
-    let isRunning = emptyPeriods(); // running net income (sum of all displayed IS rows so far)
+    let isRunning = emptyPeriods(); // running net income (sign-aware sum)
+    // Helper: roll a section's totals into isRunning with the section's
+    // contribution sign (+1 for revenue / other income, −1 for each
+    // expense bucket).
+    function rollIntoRunning(target, source, sign) {
+      for (const m of months) {
+        target[m.period] = round2((target[m.period] || 0) + sign * (source[m.period] || 0));
+      }
+    }
     for (const sec of IS_LAYOUT) {
       const rows = rowsByBucket(sec.subtype);
       if (rows.length) {
@@ -6052,7 +6079,7 @@ function buildStatements(snapshot, dimensions, accountsMap) {
           pushPeriodSums(sectionTotals, r.nets);
         }
         pushSubtotal(isRows, sec.subtotalLabel, sectionTotals, 2);
-        pushPeriodSums(isRunning, sectionTotals);
+        rollIntoRunning(isRunning, sectionTotals, IS_SECTION_SIGNS[sec.subtype] || +1);
       }
       if (sec.keystoneAfter) {
         // Even if this section was empty, we emit the keystone if any
@@ -6078,7 +6105,7 @@ function buildStatements(snapshot, dimensions, accountsMap) {
         pushPeriodSums(sectionTotals, r.nets);
       }
       pushSubtotal(isRows, 'Total other', sectionTotals, 2);
-      pushPeriodSums(isRunning, sectionTotals);
+      rollIntoRunning(isRunning, sectionTotals, IS_SECTION_SIGNS.is_other);
     }
     // Final net income — emit only if there were any IS rows at all.
     if (isRows.length) {
