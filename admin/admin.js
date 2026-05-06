@@ -22,6 +22,7 @@ let prepaidPreview = null; // cached preview for the current close period
 let accruedLiabState = { accruedLiabilitiesAccount: null, analysisRuns: [], materialityThreshold: 10 };
 let accruedLiabAnalysis = null; // latest analysis result for the panel
 let shiState = { shareholderLoanAccount: null, invoices: [] };
+let statementAnalyses = []; // array of summary records for the current client
 
 /**
  * Show a brief "settings saved ✓" confirmation next to a button.
@@ -1037,9 +1038,25 @@ async function loadClientFixedAssets() {
 
     renderAssetClasses();
     // Load module state — renderCloseSteps depends on all of these
-    await Promise.all([loadClientPrepaid(), loadClientAccruedLiab(), loadClientShareholderInvoices()]);
+    await Promise.all([loadClientPrepaid(), loadClientAccruedLiab(), loadClientShareholderInvoices(), loadStatementAnalyses()]);
     await renderFixedAssets();
   } catch (e) { console.error('Failed to load fixed assets:', e); }
+}
+
+// Load all statement analyses for the selected client. Cheap enough to
+// pull the full list (per-client) and let the step card filter by month
+// in-memory; the alternative (per-period filter on the server) would
+// require re-fetching every time the close period flips.
+async function loadStatementAnalyses() {
+  if (!selectedClientId) { statementAnalyses = []; return; }
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/statements`, { headers: { 'Authorization': getAuth() } });
+    const data = await res.json();
+    statementAnalyses = data.analyses || [];
+  } catch (e) {
+    console.error('Failed to load statement analyses:', e);
+    statementAnalyses = [];
+  }
 }
 
 function getAssetClass(asset) {
@@ -1231,6 +1248,38 @@ function buildCloseSteps(period) {
       meta: '',
     },
     (() => {
+      // Bank / credit-card statements — upload, analyze, review.
+      // Status uses the in-memory cache `statementAnalyses` populated by
+      // loadStatementAnalysesForPeriod() on render.
+      const all = statementAnalyses || [];
+      const forPeriod = all.filter(a => a.closeMonth === month);
+      const pending = forPeriod.filter(a => a.status === 'pending');
+      const approved = forPeriod.filter(a => a.status === 'approved');
+      const dismissed = forPeriod.filter(a => a.status === 'dismissed' || a.status === 'rejected');
+      let status, statusLabel, meta;
+      if (forPeriod.length === 0) {
+        status = 'ready';
+        statusLabel = 'upload bank or credit-card statements';
+        meta = '';
+      } else if (pending.length > 0) {
+        status = 'ready';
+        statusLabel = `${pending.length} statement${pending.length !== 1 ? 's' : ''} pending review`;
+        meta = `${approved.length} approved · ${dismissed.length} dismissed`;
+      } else {
+        status = 'complete';
+        statusLabel = `${approved.length} statement${approved.length !== 1 ? 's' : ''} processed`;
+        meta = dismissed.length > 0 ? `${dismissed.length} dismissed` : '';
+      }
+      return {
+        id: 'statements',
+        num: 2,
+        title: 'bank & credit card statements',
+        desc: 'upload statements for the period; jack analyzes each transaction and proposes journal entries.',
+        status, statusLabel, action: 'upload-statement', actionLabel: 'upload statement',
+        meta,
+      };
+    })(),
+    (() => {
       // Shareholder-paid invoices
       const shiConfigured = !!shiState.shareholderLoanAccount;
       const pendingInvoices = (shiState.invoices || []).filter(i => i.status === 'pending' && i.closeMonth === month);
@@ -1260,7 +1309,7 @@ function buildCloseSteps(period) {
       }
       return {
         id: 'shareholder-invoices',
-        num: 2,
+        num: 3,
         title: 'shareholder-paid invoices',
         desc: 'upload invoices paid by the shareholder personally. AI reads each invoice and suggests an expense.',
         status, statusLabel, action, actionLabel, meta,
@@ -1308,7 +1357,7 @@ function buildCloseSteps(period) {
       const canExport = status === 'complete';
       return {
         id: 'prepaid',
-        num: 3,
+        num: 4,
         title: 'prepaid expenses',
         desc: 'amortize prepaid expenses for the period.',
         status, statusLabel, action, actionLabel, meta,
@@ -1362,7 +1411,7 @@ function buildCloseSteps(period) {
       }
       return {
         id: 'accrued-liabilities',
-        num: 4,
+        num: 5,
         title: 'accrued liabilities',
         desc: 'analyze expense patterns and subsequent transactions to identify missing accruals.',
         status, statusLabel, action, actionLabel, meta,
@@ -1370,7 +1419,7 @@ function buildCloseSteps(period) {
     })(),
     {
       id: 'receivables',
-      num: 5,
+      num: 6,
       title: 'receivables & deferred revenues',
       desc: 'reconcile AR, defer unearned revenue, recognize earned revenue.',
       status: 'skipped',
@@ -1381,7 +1430,7 @@ function buildCloseSteps(period) {
     },
     {
       id: 'fixed-assets',
-      num: 6,
+      num: 7,
       title: 'fixed asset amortization',
       desc: 'compute monthly amortization, reconcile to QBO, post the journal entry.',
       status: runForThisMonth ? 'complete' : 'ready',
@@ -1399,7 +1448,7 @@ function buildCloseSteps(period) {
     },
     {
       id: 'income-taxes',
-      num: 7,
+      num: 8,
       title: 'current income taxes',
       desc: 'estimate and accrue current-period income tax expense.',
       status: 'skipped',
@@ -1410,7 +1459,7 @@ function buildCloseSteps(period) {
     },
     {
       id: 'reconciliation',
-      num: 8,
+      num: 9,
       title: 'overall reconciliation',
       desc: 'tie every module schedule back to the QBO trial balance.',
       status: 'skipped',
@@ -1421,7 +1470,7 @@ function buildCloseSteps(period) {
     },
     {
       id: 'export',
-      num: 9,
+      num: 10,
       title: 'export & review',
       desc: 'generate the Excel workbook and run a Claude review pass over it.',
       status: 'ready',
@@ -1436,7 +1485,7 @@ function buildCloseSteps(period) {
   // wait until the module steps above are complete (or skipped). Individual
   // module steps (prepaid, accrued liabilities, fixed assets) are independent
   // of each other and can be run in any order.
-  const moduleStepIds = new Set(['sync', 'shareholder-invoices', 'prepaid', 'accrued-liabilities', 'receivables', 'fixed-assets', 'income-taxes']);
+  const moduleStepIds = new Set(['sync', 'statements', 'shareholder-invoices', 'prepaid', 'accrued-liabilities', 'receivables', 'fixed-assets', 'income-taxes']);
   const allModulesDone = steps
     .filter(s => moduleStepIds.has(s.id))
     .every(s => s.status === 'complete' || s.status === 'skipped');
@@ -1649,6 +1698,8 @@ document.addEventListener('click', (e) => {
   const action = btn.dataset.stepAction;
   if (action === 'sync') {
     autoSyncAndImportFromQbo().then(() => { currentClosePeriod = null; renderCloseSteps(); });
+  } else if (action === 'upload-statement') {
+    openStatementUploadModal();
   } else if (action === 'run-amort') {
     openRunAmortization();
   } else if (action === 'analyze-accrued-liab') {
@@ -5465,6 +5516,210 @@ document.getElementById('btn-pull-tb')?.addEventListener('click', async () => {
   } finally {
     btn.disabled = false;
     btn.textContent = originalLabel;
+  }
+});
+
+// ========================================
+// BANK / CC STATEMENT UPLOAD + REVIEW MODAL
+// ========================================
+function setStatementModalStatus(msg, kind) {
+  const el = document.getElementById('statement-modal-status');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = kind === 'error' ? 'var(--red-600,#c62828)'
+    : kind === 'success' ? 'var(--green-600)'
+    : 'var(--gray-500)';
+}
+
+async function openStatementUploadModal() {
+  if (!selectedClientId) return;
+  const periodEl = document.getElementById('statement-modal-period');
+  if (periodEl) periodEl.textContent = currentClosePeriod?.month
+    ? `· ${formatPeriodLabel(currentClosePeriod.month)}`
+    : '';
+  setStatementModalStatus('');
+  document.getElementById('statement-modal').style.display = 'flex';
+  await loadStatementAnalyses();
+  renderStatementModalBody();
+}
+
+function closeStatementModal() {
+  document.getElementById('statement-modal').style.display = 'none';
+}
+
+function renderStatementModalBody() {
+  const body = document.getElementById('statement-modal-body');
+  if (!body) return;
+  const month = currentClosePeriod?.month;
+  const forPeriod = (statementAnalyses || []).filter(a => a.closeMonth === month);
+  if (forPeriod.length === 0) {
+    body.innerHTML = `
+      <div class="empty-state" style="padding:24px;">
+        <p>no statements uploaded for this period yet</p>
+        <span>click "upload statement" above. PDF, CSV, Excel, or image files are accepted.</span>
+      </div>
+    `;
+    return;
+  }
+  body.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:0.85rem;margin-top:12px;">
+      <thead>
+        <tr style="border-bottom:1px solid var(--gray-200);text-align:left;">
+          <th style="padding:8px 6px;">file</th>
+          <th style="padding:8px 6px;">type</th>
+          <th style="padding:8px 6px;">vendor / institution</th>
+          <th style="padding:8px 6px;text-align:right;">total</th>
+          <th style="padding:8px 6px;text-align:right;">entries</th>
+          <th style="padding:8px 6px;">status</th>
+          <th style="padding:8px 6px;">uploaded</th>
+          <th style="padding:8px 6px;"></th>
+        </tr>
+      </thead>
+      <tbody>
+        ${forPeriod.map(a => `
+          <tr style="border-bottom:1px solid var(--gray-100);">
+            <td style="padding:8px 6px;">${escapeHtml(a.fileName)}</td>
+            <td style="padding:8px 6px;color:var(--gray-600);">${escapeHtml(a.documentType || '')}</td>
+            <td style="padding:8px 6px;">${escapeHtml(a.vendor || '')}</td>
+            <td style="padding:8px 6px;text-align:right;font-variant-numeric:tabular-nums;">${a.totalAmount != null ? fmtMoney(a.totalAmount) : ''}</td>
+            <td style="padding:8px 6px;text-align:right;">${a.entryCount}</td>
+            <td style="padding:8px 6px;">${escapeHtml(a.status)}</td>
+            <td style="padding:8px 6px;color:var(--gray-500);font-size:0.78rem;">${formatDate(a.createdAt)}</td>
+            <td style="padding:8px 6px;text-align:right;white-space:nowrap;">
+              <button class="btn-edit-client" data-statement-view="${a.id}">view</button>
+              <button class="btn-edit-client" data-statement-dismiss="${a.id}" ${a.status === 'dismissed' ? 'disabled' : ''}>dismiss</button>
+              <button class="btn-edit-client" data-statement-delete="${a.id}" style="color:var(--red-600,#c62828);">delete</button>
+            </td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+    <div id="statement-detail-panel" style="margin-top:16px;"></div>
+  `;
+  body.querySelectorAll('[data-statement-view]').forEach(b =>
+    b.addEventListener('click', () => viewStatementDetail(b.dataset.statementView)));
+  body.querySelectorAll('[data-statement-dismiss]').forEach(b =>
+    b.addEventListener('click', () => updateStatementStatus(b.dataset.statementDismiss, 'dismissed')));
+  body.querySelectorAll('[data-statement-delete]').forEach(b =>
+    b.addEventListener('click', () => deleteStatement(b.dataset.statementDelete)));
+}
+
+async function viewStatementDetail(analysisId) {
+  const panel = document.getElementById('statement-detail-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div style="color:var(--gray-500);font-size:0.85rem;padding:8px;">loading…</div>';
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/statements/${analysisId}`, {
+      headers: { 'Authorization': getAuth() },
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    const data = await res.json();
+    const a = data.record?.analysis || {};
+    const entries = Array.isArray(a.entries) ? a.entries : [];
+    panel.innerHTML = `
+      <div style="border:1px solid var(--gray-200);border-radius:8px;padding:14px 16px;background:var(--gray-50);">
+        <div style="display:flex;justify-content:space-between;align-items:start;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
+          <div>
+            <div style="font-weight:600;font-size:0.92rem;">${escapeHtml(data.record.fileName)}</div>
+            <div style="font-size:0.82rem;color:var(--gray-600);">${escapeHtml(a.documentType || '')}${a.vendor ? ' · ' + escapeHtml(a.vendor) : ''}${a.date ? ' · ' + escapeHtml(a.date) : ''}</div>
+          </div>
+          <div style="font-size:0.82rem;color:var(--gray-700);">total: <strong>${a.totalAmount != null ? fmtMoney(a.totalAmount) : '—'}</strong> ${a.currency ? escapeHtml(a.currency) : ''} · confidence <strong>${escapeHtml(a.confidence || '—')}</strong></div>
+        </div>
+        ${a.summary ? `<p style="font-size:0.85rem;color:var(--gray-700);margin:0 0 10px;">${escapeHtml(a.summary)}</p>` : ''}
+        ${(Array.isArray(a.needsReview) && a.needsReview.length) ? `
+          <div style="background:#fffbeb;border:1px solid #f59e0b;border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:0.82rem;">
+            <strong>needs review:</strong>
+            <ul style="margin:4px 0 0 18px;">${a.needsReview.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>
+          </div>` : ''}
+        <h4 style="font-size:0.82rem;margin:8px 0 4px;color:var(--gray-700);">proposed journal entries (${entries.length})</h4>
+        ${entries.map((e, idx) => `
+          <div style="border:1px solid var(--gray-200);border-radius:6px;background:#fff;padding:8px 10px;margin-bottom:6px;">
+            <div style="font-size:0.78rem;color:var(--gray-600);margin-bottom:4px;">${escapeHtml(e.type || 'journal_entry')} · ${escapeHtml(e.date || '')} · ${escapeHtml(e.memo || '')}</div>
+            <table style="width:100%;font-size:0.82rem;border-collapse:collapse;">
+              <thead><tr style="text-align:left;"><th style="padding:2px 6px;">account</th><th style="padding:2px 6px;text-align:right;">debit</th><th style="padding:2px 6px;text-align:right;">credit</th></tr></thead>
+              <tbody>
+                ${(e.lines || []).map(l => `
+                  <tr>
+                    <td style="padding:2px 6px;">${escapeHtml(l.accountName || '')}${l.accountId ? ` <span style="color:var(--gray-500);font-size:0.74rem;">#${escapeHtml(l.accountId)}</span>` : ''}</td>
+                    <td style="padding:2px 6px;text-align:right;font-variant-numeric:tabular-nums;">${l.type === 'debit' ? fmtMoney(l.amount) : ''}</td>
+                    <td style="padding:2px 6px;text-align:right;font-variant-numeric:tabular-nums;">${l.type === 'credit' ? fmtMoney(l.amount) : ''}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        `).join('')}
+        <p style="font-size:0.78rem;color:var(--gray-500);margin:8px 0 0;">posting these entries to QuickBooks is not wired in this build. that step lands once the statement-specific business rules are in place.</p>
+      </div>
+    `;
+  } catch (e) {
+    panel.innerHTML = `<div style="color:var(--red-600,#c62828);font-size:0.85rem;padding:8px;">failed to load: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function updateStatementStatus(analysisId, status) {
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/statements/${analysisId}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ status }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    await loadStatementAnalyses();
+    renderStatementModalBody();
+    renderCloseSteps();
+    setStatementModalStatus(`marked ${status}`, 'success');
+  } catch (e) {
+    setStatementModalStatus('failed: ' + e.message, 'error');
+  }
+}
+
+async function deleteStatement(analysisId) {
+  if (!confirm('Delete this analysis? The uploaded file is kept on disk but the analysis record is removed.')) return;
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/statements/${analysisId}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': getAuth() },
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    await loadStatementAnalyses();
+    renderStatementModalBody();
+    renderCloseSteps();
+  } catch (e) {
+    setStatementModalStatus('delete failed: ' + e.message, 'error');
+  }
+}
+
+document.getElementById('statement-modal-close')?.addEventListener('click', closeStatementModal);
+document.getElementById('statement-upload-input')?.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  if (!file || !selectedClientId) return;
+  const closeMonth = currentClosePeriod?.month || '';
+  setStatementModalStatus(`uploading & analyzing ${file.name}…`);
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('closeMonth', closeMonth);
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/statements/upload-and-analyze`, {
+      method: 'POST',
+      headers: { 'Authorization': getAuth() },
+      body: fd,
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || res.statusText);
+    }
+    const data = await res.json();
+    setStatementModalStatus(`analyzed: ${data.analysis?.documentType || 'document'} · ${(data.analysis?.entries || []).length} entries`, 'success');
+    e.target.value = ''; // reset so the same file can be re-uploaded
+    await loadStatementAnalyses();
+    renderStatementModalBody();
+    // Auto-open the detail for what we just uploaded.
+    if (data.analysisId) viewStatementDetail(data.analysisId);
+    renderCloseSteps();
+  } catch (err) {
+    setStatementModalStatus('upload failed: ' + err.message, 'error');
+    e.target.value = '';
   }
 });
 

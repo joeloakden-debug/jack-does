@@ -605,6 +605,17 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
+// Statement analysis service — shared between portal and admin so future
+// business-logic changes (parsing rules, account-mapping heuristics) only
+// have to land in one place. Initialized after anthropic + qbo are ready.
+const statementAnalysis = require('./statement-analysis-service');
+statementAnalysis.init({
+  dataDir: DATA_DIR,
+  uploadsRoot: uploadsDir,
+  anthropic,
+  qbo,
+});
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const clientId = req.clientId || 'demo-client';
@@ -6169,6 +6180,117 @@ app.get('/api/admin/clients/:clientId/reporting/statements', requireAdmin, (req,
     primaryDimension: { id: dim1.id, name: dim1.name, optionCount: dim1.options.length },
     ...result,
   });
+});
+
+// ========================================
+// BANK / CC STATEMENTS — admin routes (uses statement-analysis-service)
+// ========================================
+// Multer config dedicated to admin statement uploads. Reads clientId from
+// the URL params (set by the route's :clientId), unlike the portal's
+// upload route which reads from req.clientId set by resolveClient.
+const adminStatementStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const clientId = req.params.clientId;
+    if (!clientId) return cb(new Error('clientId is required'));
+    const dir = path.join(uploadsDir, clientId, 'bank_statement');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    const ts = Date.now();
+    const ext = path.extname(file.originalname);
+    const name = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9-_]/g, '_');
+    cb(null, `${name}_${ts}${ext}`);
+  },
+});
+const adminStatementUpload = multer({
+  storage: adminStatementStorage,
+  limits: { fileSize: 25 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['.pdf', '.csv', '.xlsx', '.xls', '.jpg', '.jpeg', '.png'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowed.includes(ext)) cb(null, true);
+    else cb(new Error(`File type ${ext} not supported for statement upload`));
+  },
+});
+
+// Upload + analyze in one call so the admin's UX is "pick file → see
+// analysis." Two-step (upload then separately analyze) is overkill for
+// the workflow card and just adds latency.
+app.post('/api/admin/clients/:clientId/statements/upload-and-analyze', requireAdmin,
+  adminStatementUpload.single('file'),
+  async (req, res) => {
+    try {
+      const { clientId } = req.params;
+      if (!CLIENTS[clientId]) return res.status(404).json({ error: 'Client not found' });
+      if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+      const closeMonth = (req.body.closeMonth || '').trim() || null;
+      if (closeMonth && !/^\d{4}-\d{2}$/.test(closeMonth)) {
+        return res.status(400).json({ error: 'closeMonth must be YYYY-MM' });
+      }
+      const category = (req.body.category || 'bank_statement').toString();
+
+      const result = await statementAnalysis.analyzeFile({
+        clientId,
+        filePath: req.file.path,
+        fileName: req.file.originalname,
+        category,
+        closeMonth,
+      });
+      res.json({ success: true, analysisId: result.analysisId, analysis: result.analysis, record: result.record });
+    } catch (e) {
+      console.error('[statements] upload-and-analyze failed:', e.message);
+      const status = e.statusCode || 500;
+      res.status(status).json({ error: e.message, rawResponse: e.rawResponse });
+    }
+  }
+);
+
+// List statement analyses for a client. Optional ?closeMonth=YYYY-MM filter
+// scopes to a single close period — used by the workflow step card.
+app.get('/api/admin/clients/:clientId/statements', requireAdmin, (req, res) => {
+  const { clientId } = req.params;
+  if (!CLIENTS[clientId]) return res.status(404).json({ error: 'Client not found' });
+  const closeMonth = (req.query.closeMonth || '').trim() || null;
+  let analyses = statementAnalysis.listAnalyses(clientId);
+  if (closeMonth) analyses = analyses.filter(a => a.closeMonth === closeMonth);
+  res.json({ analyses });
+});
+
+// Full record (with analysis JSON + entries) for the review panel.
+app.get('/api/admin/clients/:clientId/statements/:analysisId', requireAdmin, (req, res) => {
+  const { clientId, analysisId } = req.params;
+  if (!CLIENTS[clientId]) return res.status(404).json({ error: 'Client not found' });
+  const rec = statementAnalysis.getAnalysis(clientId, analysisId);
+  if (!rec) return res.status(404).json({ error: 'Analysis not found' });
+  res.json({ record: rec });
+});
+
+// Status transitions — used by Dismiss / Mark approved buttons. Posting
+// the JE to QBO is intentionally not wired in this slice; that lives in
+// a follow-up once the user-defined business rules are in place.
+app.post('/api/admin/clients/:clientId/statements/:analysisId/status', requireAdmin, (req, res) => {
+  const { clientId, analysisId } = req.params;
+  if (!CLIENTS[clientId]) return res.status(404).json({ error: 'Client not found' });
+  const status = (req.body.status || '').trim();
+  try {
+    const rec = statementAnalysis.setStatus(clientId, analysisId, status);
+    if (!rec) return res.status(404).json({ error: 'Analysis not found' });
+    res.json({ success: true, record: rec });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Hard-delete (also drops it from the workflow). Use Dismiss instead when
+// you want to keep the audit trail.
+app.delete('/api/admin/clients/:clientId/statements/:analysisId', requireAdmin, (req, res) => {
+  const { clientId, analysisId } = req.params;
+  if (!CLIENTS[clientId]) return res.status(404).json({ error: 'Client not found' });
+  const ok = statementAnalysis.removeAnalysis(clientId, analysisId);
+  if (!ok) return res.status(404).json({ error: 'Analysis not found' });
+  res.json({ success: true });
 });
 
 // ========================================

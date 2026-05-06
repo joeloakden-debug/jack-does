@@ -447,6 +447,22 @@
           </div>
         </div>
       </div>
+
+      <!-- Bank / CC statement upload + review modal (close-step 2) -->
+      <div class="modal-overlay" id="statement-modal" style="display:none;align-items:stretch;justify-content:stretch;padding:0;">
+        <div class="modal-card" style="position:fixed;inset:24px;max-width:none;width:auto;height:auto;display:flex;flex-direction:column;padding:0;border-radius:8px;">
+          <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid var(--gray-200);background:var(--gray-50);border-radius:8px 8px 0 0;flex-wrap:wrap;">
+            <h3 style="margin:0;font-size:1rem;flex:1;">bank &amp; credit-card statements <span id="statement-modal-period" style="font-weight:400;color:var(--gray-500);font-size:0.85rem;"></span></h3>
+            <label class="btn-modal-save" style="cursor:pointer;margin:0;">
+              upload statement
+              <input type="file" id="statement-upload-input" accept=".pdf,.csv,.xlsx,.xls,.jpg,.jpeg,.png" style="display:none;">
+            </label>
+            <button class="btn-modal-cancel" id="statement-modal-close">close</button>
+          </div>
+          <div id="statement-modal-status" style="font-size:0.82rem;padding:8px 18px;min-height:1em;color:var(--gray-500);"></div>
+          <div id="statement-modal-body" style="flex:1;overflow:auto;padding:0 18px 18px;"></div>
+        </div>
+      </div>
     </div>
 
     <!-- Reporting view -->
