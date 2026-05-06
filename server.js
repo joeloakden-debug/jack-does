@@ -4941,166 +4941,56 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
     const memo = `Shareholder-paid invoice: ${invoice.analysis.vendor || invoice.fileName} — ${clientName}`;
 
     if (qbo.isConnected(clientId)) {
-      // Look up full account list to detect tax liability accounts
-      let allAccounts = [];
-      try {
-        const acctData = await qbo.getAccounts(clientId);
-        allAccounts = acctData?.QueryResponse?.Account || [];
-      } catch (e) { /* non-critical */ }
+      // Post the user-reviewed lines verbatim. The review UI shows the
+      // exact (account, amount) pairs that will land in QBO; the post
+      // must match what the user saw, including tax lines mapped to a
+      // tax-payable liability account (recoverable GST/HST input
+      // credits) and tax lines absorbed into an expense account
+      // (non-recoverable PST). We previously tried to detect tax lines
+      // by description, strip them, and let QBO auto-compute tax via
+      // a TaxCodeRef + GlobalTaxCalculation='TaxExcluded'. That fought
+      // user-edited amounts whenever QBO's rounding (e.g. $0.375 → $0.38)
+      // disagreed with the AI's rounding (→ $0.37), tripping the QBO
+      // tax engine's "Business Validation Error: encountered an error
+      // while calculating tax" reconciliation check. Posting with
+      // GlobalTaxCalculation='NotApplicable' opts out of QBO's
+      // recompute, so the GL impact is exactly the user-confirmed lines.
+      let allLines = jeLines.map(line => ({
+        accountId: line.accountId,
+        accountName: line.accountName,
+        description: line.description || invoice.analysis.description,
+        amount: Math.round(Number(line.amount) * 100) / 100,
+      }));
 
-      const taxLiabilityIds = new Set(
-        allAccounts
-          .filter(a => {
-            const sub = (a.AccountSubType || '').toLowerCase();
-            const name = (a.Name || '').toLowerCase();
-            return sub.includes('tax') || name.includes('gst') || name.includes('hst')
-              || name.includes('pst') || name.includes('tax payable');
-          })
-          .map(a => String(a.Id))
-      );
-
-      // Detect tax lines by BOTH account ID and line description/name.
-      // AI may map tax to a regular expense account but describe it as "GST", "PST (7%)", etc.
-      const TAX_DESC_RE = /\b(GST|HST|PST|QST|RST|sales\s*tax|tax\s*\(\d)/i;
-
-      const expenseLines = [];
-      const taxLines = []; // { type: 'gst'|'hst'|'pst', amount }
-      for (const line of jeLines) {
-        const amt = Math.round(Number(line.amount) * 100) / 100;
-        const desc = (line.description || line.accountName || '').toUpperCase();
-        const isTaxByAccount = taxLiabilityIds.has(String(line.accountId));
-        const isTaxByDesc = TAX_DESC_RE.test(line.description || '') || TAX_DESC_RE.test(line.accountName || '');
-
-        if (isTaxByAccount || isTaxByDesc) {
-          // Classify the tax type
-          let taxType = 'gst'; // default
-          if (/PST|QST|RST/i.test(desc)) taxType = 'pst';
-          else if (/HST/i.test(desc)) taxType = 'hst';
-          taxLines.push({ type: taxType, amount: amt, description: line.description });
-          console.log(`[shareholder-invoice] tax line detected (${taxType}): "${line.description}" $${amt}`);
-        } else {
-          expenseLines.push({
-            accountId: line.accountId,
-            accountName: line.accountName,
-            description: line.description || invoice.analysis.description,
-            amount: amt,
-          });
-        }
-      }
-
-      const totalTaxAmount = taxLines.reduce((s, t) => s + t.amount, 0);
-      const hasGST = taxLines.some(t => t.type === 'gst');
-      const hasHST = taxLines.some(t => t.type === 'hst');
-      const hasPST = taxLines.some(t => t.type === 'pst');
-      console.log(`[shareholder-invoice] tax summary: GST=${hasGST} HST=${hasHST} PST=${hasPST} total=$${totalTaxAmount}`);
-
-      // Find the appropriate QBO TaxCode based on which taxes are present
-      let taxCodeId = null;
-      if (totalTaxAmount > 0 && expenseLines.length > 0) {
-        try {
-          const tcData = await qbo.getTaxCodes(clientId);
-          const taxCodes = (tcData?.QueryResponse?.TaxCode || []).filter(tc => tc.Active !== false);
-          console.log('[shareholder-invoice] available tax codes:', taxCodes.map(tc => `${tc.Id}:${tc.Name}`).join(', '));
-
-          // Match tax code based on what taxes are on the invoice:
-          //   GST + PST → look for "GST/PST" combined code (e.g. "GST/PST BC")
-          //   HST       → look for "HST" code
-          //   GST only  → look for "GST" code
-          let matched = null;
-          const tcNames = taxCodes.map(tc => ({ ...tc, upper: (tc.Name || '').toUpperCase() }));
-
-          if (hasGST && hasPST) {
-            // Prefer combined GST/PST code
-            matched = tcNames.find(tc => tc.upper.includes('GST') && tc.upper.includes('PST'));
-            if (!matched) matched = tcNames.find(tc => tc.upper.includes('GST/PST'));
-          }
-          if (!matched && hasHST) {
-            matched = tcNames.find(tc => tc.upper.includes('HST') && !tc.upper.includes('PST'));
-          }
-          if (!matched && hasGST && !hasPST) {
-            // GST only — find a code that has GST but NOT PST
-            matched = tcNames.find(tc => tc.upper.includes('GST') && !tc.upper.includes('PST') && tc.upper !== 'NON');
-          }
-          // Fallback: any active non-exempt tax code
-          if (!matched) {
-            matched = tcNames.find(tc => tc.upper !== 'NON' && tc.upper !== 'EXEMPT');
-          }
-
-          if (matched) {
-            taxCodeId = String(matched.Id);
-            console.log(`[shareholder-invoice] selected tax code: ${matched.Name} (${taxCodeId})`);
-          }
-        } catch (e) {
-          console.error('[shareholder-invoice] failed to fetch tax codes:', e.message);
-        }
-
-        // Apply tax code to each expense line
-        if (taxCodeId) {
-          for (const line of expenseLines) {
-            line.taxCodeId = taxCodeId;
-          }
-        } else {
-          // No tax code found — absorb tax into expense lines proportionally
-          console.log('[shareholder-invoice] no tax code found, absorbing tax into expense lines');
-          const expTotal = expenseLines.reduce((s, l) => s + l.amount, 0);
-          for (const line of expenseLines) {
-            const share = expTotal > 0 ? line.amount / expTotal : 1 / expenseLines.length;
-            line.amount = Math.round((line.amount + totalTaxAmount * share) * 100) / 100;
-          }
-        }
-      }
-
-      // Guard: if every line was classified as tax (no real expense lines),
-      // refuse to fall back to posting the tax lines AS expenses — that
-      // would double the JE amount (once as expense, once as tax). Return
-      // a clear error so the user can fix the Claude analysis before post.
-      if (expenseLines.length === 0) {
-        if (taxLines.length > 0) {
-          return res.status(400).json({
-            error: 'Every line on the invoice was classified as tax (GST/HST/PST). ' +
-                   'At least one non-tax expense line is required before posting. ' +
-                   'Edit the analysis to reclassify lines, or post manually.',
-          });
-        }
-        // No expense and no tax lines either (truly empty) — still unusual.
-        return res.status(400).json({ error: 'No lines available to post.' });
-      }
-
-      // Consolidate lines with the same GL account into a single line
-      // to reduce noise in the GL (e.g. 4 lines all to "6100 Legal" → 1 line)
+      // Consolidate lines that share an account — e.g. PST mapped to
+      // the same expense account as the subscription line — into a
+      // single line so the GL stays clean.
       const consolidated = new Map();
-      for (const line of expenseLines) {
+      for (const line of allLines) {
         const key = String(line.accountId);
         if (consolidated.has(key)) {
           const existing = consolidated.get(key);
           existing.amount = Math.round((existing.amount + line.amount) * 100) / 100;
-          // Combine descriptions — use the overall invoice description if merging multiple
           if (line.description && !existing.descriptions.includes(line.description)) {
             existing.descriptions.push(line.description);
           }
         } else {
-          consolidated.set(key, {
-            ...line,
-            descriptions: [line.description || ''],
-          });
+          consolidated.set(key, { ...line, descriptions: [line.description || ''] });
         }
       }
-      // Replace expenseLines with consolidated version
-      expenseLines.length = 0;
-      for (const entry of consolidated.values()) {
-        // Use invoice-level description when multiple lines are merged
-        const desc = entry.descriptions.length > 1
+      allLines = Array.from(consolidated.values()).map(entry => ({
+        accountId: entry.accountId,
+        accountName: entry.accountName,
+        description: entry.descriptions.length > 1
           ? (invoice.analysis.description || entry.descriptions[0])
-          : entry.descriptions[0];
-        expenseLines.push({
-          accountId: entry.accountId,
-          accountName: entry.accountName,
-          description: desc,
-          amount: entry.amount,
-          taxCodeId: entry.taxCodeId || undefined,
-        });
+          : entry.descriptions[0],
+        amount: entry.amount,
+      }));
+
+      if (allLines.length === 0) {
+        return res.status(400).json({ error: 'No lines available to post.' });
       }
-      console.log(`[shareholder-invoice] consolidated to ${expenseLines.length} line(s)`);
+      console.log(`[shareholder-invoice] posting ${allLines.length} line(s) verbatim, total $${totalAmount}`);
 
       // Find or create the vendor in QBO
       let vendorRef = null;
@@ -5123,8 +5013,8 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
         accountType: c.shareholderLoanAccount.type || '',
         vendorId: vendorRef?.Id || null,
         vendorName: vendorRef?.DisplayName || vendorName || '',
-        lines: expenseLines,
-        globalTaxCalc: taxCodeId ? 'TaxExcluded' : 'NotApplicable',
+        lines: allLines,
+        globalTaxCalc: 'NotApplicable',
       }, clientId);
       const txnId = purchaseResult.Id;
 
