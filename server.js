@@ -4753,11 +4753,13 @@ IMPORTANT GUIDELINES:
 - For suggestedAccount, pick the best match from the chart of accounts list above. Use the exact account name.
 - Be specific about the expense category — don't just say "expense"
 
-TAX ACCOUNT MAPPING — IMPORTANT:
-- GST/HST is recoverable (input tax credit). suggestedAccount for GST/HST lines = the GST/HST Payable liability account from the chart (look for a name containing "GST/HST Payable" or "GST Payable" or "Sales Tax Payable").
-- PST / QST / RST is NON-RECOVERABLE in every Canadian province that levies it (BC, SK, MB, QC). It forms part of the cost of the underlying purchase. suggestedAccount for PST/QST/RST lines = the SAME account as the underlying expense it's taxed on, NOT a "PST Payable" account.
-  Example: if a $7.50 software subscription line maps to "6000 Software licenses", a PST line of $0.53 on the same purchase should ALSO map to "6000 Software licenses" — NOT to "PST Payable". The PST is part of the cost of the software.
-  This applies even if the chart of accounts contains a "PST Payable" account — that account is for sales-side PST collected, not purchase-side PST paid.
+TAX ACCOUNT MAPPING:
+- Each tax line (GST, HST, PST, QST, RST) should map to its corresponding tax-liability account from the chart of accounts so the user has clear visibility into each tax type paid.
+- GST/HST → look for an account named "GST/HST Payable", "GST Payable", or "Sales Tax Payable".
+- PST → look for "PST Payable" or similar (e.g. "PST (BC) Payable").
+- QST → look for "QST Payable".
+- If the chart doesn't have a specific PST Payable account, fall back to whatever liability account looks most appropriate (do NOT default it to the expense GL).
+- These suggestedAccount values are advisory; on post the server routes tax through QBO's configured tax accounts via the appropriate tax code, but the review UI uses them so the user can see at a glance how each tax line will land.
 
 Respond with ONLY a JSON object (no markdown, no explanation):
 {
@@ -4904,33 +4906,12 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/upload', requireAdmi
       }
     }
 
-    // Reassign PST/QST/RST lines to the same suggestedAccount as the
-    // underlying expense. These are non-recoverable in Canadian provinces
-    // (BC, SK, MB, QC) and form part of the cost of the purchase, so the
-    // accountant-correct treatment is to bake them into the expense GL.
-    // The AI sometimes defaults them to "PST Payable" — this safety net
-    // overrides that so the user doesn't have to re-map every invoice.
-    if (Array.isArray(analysis.lines) && analysis.lines.length > 1) {
-      const isPstShape = (s) => /\b(PST|QST|RST)\b/i.test(s || '');
-      const isAnyTaxShape = (s) => /\b(GST|HST|PST|QST|RST|sales\s*tax|tax\s*\(\d)/i.test(s || '');
-      const nonTaxLines = analysis.lines.filter(l => !isAnyTaxShape(l.description));
-      if (nonTaxLines.length > 0) {
-        // Largest non-tax line by absolute amount = the primary expense
-        // the PST is attached to. If there are multiple non-tax lines, we
-        // default to the largest; users can still override on the review UI.
-        const primary = nonTaxLines.reduce((a, b) =>
-          Math.abs(Number(b.amount) || 0) > Math.abs(Number(a.amount) || 0) ? b : a
-        );
-        if (primary.suggestedAccount) {
-          for (const line of analysis.lines) {
-            if (isPstShape(line.description) && line.suggestedAccount !== primary.suggestedAccount) {
-              console.log(`[shareholder-invoice] reassigning PST line "${line.description}" from "${line.suggestedAccount || '(unset)'}" to "${primary.suggestedAccount}" (underlying expense account)`);
-              line.suggestedAccount = primary.suggestedAccount;
-            }
-          }
-        }
-      }
-    }
+    // (Removed: previous PST-to-expense-GL reassignment. PST is now
+    // tracked in its own tax-liability account so the user can run
+    // reports on PST paid. The AI maps each tax line to a tax-payable
+    // account in the chart; the SHI post route strips ALL tax lines from
+    // Purchase.Line[] and routes them via TxnTaxDetail to QBO's
+    // configured tax accounts.)
 
     // Save the invoice record
     const invoice = {
@@ -5036,169 +5017,138 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
       );
 
       // Classify lines:
-      //   - recoverable tax (GST/HST going to a tax-payable account, OR a
-      //     line whose description matches GST/HST and lands on a tax-
-      //     payable account): strip from Line[]; QBO will recompute via
-      //     TaxCodeRef on the surviving expense lines.
-      //   - everything else (the underlying expense, plus PST/QST/RST
-      //     mapped to a regular expense account — non-recoverable tax,
-      //     baked into the cost of the expense): keep as a real Line[].
+      //   - tax line (recoverable GST/HST OR provincial PST/QST/RST): strip
+      //     from Line[]. The tax doesn't appear as a line on the Purchase;
+      //     instead it's declared in TxnTaxDetail and QBO routes the GL
+      //     impact via the tax code's configured payable accounts (e.g.
+      //     GST → 2300 GST/HST Payable, PST → PST Payable).
+      //   - everything else: keep as a real expense Line[]. The expense
+      //     line carries the combined TaxCodeRef so QBO knows which set of
+      //     rates the TxnTaxDetail applies to.
       //
-      // PST is intentionally NOT stripped: in Canadian provinces with PST
-      // (BC, SK, MB, QC), PST is non-recoverable and is baked into the
-      // cost of the purchase. The AI typically maps it to the same
-      // expense GL as the underlying line, which is the right accounting.
-      // We tag the PST line with an Out-of-Scope code so QBO's tax engine
-      // doesn't try to compute GST/HST on top of it.
+      // This shape gives the user clear visibility in QBO: the expense GL
+      // shows the pre-tax cost, and each tax appears in its own row in
+      // QBO's Sales Tax section, queryable by the standard QBO tax reports.
       const TAX_DESC_RE = /\b(GST|HST|PST|QST|RST|sales\s*tax|tax\s*\(\d)/i;
-      const isPstLikeDescription = (s) => /\b(PST|QST|RST)\b/i.test(s || '');
 
       const expenseLines = [];        // lines that will end up in QBO's Purchase.Line[]
-      const recoverableTaxLines = []; // GST/HST stripped lines (informational only)
+      const taxLines = [];            // { type: 'gst'|'hst'|'pst'|'qst'|'rst', amount, ratePct, description }
       for (const line of jeLines) {
         const amt = Math.round(Number(line.amount) * 100) / 100;
-        const desc = (line.description || line.accountName || '').toUpperCase();
+        const desc = (line.description || line.accountName || '');
+        const descUpper = desc.toUpperCase();
         const isTaxPayableAcct = taxLiabilityIds.has(String(line.accountId));
-        const hasTaxShape = TAX_DESC_RE.test(line.description || '') || TAX_DESC_RE.test(line.accountName || '');
-        const isPstShape = isPstLikeDescription(line.description) || isPstLikeDescription(line.accountName);
-        // Strip only when the line is recoverable GST/HST: either the
-        // account itself is a tax-payable AND the description is GST/HST
-        // (not PST), or the description is GST/HST regardless of account.
-        // PST mapped to a tax-payable account is unusual but we let it
-        // pass through as a normal line so the user's intent is preserved.
-        const isRecoverableTax = (isTaxPayableAcct && !isPstShape) || (hasTaxShape && !isPstShape);
-        if (isRecoverableTax) {
-          // Classify GST vs HST by the rate parsed from the description
-          // (5% → GST; 12%+ → HST). The AI often labels the line as
-          // "GST/HST (5%)" because the GL account is a combined "GST/HST
-          // Payable" — naïvely matching the substring "HST" in that
-          // label would pick the HST tax code and post the wrong rate
-          // (12-13%) to QBO. The rate digit is the unambiguous signal.
-          const rateMatch = (line.description || '').match(/(\d+(?:\.\d+)?)\s*%/);
+        const hasTaxShape = TAX_DESC_RE.test(desc) || TAX_DESC_RE.test(line.accountName || '');
+        if (isTaxPayableAcct || hasTaxShape) {
+          // Classify by description: provincial tax labels first, then by
+          // rate digit (5% → GST, 12-15% → HST), then by label substring.
+          const rateMatch = desc.match(/(\d+(?:\.\d+)?)\s*%/);
           const ratePct = rateMatch ? parseFloat(rateMatch[1]) : null;
-          let taxType;
-          if (ratePct !== null) {
-            taxType = ratePct >= 10 ? 'hst' : 'gst';
-          } else {
-            // No rate parsed — fall back to label words. Treat as HST
-            // only when HST appears in the description WITHOUT GST also
-            // present (avoids "GST/HST" being misread as HST).
-            taxType = (/\bHST\b/i.test(desc) && !/\bGST\b/i.test(desc)) ? 'hst' : 'gst';
-          }
-          recoverableTaxLines.push({ type: taxType, amount: amt, description: line.description });
-          console.log(`[shareholder-invoice] recoverable-tax line stripped (${taxType}, rate=${ratePct ?? 'unknown'}%): "${line.description}" $${amt}`);
+          let type;
+          if (/QST/i.test(descUpper)) type = 'qst';
+          else if (/PST/i.test(descUpper)) type = 'pst';
+          else if (/RST/i.test(descUpper)) type = 'rst';
+          else if (ratePct !== null && ratePct >= 10) type = 'hst';
+          else if (/HST/i.test(descUpper) && !/GST/i.test(descUpper)) type = 'hst';
+          else type = 'gst';
+          taxLines.push({ type, amount: amt, ratePct, description: line.description });
+          console.log(`[shareholder-invoice] tax line stripped (${type}, rate=${ratePct ?? 'unknown'}%): "${line.description}" $${amt}`);
         } else {
           expenseLines.push({
             accountId: line.accountId,
             accountName: line.accountName,
             description: line.description || invoice.analysis.description,
             amount: amt,
-            _isPst: isPstShape,
           });
         }
       }
 
-      const totalRecoverableTax = recoverableTaxLines.reduce((s, t) => s + t.amount, 0);
-      const hasGST = recoverableTaxLines.some(t => t.type === 'gst');
-      const hasHST = recoverableTaxLines.some(t => t.type === 'hst');
-      const hasPSTLine = expenseLines.some(l => l._isPst);
-      console.log(`[shareholder-invoice] tax summary: GST=${hasGST} HST=${hasHST} PST(in-expense)=${hasPSTLine} recoverable-total=$${totalRecoverableTax}`);
+      const totalTax = Math.round(taxLines.reduce((s, t) => s + t.amount, 0) * 100) / 100;
+      const hasGST = taxLines.some(t => t.type === 'gst');
+      const hasHST = taxLines.some(t => t.type === 'hst');
+      const hasPST = taxLines.some(t => t.type === 'pst');
+      const hasQST = taxLines.some(t => t.type === 'qst');
+      const hasRST = taxLines.some(t => t.type === 'rst');
+      console.log(`[shareholder-invoice] tax summary: GST=${hasGST} HST=${hasHST} PST=${hasPST} QST=${hasQST} RST=${hasRST} total=$${totalTax}`);
 
-      // Pick the QBO tax code(s) we need:
-      //   - primaryTaxCodeId: GST or HST for non-PST expense lines (drives
-      //     QBO's auto-recompute of the recoverable tax).
-      //   - exemptTaxCodeId: Out-of-Scope / Exempt / NON for PST lines so
-      //     QBO doesn't compute GST on top of them.
-      // Prefer single-tax codes (e.g. "GST") over combined codes ("GST/PST
-      // BC"), because the combined codes have configuration quirks in some
-      // QBO realms — error 6000 "encountered an error while calculating
-      // tax" fires even when GlobalTaxCalculation is correct.
+      // Pick the QBO tax code to apply on the expense line. Prefer the
+      // combined code when both GST/HST and provincial PST/QST/RST are
+      // present (e.g. "GST/PST BC", "GST/QST QC"), so QBO renders both
+      // tax fields side-by-side in the expense detail and routes each to
+      // its configured payable account.
       let primaryTaxCodeId = null;
       let primaryTaxCodeName = null;
-      let exemptTaxCodeId = null;
-      let exemptTaxCodeName = null;
-      if (expenseLines.length > 0 && (totalRecoverableTax > 0 || hasPSTLine)) {
+      const provincialPresent = hasPST || hasQST || hasRST;
+      const federalPresent = hasGST || hasHST;
+      if (expenseLines.length > 0 && totalTax > 0) {
         try {
           const tcData = await qbo.getTaxCodes(clientId);
           const taxCodes = (tcData?.QueryResponse?.TaxCode || [])
             .filter(tc => tc.Active !== false)
             .map(tc => ({ ...tc, upper: (tc.Name || '').toUpperCase() }));
-          // Single GST/HST code first.
           let matched = null;
-          if (hasHST) {
-            matched = taxCodes.find(tc => tc.upper === 'HST')
-              || taxCodes.find(tc => tc.upper.includes('HST') && !tc.upper.includes('PST') && !tc.upper.includes('ADJ'));
+          // Combined federal + provincial code first.
+          if (federalPresent && provincialPresent) {
+            const fed = hasHST ? 'HST' : 'GST';
+            const prov = hasPST ? 'PST' : hasQST ? 'QST' : 'RST';
+            matched = taxCodes.find(tc => tc.upper.includes(fed) && tc.upper.includes(prov) && !tc.upper.includes('ADJ'));
           }
-          if (!matched && hasGST) {
+          // Single tax codes.
+          if (!matched && hasHST) {
+            matched = taxCodes.find(tc => tc.upper === 'HST')
+              || taxCodes.find(tc => tc.upper.includes('HST') && !tc.upper.includes('PST') && !tc.upper.includes('QST') && !tc.upper.includes('ADJ'));
+          }
+          if (!matched && hasGST && !provincialPresent) {
             matched = taxCodes.find(tc => tc.upper === 'GST')
-              || taxCodes.find(tc => tc.upper.includes('GST') && !tc.upper.includes('PST') && !tc.upper.includes('ADJ'));
+              || taxCodes.find(tc => tc.upper.includes('GST') && !tc.upper.includes('PST') && !tc.upper.includes('QST') && !tc.upper.includes('ADJ'));
+          }
+          if (!matched && provincialPresent && !federalPresent) {
+            const prov = hasPST ? 'PST' : hasQST ? 'QST' : 'RST';
+            matched = taxCodes.find(tc => tc.upper.includes(prov) && !tc.upper.includes('GST') && !tc.upper.includes('HST') && !tc.upper.includes('ADJ'));
           }
           if (matched) {
             primaryTaxCodeId = String(matched.Id);
             primaryTaxCodeName = matched.Name;
             console.log(`[shareholder-invoice] primary tax code: ${matched.Name} (id ${primaryTaxCodeId})`);
-          } else if (totalRecoverableTax > 0) {
-            console.warn(`[shareholder-invoice] no single GST/HST tax code found for GST=${hasGST} HST=${hasHST}`);
-          }
-          // Out-of-Scope / Exempt for PST and absorbed-tax lines.
-          const exemptCandidates = ['out of scope', 'exempt', 'non-taxable', 'non taxable', 'zero-rated', 'zero rated'];
-          let exempt = null;
-          for (const needle of exemptCandidates) {
-            exempt = taxCodes.find(tc => tc.upper.includes(needle.toUpperCase()));
-            if (exempt) break;
-          }
-          if (!exempt) exempt = taxCodes.find(tc => tc.upper === 'NON');
-          if (exempt) {
-            exemptTaxCodeId = String(exempt.Id);
-            exemptTaxCodeName = exempt.Name;
-            console.log(`[shareholder-invoice] exempt tax code: ${exempt.Name} (id ${exemptTaxCodeId})`);
+          } else {
+            console.warn(`[shareholder-invoice] no matching tax code for GST=${hasGST} HST=${hasHST} PST=${hasPST} QST=${hasQST}`);
           }
         } catch (e) {
           console.error('[shareholder-invoice] failed to fetch tax codes:', e.message);
         }
       }
 
-      // Apply tax codes per-line: GST/HST to non-PST expense lines so QBO
-      // computes the input tax credit; Out-of-Scope to PST lines so QBO
-      // does not double-tax. If we couldn't resolve a primary tax code,
-      // fall back to absorbing the recoverable tax into the expense lines
-      // and posting without a tax code (the GL still nets to the right
-      // place, just without QBO's tax tracking).
+      // Apply the combined tax code to every expense line so QBO
+      // associates the TxnTaxDetail amounts with the right line. If we
+      // couldn't resolve a code, fall back to absorbing all stripped tax
+      // back into the expense lines so the GL at least nets.
       if (primaryTaxCodeId) {
         for (const line of expenseLines) {
-          if (line._isPst) {
-            if (exemptTaxCodeId) line.taxCodeId = exemptTaxCodeId;
-          } else {
-            line.taxCodeId = primaryTaxCodeId;
-          }
+          line.taxCodeId = primaryTaxCodeId;
         }
-      } else if (totalRecoverableTax > 0 && expenseLines.length > 0) {
-        console.log('[shareholder-invoice] no primary tax code resolved; absorbing recoverable tax into non-PST expense lines');
-        const nonPstLines = expenseLines.filter(l => !l._isPst);
-        const target = nonPstLines.length > 0 ? nonPstLines : expenseLines;
-        const totalTarget = target.reduce((s, l) => s + l.amount, 0);
-        for (const line of target) {
-          const share = totalTarget > 0 ? line.amount / totalTarget : 1 / target.length;
-          line.amount = Math.round((line.amount + totalRecoverableTax * share) * 100) / 100;
+      } else if (totalTax > 0 && expenseLines.length > 0) {
+        console.log('[shareholder-invoice] no tax code resolved; absorbing stripped tax into expense lines');
+        const expTotal = expenseLines.reduce((s, l) => s + l.amount, 0);
+        for (const line of expenseLines) {
+          const share = expTotal > 0 ? line.amount / expTotal : 1 / expenseLines.length;
+          line.amount = Math.round((line.amount + totalTax * share) * 100) / 100;
         }
       }
 
       if (expenseLines.length === 0) {
-        if (recoverableTaxLines.length > 0) {
+        if (taxLines.length > 0) {
           return res.status(400).json({
-            error: 'Every line on the invoice was classified as GST/HST. At least one non-tax expense line is required before posting.',
+            error: 'Every line on the invoice was classified as tax. At least one non-tax expense line is required before posting.',
           });
         }
         return res.status(400).json({ error: 'No lines available to post.' });
       }
 
-      // Consolidate by (accountId, taxCodeId). Lines that share both the
-      // GL account AND the tax treatment can merge cleanly; lines that
-      // share the account but differ on tax code (e.g. subscription with
-      // GST + PST line, both → Software licenses) stay separate.
+      // Consolidate same-account lines (all share the same tax code now,
+      // so consolidation is simpler than before).
       const consolidated = new Map();
       for (const line of expenseLines) {
-        const key = `${line.accountId}|${line.taxCodeId || ''}`;
+        const key = String(line.accountId);
         if (consolidated.has(key)) {
           const existing = consolidated.get(key);
           existing.amount = Math.round((existing.amount + line.amount) * 100) / 100;
@@ -5224,67 +5174,76 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
       }
       const taxCodeId = primaryTaxCodeId; // drives globalTaxCalc below
 
-      // Build a TxnTaxDetail override so QBO uses the AI-parsed exact tax
-      // amount instead of recomputing from each line's TaxCodeRef. Without
-      // this, QBO rounds 5% × $7.50 = $0.375 to $0.38, leaving us a cent
-      // off versus the actual vendor invoice. With it, QBO posts whatever
-      // we declare in TotalTax / TaxLine[].Amount — matching the invoice
-      // to the penny.
-      //
-      // Needs:
-      //   - primaryTaxCodeId (already resolved)
-      //   - TaxRateRef.value from inside that TaxCode's PurchaseTaxRateList
-      //   - NetAmountTaxable = sum of expense lines tagged with the primary
-      //     tax code (PST/Out-of-Scope lines are not part of the base)
-      //   - TotalTax = totalRecoverableTax (the AI's exact GST/HST sum)
-      // If any of these lookups fail, we just skip the override and let
-      // QBO recompute — same behavior as before this change.
+      // Build TxnTaxDetail with one TaxLine per AI-parsed tax type so QBO
+      // uses our exact amounts and renders each tax field separately in
+      // the expense detail. We need to match each AI tax line to a
+      // TaxRateRef from the chosen tax code's PurchaseTaxRateList by name.
       let txnTaxDetail = null;
-      if (primaryTaxCodeId && totalRecoverableTax > 0) {
+      if (primaryTaxCodeId && totalTax > 0 && taxLines.length > 0) {
         try {
           const tcDetail = await qbo.getTaxCode(primaryTaxCodeId, clientId);
-          // node-quickbooks may surface the entity at the root or nested
-          // under .TaxCode depending on the call path — handle both.
           const tc = tcDetail?.TaxCode || tcDetail;
-          const purchaseRates = tc?.PurchaseTaxRateList?.TaxRateDetail || [];
-          const firstRate = Array.isArray(purchaseRates) ? purchaseRates[0] : purchaseRates;
-          const taxRateRefValue = firstRate?.TaxRateRef?.value;
-          if (!taxRateRefValue) {
-            console.warn(`[shareholder-invoice] tax code ${primaryTaxCodeId} has no PurchaseTaxRateList entries; falling back to auto-compute`);
-          } else {
-            const netAmountTaxable = expenseLines
-              .filter(l => l.taxCodeId === primaryTaxCodeId)
-              .reduce((s, l) => s + (Number(l.amount) || 0), 0);
-            const netRounded = Math.round(netAmountTaxable * 100) / 100;
-            // PercentBased+TaxPercent are advisory metadata; QBO honors the
-            // explicit Amount we pass on each TaxLine. We still include the
-            // percent so QBO's "Sales Tax" column shows a sensible rate
-            // label next to the override amount.
-            const ratePercent = netRounded > 0
-              ? Math.round((totalRecoverableTax / netRounded) * 10000) / 100
+          const rateList = tc?.PurchaseTaxRateList?.TaxRateDetail || [];
+          const rates = Array.isArray(rateList) ? rateList : [rateList];
+          // Build a lookup: tax type → { rateRef, ratePctFromName }
+          const rateByType = {};
+          for (const rd of rates) {
+            const rateRefValue = rd?.TaxRateRef?.value;
+            const rateRefName = (rd?.TaxRateRef?.name || '').toUpperCase();
+            if (!rateRefValue) continue;
+            let type = null;
+            if (/QST/.test(rateRefName)) type = 'qst';
+            else if (/PST/.test(rateRefName)) type = 'pst';
+            else if (/RST/.test(rateRefName)) type = 'rst';
+            else if (/HST/.test(rateRefName)) type = 'hst';
+            else if (/GST/.test(rateRefName)) type = 'gst';
+            const pctMatch = rateRefName.match(/(\d+(?:\.\d+)?)/);
+            const ratePctFromName = pctMatch ? parseFloat(pctMatch[1]) : null;
+            if (type) rateByType[type] = { rateRef: String(rateRefValue), ratePctFromName, name: rd.TaxRateRef.name };
+          }
+
+          const netAmountTaxable = Math.round(
+            expenseLines.reduce((s, l) => s + (Number(l.amount) || 0), 0) * 100
+          ) / 100;
+          const taxLineEntries = [];
+          for (const tl of taxLines) {
+            const rateInfo = rateByType[tl.type];
+            if (!rateInfo) {
+              console.warn(`[shareholder-invoice] no TaxRateRef for type ${tl.type} in tax code ${primaryTaxCodeName}; skipping this tax line`);
+              continue;
+            }
+            // TaxPercent: prefer the AI-parsed rate, fall back to the rate
+            // parsed from the QBO rate name, else compute from amount/net.
+            const fallbackPct = netAmountTaxable > 0
+              ? Math.round((tl.amount / netAmountTaxable) * 10000) / 100
               : null;
+            const taxPercent = tl.ratePct ?? rateInfo.ratePctFromName ?? fallbackPct;
+            taxLineEntries.push({
+              DetailType: 'TaxLineDetail',
+              Amount: tl.amount,
+              TaxLineDetail: {
+                TaxRateRef: { value: rateInfo.rateRef },
+                PercentBased: true,
+                TaxPercent: taxPercent,
+                NetAmountTaxable: netAmountTaxable,
+              },
+            });
+            console.log(`[shareholder-invoice] TaxLine: type=${tl.type}, amount=$${tl.amount}, rate=${taxPercent}%, TaxRateRef=${rateInfo.rateRef} (${rateInfo.name})`);
+          }
+          if (taxLineEntries.length > 0) {
             txnTaxDetail = {
               TxnTaxCodeRef: { value: String(primaryTaxCodeId) },
-              TotalTax: totalRecoverableTax,
-              TaxLine: [{
-                DetailType: 'TaxLineDetail',
-                Amount: totalRecoverableTax,
-                TaxLineDetail: {
-                  TaxRateRef: { value: String(taxRateRefValue) },
-                  PercentBased: true,
-                  TaxPercent: ratePercent,
-                  NetAmountTaxable: netRounded,
-                },
-              }],
+              TotalTax: Math.round(taxLineEntries.reduce((s, e) => s + e.Amount, 0) * 100) / 100,
+              TaxLine: taxLineEntries,
             };
-            console.log(`[shareholder-invoice] TxnTaxDetail override: TotalTax=$${totalRecoverableTax}, NetAmountTaxable=$${netRounded}, TaxRateRef=${taxRateRefValue}, derived rate=${ratePercent}%`);
+            console.log(`[shareholder-invoice] TxnTaxDetail: TotalTax=$${txnTaxDetail.TotalTax}, NetAmountTaxable=$${netAmountTaxable}, ${taxLineEntries.length} TaxLine entries`);
           }
         } catch (e) {
-          console.warn('[shareholder-invoice] could not fetch tax-rate detail for override:', e.message);
+          console.warn('[shareholder-invoice] could not fetch tax-rate detail; falling back to QBO auto-compute:', e.message);
         }
       }
 
-      console.log(`[shareholder-invoice] posting ${expenseLines.length} line(s) ${primaryTaxCodeId ? `with primary tax code "${primaryTaxCodeName}"` : '(tax absorbed)'}${txnTaxDetail ? ' + TxnTaxDetail override' : ''}`);
+      console.log(`[shareholder-invoice] posting ${expenseLines.length} line(s) ${primaryTaxCodeId ? `with tax code "${primaryTaxCodeName}"` : '(tax absorbed)'}${txnTaxDetail ? ` + TxnTaxDetail (${txnTaxDetail.TaxLine.length} tax line(s))` : ''}`);
 
       // Find or create the vendor in QBO
       let vendorRef = null;
