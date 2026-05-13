@@ -1547,9 +1547,30 @@ function renderStepCard(step) {
   if (step.id === 'shareholder-invoices') {
     extras = `<div id="shi-panel" style="margin-top:12px;"></div>`;
   } else if (step.id === 'prepaid') {
+    // Inline "Reverse this month" zone — shown only when there's at
+    // least one prepaid item for the current close period, so the
+    // buttons don't appear when there's nothing to undo.
+    const month = currentClosePeriod?.month;
+    const itemsThisMonth = month
+      ? (prepaidState.items || []).filter(it => (it.closeMonth || (it.createdAt || '').slice(0, 7)) === month)
+      : [];
+    const reversibleJEs = itemsThisMonth.filter(it => it.reclassJournalEntryId && !it.reclassReversedAt);
+    let reverseZone = '';
+    if (itemsThisMonth.length > 0) {
+      reverseZone = `
+        <div class="prepaid-reverse-zone" style="margin-top:10px;padding:8px 12px;background:rgba(220,38,38,0.06);border:1px dashed rgba(220,38,38,0.35);border-radius:6px;font-size:0.78rem;">
+          <div style="color:var(--red-700,#b91c1c);font-weight:600;margin-bottom:4px;">Start over for ${month}?</div>
+          <div style="color:var(--gray-600);margin-bottom:6px;">${itemsThisMonth.length} item(s) on schedule${reversibleJEs.length ? `, ${reversibleJEs.length} with a reclass JE in QuickBooks` : ''}.</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button class="btn btn-secondary" style="font-size:0.75rem;padding:3px 10px;color:var(--red-700,#b91c1c);border-color:rgba(220,38,38,0.4);" data-step-action="reverse-prepaid-je" ${reversibleJEs.length === 0 ? 'disabled' : ''}>↺ reverse JEs in QBO${reversibleJEs.length ? ` (${reversibleJEs.length})` : ''}</button>
+            <button class="btn btn-secondary" style="font-size:0.75rem;padding:3px 10px;color:var(--red-700,#b91c1c);border-color:rgba(220,38,38,0.4);" data-step-action="reverse-prepaid-app">✕ remove from app (${itemsThisMonth.length})</button>
+          </div>
+        </div>`;
+    }
     extras = `
       <div id="prepaid-scan-panel" style="margin-top:12px;"></div>
-      <div id="prepaid-review-panel" style="display:none;margin-top:12px;"></div>`;
+      <div id="prepaid-review-panel" style="display:none;margin-top:12px;"></div>
+      ${reverseZone}`;
   } else if (step.id === 'accrued-liabilities') {
     extras = `<div id="accrued-liab-panel" style="margin-top:12px;"></div>`;
   } else if (step.id === 'fixed-assets') {
@@ -1714,8 +1735,78 @@ document.addEventListener('click', (e) => {
     exportFixedAssetsExcel();
   } else if (action === 'export-prepaid') {
     exportPrepaidExcel();
+  } else if (action === 'reverse-prepaid-je') {
+    reversePrepaidJEsForCurrentMonth();
+  } else if (action === 'reverse-prepaid-app') {
+    reversePrepaidAppForCurrentMonth();
   }
 });
+
+// Reverse all prepaid reclass JEs posted under the current close month.
+// Posts reversing JEs in QBO (Dr Original Expense / Cr Prepaid Expenses)
+// dated end of close month. The schedule items remain but are marked
+// reversed so re-clicking is a no-op.
+async function reversePrepaidJEsForCurrentMonth() {
+  if (!selectedClientId) return;
+  const month = currentClosePeriod?.month;
+  if (!month) { alert('No close period selected.'); return; }
+  const items = (prepaidState.items || []).filter(it =>
+    (it.closeMonth || (it.createdAt || '').slice(0, 7)) === month
+    && it.reclassJournalEntryId
+    && !it.reclassReversedAt
+  );
+  if (items.length === 0) { alert(`No reclass JEs to reverse for ${month}.`); return; }
+  const totalAmt = items.reduce((s, it) => s + Number(it.openingBalance || 0), 0);
+  if (!confirm(`Reverse ${items.length} prepaid reclass JE${items.length === 1 ? '' : 's'} in QuickBooks?\n\nThis will post a reversing JE (Dr Original Expense / Cr Prepaid Expenses) dated end of ${month} for a total of ${fmtMoney(totalAmt)}.\n\nThe items will stay on the prepaid schedule (use "remove from app" to clear those too).`)) return;
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/reverse-je`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ month }),
+    });
+    const data = await res.json();
+    if (!res.ok) { alert('reverse failed: ' + (data.error || res.status)); return; }
+    let msg = `Reversed ${data.reversedCount || 0} JE${(data.reversedCount || 0) === 1 ? '' : 's'} in QuickBooks.`;
+    if (data.failures && data.failures.length) {
+      msg += `\n\n${data.failures.length} failure(s):\n` + data.failures.map(f => `• ${f.error}`).join('\n');
+    }
+    alert(msg);
+    await loadClientPrepaid();
+    renderCloseSteps();
+  } catch (e) { alert('error: ' + e.message); }
+}
+
+// Remove all prepaid schedule items for the current close month from the
+// app's records. Does NOT touch QBO — run reverse-prepaid-je first if
+// the GL needs cleaning up too.
+async function reversePrepaidAppForCurrentMonth() {
+  if (!selectedClientId) return;
+  const month = currentClosePeriod?.month;
+  if (!month) { alert('No close period selected.'); return; }
+  const items = (prepaidState.items || []).filter(it =>
+    (it.closeMonth || (it.createdAt || '').slice(0, 7)) === month
+  );
+  if (items.length === 0) { alert(`No prepaid items on the schedule for ${month}.`); return; }
+  const stillPostedToQbo = items.filter(it => it.reclassJournalEntryId && !it.reclassReversedAt);
+  let warn = `Remove ${items.length} prepaid item${items.length === 1 ? '' : 's'} from the app schedule for ${month}?\n\nThis does NOT touch QuickBooks.`;
+  if (stillPostedToQbo.length > 0) {
+    warn += `\n\n⚠ ${stillPostedToQbo.length} of these still have a reclass JE posted in QBO. You should reverse those first ("reverse JEs in QBO") so QBO and the app stay in sync.`;
+  }
+  warn += '\n\nThe items will be gone — there is no undo.';
+  if (!confirm(warn)) return;
+  try {
+    const res = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/reverse-app`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
+      body: JSON.stringify({ month }),
+    });
+    const data = await res.json();
+    if (!res.ok) { alert('remove failed: ' + (data.error || res.status)); return; }
+    alert(`Removed ${data.removedCount || 0} item${(data.removedCount || 0) === 1 ? '' : 's'} from the prepaid schedule for ${month}.`);
+    await loadClientPrepaid();
+    renderCloseSteps();
+  } catch (e) { alert('error: ' + e.message); }
+}
 
 // Named export handler so the step-card button can call it directly (and so
 // it's easier to reason about than an anonymous listener).

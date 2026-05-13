@@ -3812,6 +3812,7 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan/accept', requireAdm
 
     const c = getClientPrepaid(clientId);
     const openingBalance = Number(prepaidAmount || totalAmount);
+    const monthStr = (closeMonth && /^\d{4}-\d{2}$/.test(closeMonth)) ? closeMonth : null;
     const item = {
       id: Date.now().toString() + Math.random().toString(36).slice(2, 7),
       vendor: String(vendor),
@@ -3824,11 +3825,14 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan/accept', requireAdm
       expenseAccountName: expenseAccountName || '',
       sourceTxnId: sourceTxnId || null,
       sourceTxnType: sourceTxnType || null,
+      closeMonth: monthStr, // YYYY-MM, the close period this item was accepted under
       createdAt: new Date().toISOString(),
       completedAt: null,
       reclassJournalEntryId: null,
       reclassPostedAt: null,
       reclassError: null,
+      reclassReversedAt: null,
+      reversingJournalEntryId: null,
     };
 
     // Reclass JE: Dr Prepaid Expenses (openingBalance) / Cr the original
@@ -3900,6 +3904,118 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan/accept', requireAdm
     savePrepaidExpenses(prepaidData);
 
     res.json({ success: true, item });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Resolve which close month a prepaid item belongs to. Items added after
+// the closeMonth-on-item field was introduced have it stored explicitly;
+// older items fall back to the YYYY-MM of their createdAt timestamp.
+function prepaidItemCloseMonth(item) {
+  if (item.closeMonth && /^\d{4}-\d{2}$/.test(item.closeMonth)) return item.closeMonth;
+  if (item.createdAt) return String(item.createdAt).slice(0, 7);
+  return null;
+}
+
+// POST /api/admin/clients/:clientId/prepaid-expenses/reverse-je
+// Reverses any prepaid reclass JEs that were posted under the given
+// close month. Posts a reversing JE in QBO (Dr/Cr flipped) dated the
+// last day of the close month. The item stays on the schedule but is
+// marked reversed so re-running this endpoint is idempotent.
+//
+// Body: { month: 'YYYY-MM' }
+app.post('/api/admin/clients/:clientId/prepaid-expenses/reverse-je', requireAdmin, async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    if (!qbo.isConnected(clientId)) return res.status(400).json({ error: 'QuickBooks is not connected.' });
+    const month = req.body?.month;
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month is required (YYYY-MM)' });
+
+    const c = getClientPrepaid(clientId);
+    const targets = (c.items || []).filter(it =>
+      prepaidItemCloseMonth(it) === month
+      && it.reclassJournalEntryId
+      && !it.reclassReversedAt
+    );
+
+    if (targets.length === 0) {
+      return res.json({ success: true, reversedCount: 0, reversed: [], message: 'No reclass JEs to reverse for this month.' });
+    }
+
+    const { year, monthIndex } = parseMonthStr(month);
+    const reversalDate = localDateStr(lastDayOfMonthDate(year, monthIndex));
+    const reversed = [];
+    const failures = [];
+
+    for (const item of targets) {
+      try {
+        const memo = `Reverse reclass to prepaid - ${item.vendor}${item.description ? ' - ' + item.description : ''}`;
+        const result = await qbo.createJournalEntry({
+          date: reversalDate,
+          memo,
+          lines: [
+            // Flip the original Dr/Cr: original was Dr Prepaid / Cr Expense.
+            // Reversal is Dr Expense / Cr Prepaid for the same amount.
+            {
+              accountId: String(item.expenseAccountId),
+              accountName: item.expenseAccountName || '',
+              description: memo,
+              amount: item.openingBalance,
+              type: 'debit',
+            },
+            {
+              accountId: c.prepaidAccount.id,
+              accountName: c.prepaidAccount.name,
+              description: memo,
+              amount: item.openingBalance,
+              type: 'credit',
+            },
+          ],
+        }, clientId);
+        item.reclassReversedAt = new Date().toISOString();
+        item.reversingJournalEntryId = result.Id || null;
+        reversed.push({ itemId: item.id, reversingJournalEntryId: item.reversingJournalEntryId, amount: item.openingBalance });
+        console.log(`[prepaid-reverse-je] reversed reclass for item ${item.id} (${item.vendor}): reversing JE id ${item.reversingJournalEntryId}`);
+      } catch (e) {
+        console.error(`[prepaid-reverse-je] failed to reverse item ${item.id}:`, e.message);
+        failures.push({ itemId: item.id, error: e.message });
+      }
+    }
+
+    savePrepaidExpenses(prepaidData);
+    res.json({ success: true, reversedCount: reversed.length, reversed, failures });
+  } catch (e) {
+    console.error('[prepaid-reverse-je] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/admin/clients/:clientId/prepaid-expenses/reverse-app
+// Removes prepaid items from the schedule for the given close month.
+// Doesn't touch QBO — use reverse-je first if the JEs need reversing.
+//
+// Body: { month: 'YYYY-MM' }
+app.post('/api/admin/clients/:clientId/prepaid-expenses/reverse-app', requireAdmin, (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    const month = req.body?.month;
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month is required (YYYY-MM)' });
+
+    const c = getClientPrepaid(clientId);
+    const before = (c.items || []).length;
+    const removed = (c.items || []).filter(it => prepaidItemCloseMonth(it) === month);
+    c.items = (c.items || []).filter(it => prepaidItemCloseMonth(it) !== month);
+    // Also clear the scannedMonths flag so the user can re-scan freshly.
+    c.scannedMonths = (c.scannedMonths || []).filter(m => m !== month);
+
+    savePrepaidExpenses(prepaidData);
+    console.log(`[prepaid-reverse-app] removed ${removed.length} item(s) from schedule for ${month} (was ${before} total)`);
+    res.json({
+      success: true,
+      removedCount: removed.length,
+      removed: removed.map(it => ({ id: it.id, vendor: it.vendor, openingBalance: it.openingBalance })),
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
