@@ -4992,6 +4992,40 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
     const memo = `Shareholder-paid invoice: ${invoice.analysis.vendor || invoice.fileName} — ${clientName}`;
 
     if (qbo.isConnected(clientId)) {
+      // Duplicate check: scan QBO for an existing Purchase whose DocNumber
+      // (= invoice/ref number) matches this invoice's. Catches the common
+      // "re-uploaded the same invoice" scenario before any double-posting
+      // can happen. Skipped when the AI couldn't extract a ref number —
+      // there's nothing reliable to match against.
+      const docNumber = (invoice.analysis.invoiceNumber || '').trim();
+      if (docNumber) {
+        try {
+          const existing = await qbo.findPurchasesByDocNumber(docNumber, clientId);
+          if (existing.length > 0) {
+            const dupSummaries = existing.map(p => {
+              const vendor = p.EntityRef?.name || '(no vendor)';
+              const date = p.TxnDate || '(no date)';
+              const total = (typeof p.TotalAmt === 'number') ? `$${p.TotalAmt.toFixed(2)}` : '';
+              return `Expense #${p.Id} on ${date}${total ? ` (${total})` : ''} — ${vendor}`;
+            }).join('; ');
+            console.warn(`[shareholder-invoice] duplicate detected for docNumber "${docNumber}": ${dupSummaries}`);
+            return res.status(409).json({
+              error: `Duplicate invoice: ref no. "${docNumber}" is already posted in QuickBooks as ${dupSummaries}. Dismiss this upload if it's a duplicate, or edit the ref no. on the invoice and re-upload.`,
+              duplicates: existing.map(p => ({
+                id: p.Id,
+                date: p.TxnDate || null,
+                total: typeof p.TotalAmt === 'number' ? p.TotalAmt : null,
+                vendor: p.EntityRef?.name || null,
+              })),
+              docNumber,
+            });
+          }
+        } catch (e) {
+          // Don't block a legitimate post on a flaky check — log and proceed.
+          console.warn(`[shareholder-invoice] duplicate check failed for docNumber "${docNumber}":`, e.message);
+        }
+      }
+
       // Auto-tax posting: let QBO's tax engine compute and post tax. This
       // requires us to (a) strip manually-itemized tax lines from the
       // Purchase Line[] so QBO doesn't double-count them, and (b) attach

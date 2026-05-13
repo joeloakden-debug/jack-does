@@ -839,6 +839,23 @@ async function getTaxCode(taxCodeId, clientId = 'default') {
 }
 
 /**
+ * Find existing Purchase transactions in QBO whose DocNumber (the
+ * invoice/ref number field) matches `docNumber`. Used by the SHI flow
+ * to detect duplicates before posting. Voided transactions are filtered
+ * out so a re-post of a deliberately-voided expense isn't blocked.
+ *
+ * Returns [] for empty/missing docNumber (no number to match against).
+ */
+async function findPurchasesByDocNumber(docNumber, clientId = 'default') {
+  if (!docNumber || !String(docNumber).trim()) return [];
+  const qb = await getQBClient(clientId);
+  const result = await qbPromise(qb, 'findPurchases', { DocNumber: String(docNumber).trim(), fetchAll: true });
+  const purchases = result?.QueryResponse?.Purchase || result?.Purchase || [];
+  const arr = Array.isArray(purchases) ? purchases : [purchases];
+  return arr.filter(p => p && (p.TxnStatus || '').toLowerCase() !== 'voided');
+}
+
+/**
  * Get account list
  */
 async function getAccounts(clientId = 'default') {
@@ -1418,6 +1435,7 @@ module.exports = {
   getAccounts,
   getTaxCodes,
   getTaxCode,
+  findPurchasesByDocNumber,
   createJournalEntry,
   createPurchase,
   findOrCreateVendor,
