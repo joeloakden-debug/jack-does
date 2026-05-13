@@ -4990,6 +4990,71 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
       if (allLines.length === 0) {
         return res.status(400).json({ error: 'No lines available to post.' });
       }
+
+      // When a Purchase line hits a sales-tax-liability account, QBO
+      // requires a TaxCodeRef on that line — even when GlobalTaxCalculation
+      // is 'NotApplicable'. With a single line to a tax-payable account
+      // accompanied by a single expense line in a "clean" ratio (e.g.
+      // $0.50 tax / $10.00 expense = 5%), QBO can infer the rate and
+      // accept the post. As soon as the ratio doesn't divide cleanly
+      // (e.g. PST is consolidated into the expense line, making the
+      // implied ratio 4.6%), QBO can't pick a tax code and rejects with
+      // "selected a tax liability account ... haven't specified a tax
+      // rate along with it". We pre-empt that by attaching the company's
+      // "Out of Scope" / "Exempt" / "Non" code to any line that hits a
+      // tax-liability account — it satisfies the validation without
+      // invoking auto-recompute (we still pass NotApplicable globally).
+      let allAccounts = [];
+      try {
+        const acctData = await qbo.getAccounts(clientId);
+        allAccounts = acctData?.QueryResponse?.Account || [];
+      } catch (e) { /* non-critical */ }
+      const taxLiabilityIds = new Set(
+        allAccounts
+          .filter(a => {
+            const sub = (a.AccountSubType || '').toLowerCase();
+            const name = (a.Name || '').toLowerCase();
+            // QBO's official sales-tax-payable subtype is "SalesTaxPayable";
+            // we also match liability accounts named like a tax payable
+            // (some clients use plain OtherCurrentLiability subtypes).
+            return sub === 'salestaxpayable'
+              || name.includes('gst/hst payable')
+              || name.includes('pst payable')
+              || name.includes('qst payable')
+              || name.includes('sales tax payable');
+          })
+          .map(a => String(a.Id))
+      );
+      const taxLiabilityLines = allLines.filter(l => taxLiabilityIds.has(String(l.accountId)));
+      if (taxLiabilityLines.length > 0) {
+        try {
+          const tcData = await qbo.getTaxCodes(clientId);
+          const taxCodes = (tcData?.QueryResponse?.TaxCode || []).filter(tc => tc.Active !== false);
+          // Prefer "Out of Scope" → "Exempt" → "Non" → "Zero" in that
+          // order. They all mean "no tax computation" but the exact name
+          // varies across regions (CA QBO ships "Out of Scope", US QBO
+          // ships "NON", etc.).
+          const candidates = ['out of scope', 'exempt', 'non-taxable', 'non taxable', 'zero-rated', 'zero rated'];
+          let exemptCode = null;
+          for (const needle of candidates) {
+            exemptCode = taxCodes.find(tc => (tc.Name || '').toLowerCase().includes(needle));
+            if (exemptCode) break;
+          }
+          // Final fallback: any tax code with the literal name "NON".
+          if (!exemptCode) exemptCode = taxCodes.find(tc => (tc.Name || '').toUpperCase() === 'NON');
+          if (exemptCode) {
+            for (const line of taxLiabilityLines) {
+              line.taxCodeId = String(exemptCode.Id);
+            }
+            console.log(`[shareholder-invoice] tagged ${taxLiabilityLines.length} tax-liability line(s) with "${exemptCode.Name}" code (id ${exemptCode.Id})`);
+          } else {
+            console.warn('[shareholder-invoice] no exempt tax code found; posting tax-liability line without TaxCodeRef — QBO may reject.');
+          }
+        } catch (e) {
+          console.warn('[shareholder-invoice] failed to look up exempt tax code:', e.message);
+        }
+      }
+
       console.log(`[shareholder-invoice] posting ${allLines.length} line(s) verbatim, total $${totalAmount}`);
 
       // Find or create the vendor in QBO
