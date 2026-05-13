@@ -4739,11 +4739,11 @@ CRITICAL RULE — BALANCED LINES:
 The sum of all line amounts MUST equal totalAmount EXACTLY, down to the cent. Before responding, verify: add up every line amount and confirm it equals totalAmount. If it doesn't, you MUST add or adjust lines until it balances.
 
 Common sources of imbalance:
-- Tax (GST/HST/PST/VAT) not included as a line → add a "GST" or "HST" line
+- Tax (GST/HST/PST/QST/RST) not included as a line → add separate lines for each tax kind charged
 - Rounding → adjust the last line by the difference
 - Shipping/handling fees omitted → add a line
 
-Example: if totalAmount is 775.04 and subtotal items sum to 692.00, the remaining 83.04 is likely tax — add a line like {"description": "GST/HST", "amount": 83.04, "suggestedCategory": "taxes", ...}
+Example: if totalAmount is 775.04 and subtotal items sum to 692.00, the remaining 83.04 is likely tax — if the invoice shows HST 13%, add {"description": "HST (13%)", "amount": 83.04, "suggestedCategory": "taxes", ...}.
 
 IMPORTANT GUIDELINES:
 - ALWAYS include tax as a separate line item so lines sum to the total
@@ -4753,8 +4753,22 @@ IMPORTANT GUIDELINES:
 - For suggestedAccount, pick the best match from the chart of accounts list above. Use the exact account name.
 - Be specific about the expense category — don't just say "expense"
 
+TAX LINE LABELING — STRICT:
+Identify which tax kind(s) the vendor actually charged on the invoice (look at the invoice's tax breakdown — it usually says GST, HST, PST, QST, etc.). Then create ONE LINE PER TAX KIND, with a description in this exact shape:
+  "GST (5%)"     for federal GST (5%)
+  "HST (13%)"    for harmonized sales tax (rate varies by province: 13% ON, 14% PE, 15% NB/NL/NS)
+  "PST (7%)"     for BC provincial sales tax — substitute the actual rate for your province (e.g. "PST (6%)" for SK, "PST (7%)" for MB)
+  "QST (9.975%)" for Quebec
+  "RST (8%)"     for Manitoba retail sales tax (legacy label)
+
+CRITICAL:
+- One line per distinct tax kind. If the invoice has both GST and PST, that's TWO separate tax lines, NOT one combined "GST/PST" line.
+- Never use ambiguous labels like "Tax", "Sales tax", or "GST/HST" — always pick the specific kind charged.
+- Always include the rate in parentheses, e.g. "(5%)". The rate is what the system uses to disambiguate between, say, GST 5% and HST 13% (which both have "HST" in the QBO account name).
+- If a tax line has no rate shown on the invoice, infer it from the math: tax amount / subtotal × 100, rounded to the nearest standard rate.
+
 TAX ACCOUNT MAPPING:
-- Each tax line (GST, HST, PST, QST, RST) should map to its corresponding tax-liability account from the chart of accounts so the user has clear visibility into each tax type paid.
+- Each tax line should map to its corresponding tax-liability account from the chart of accounts so the user has clear visibility into each tax type paid.
 - GST/HST → look for an account named "GST/HST Payable", "GST Payable", or "Sales Tax Payable".
 - PST → look for "PST Payable" or similar (e.g. "PST (BC) Payable").
 - QST → look for "QST Payable".
