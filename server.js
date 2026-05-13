@@ -4753,6 +4753,12 @@ IMPORTANT GUIDELINES:
 - For suggestedAccount, pick the best match from the chart of accounts list above. Use the exact account name.
 - Be specific about the expense category — don't just say "expense"
 
+TAX ACCOUNT MAPPING — IMPORTANT:
+- GST/HST is recoverable (input tax credit). suggestedAccount for GST/HST lines = the GST/HST Payable liability account from the chart (look for a name containing "GST/HST Payable" or "GST Payable" or "Sales Tax Payable").
+- PST / QST / RST is NON-RECOVERABLE in every Canadian province that levies it (BC, SK, MB, QC). It forms part of the cost of the underlying purchase. suggestedAccount for PST/QST/RST lines = the SAME account as the underlying expense it's taxed on, NOT a "PST Payable" account.
+  Example: if a $7.50 software subscription line maps to "6000 Software licenses", a PST line of $0.53 on the same purchase should ALSO map to "6000 Software licenses" — NOT to "PST Payable". The PST is part of the cost of the software.
+  This applies even if the chart of accounts contains a "PST Payable" account — that account is for sales-side PST collected, not purchase-side PST paid.
+
 Respond with ONLY a JSON object (no markdown, no explanation):
 {
   "vendor": "vendor name",
@@ -4895,6 +4901,34 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/upload', requireAdmi
           suggestedAccount: '',
           isCapital: false,
         });
+      }
+    }
+
+    // Reassign PST/QST/RST lines to the same suggestedAccount as the
+    // underlying expense. These are non-recoverable in Canadian provinces
+    // (BC, SK, MB, QC) and form part of the cost of the purchase, so the
+    // accountant-correct treatment is to bake them into the expense GL.
+    // The AI sometimes defaults them to "PST Payable" — this safety net
+    // overrides that so the user doesn't have to re-map every invoice.
+    if (Array.isArray(analysis.lines) && analysis.lines.length > 1) {
+      const isPstShape = (s) => /\b(PST|QST|RST)\b/i.test(s || '');
+      const isAnyTaxShape = (s) => /\b(GST|HST|PST|QST|RST|sales\s*tax|tax\s*\(\d)/i.test(s || '');
+      const nonTaxLines = analysis.lines.filter(l => !isAnyTaxShape(l.description));
+      if (nonTaxLines.length > 0) {
+        // Largest non-tax line by absolute amount = the primary expense
+        // the PST is attached to. If there are multiple non-tax lines, we
+        // default to the largest; users can still override on the review UI.
+        const primary = nonTaxLines.reduce((a, b) =>
+          Math.abs(Number(b.amount) || 0) > Math.abs(Number(a.amount) || 0) ? b : a
+        );
+        if (primary.suggestedAccount) {
+          for (const line of analysis.lines) {
+            if (isPstShape(line.description) && line.suggestedAccount !== primary.suggestedAccount) {
+              console.log(`[shareholder-invoice] reassigning PST line "${line.description}" from "${line.suggestedAccount || '(unset)'}" to "${primary.suggestedAccount}" (underlying expense account)`);
+              line.suggestedAccount = primary.suggestedAccount;
+            }
+          }
+        }
       }
     }
 
