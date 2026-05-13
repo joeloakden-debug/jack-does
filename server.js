@@ -1222,6 +1222,28 @@ app.get('/api/admin/clients/:clientId/qbo-status', requireAdmin, (req, res) => {
   res.json({ connected, clientId, connection: clientConnection });
 });
 
+// Diagnostic: dump the QBO tax codes available to this client so we can
+// pick the right "Out of Scope" / "Exempt" / "Non" code for the SHI
+// auto-tag step. Lightweight read-only.
+app.get('/api/admin/clients/:clientId/tax-codes', requireAdmin, async (req, res) => {
+  const clientId = req.params.clientId;
+  if (!qbo.isConnected(clientId)) return res.status(400).json({ error: 'QBO not connected for this client' });
+  try {
+    const data = await qbo.getTaxCodes(clientId);
+    const list = (data?.QueryResponse?.TaxCode || []).map(tc => ({
+      id: tc.Id,
+      name: tc.Name,
+      description: tc.Description || '',
+      active: tc.Active !== false,
+      taxable: tc.Taxable !== false,
+      hidden: !!tc.Hidden,
+    }));
+    res.json({ taxCodes: list });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ========================================
 // CLIENT CONFIG (portal fetches this)
 // ========================================
