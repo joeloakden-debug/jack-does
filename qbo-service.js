@@ -829,6 +829,16 @@ async function getTaxCodes(clientId = 'default') {
 }
 
 /**
+ * Get one tax code by id, including its PurchaseTaxRateList (the
+ * underlying rate-detail references we need to construct a
+ * TxnTaxDetail override for a Purchase).
+ */
+async function getTaxCode(taxCodeId, clientId = 'default') {
+  const qb = await getQBClient(clientId);
+  return qbPromise(qb, 'getTaxCode', String(taxCodeId));
+}
+
+/**
  * Get account list
  */
 async function getAccounts(clientId = 'default') {
@@ -1181,6 +1191,14 @@ async function createPurchase(purchase, clientId = 'default') {
     };
   }
 
+  // Optional explicit tax block — when present, QBO uses these exact
+  // numbers instead of recomputing tax from each line's TaxCodeRef. The
+  // caller is responsible for shaping it correctly: TxnTaxCodeRef +
+  // TotalTax + TaxLine[] with TaxLineDetail referencing a real TaxRateRef.
+  if (purchase.txnTaxDetail) {
+    purchaseObj.TxnTaxDetail = purchase.txnTaxDetail;
+  }
+
   console.log('[createPurchase] payload:', JSON.stringify(purchaseObj, null, 2));
   return qbPromise(qb, 'createPurchase', purchaseObj);
 }
@@ -1399,6 +1417,7 @@ module.exports = {
   getVendors,
   getAccounts,
   getTaxCodes,
+  getTaxCode,
   createJournalEntry,
   createPurchase,
   findOrCreateVendor,

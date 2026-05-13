@@ -5223,7 +5223,68 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
         });
       }
       const taxCodeId = primaryTaxCodeId; // drives globalTaxCalc below
-      console.log(`[shareholder-invoice] posting ${expenseLines.length} line(s) ${primaryTaxCodeId ? `with primary tax code "${primaryTaxCodeName}"` : '(tax absorbed)'}`);
+
+      // Build a TxnTaxDetail override so QBO uses the AI-parsed exact tax
+      // amount instead of recomputing from each line's TaxCodeRef. Without
+      // this, QBO rounds 5% × $7.50 = $0.375 to $0.38, leaving us a cent
+      // off versus the actual vendor invoice. With it, QBO posts whatever
+      // we declare in TotalTax / TaxLine[].Amount — matching the invoice
+      // to the penny.
+      //
+      // Needs:
+      //   - primaryTaxCodeId (already resolved)
+      //   - TaxRateRef.value from inside that TaxCode's PurchaseTaxRateList
+      //   - NetAmountTaxable = sum of expense lines tagged with the primary
+      //     tax code (PST/Out-of-Scope lines are not part of the base)
+      //   - TotalTax = totalRecoverableTax (the AI's exact GST/HST sum)
+      // If any of these lookups fail, we just skip the override and let
+      // QBO recompute — same behavior as before this change.
+      let txnTaxDetail = null;
+      if (primaryTaxCodeId && totalRecoverableTax > 0) {
+        try {
+          const tcDetail = await qbo.getTaxCode(primaryTaxCodeId, clientId);
+          // node-quickbooks may surface the entity at the root or nested
+          // under .TaxCode depending on the call path — handle both.
+          const tc = tcDetail?.TaxCode || tcDetail;
+          const purchaseRates = tc?.PurchaseTaxRateList?.TaxRateDetail || [];
+          const firstRate = Array.isArray(purchaseRates) ? purchaseRates[0] : purchaseRates;
+          const taxRateRefValue = firstRate?.TaxRateRef?.value;
+          if (!taxRateRefValue) {
+            console.warn(`[shareholder-invoice] tax code ${primaryTaxCodeId} has no PurchaseTaxRateList entries; falling back to auto-compute`);
+          } else {
+            const netAmountTaxable = expenseLines
+              .filter(l => l.taxCodeId === primaryTaxCodeId)
+              .reduce((s, l) => s + (Number(l.amount) || 0), 0);
+            const netRounded = Math.round(netAmountTaxable * 100) / 100;
+            // PercentBased+TaxPercent are advisory metadata; QBO honors the
+            // explicit Amount we pass on each TaxLine. We still include the
+            // percent so QBO's "Sales Tax" column shows a sensible rate
+            // label next to the override amount.
+            const ratePercent = netRounded > 0
+              ? Math.round((totalRecoverableTax / netRounded) * 10000) / 100
+              : null;
+            txnTaxDetail = {
+              TxnTaxCodeRef: { value: String(primaryTaxCodeId) },
+              TotalTax: totalRecoverableTax,
+              TaxLine: [{
+                DetailType: 'TaxLineDetail',
+                Amount: totalRecoverableTax,
+                TaxLineDetail: {
+                  TaxRateRef: { value: String(taxRateRefValue) },
+                  PercentBased: true,
+                  TaxPercent: ratePercent,
+                  NetAmountTaxable: netRounded,
+                },
+              }],
+            };
+            console.log(`[shareholder-invoice] TxnTaxDetail override: TotalTax=$${totalRecoverableTax}, NetAmountTaxable=$${netRounded}, TaxRateRef=${taxRateRefValue}, derived rate=${ratePercent}%`);
+          }
+        } catch (e) {
+          console.warn('[shareholder-invoice] could not fetch tax-rate detail for override:', e.message);
+        }
+      }
+
+      console.log(`[shareholder-invoice] posting ${expenseLines.length} line(s) ${primaryTaxCodeId ? `with primary tax code "${primaryTaxCodeName}"` : '(tax absorbed)'}${txnTaxDetail ? ' + TxnTaxDetail override' : ''}`);
 
       // Find or create the vendor in QBO
       let vendorRef = null;
@@ -5237,10 +5298,8 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
       }
 
       // Create a Purchase (Expense) transaction — paid from shareholder
-      // loan account. When a tax code is set on the lines QBO will
-      // recompute tax on top of the pre-tax amounts; otherwise tax was
-      // absorbed into the expense lines and there's nothing for QBO to
-      // recompute.
+      // loan account. When txnTaxDetail is set, QBO uses our exact GST/HST
+      // amount; otherwise it recomputes from each line's TaxCodeRef.
       const purchaseResult = await qbo.createPurchase({
         date: jeDate,
         memo,
@@ -5252,6 +5311,7 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
         vendorName: vendorRef?.DisplayName || vendorName || '',
         lines: expenseLines,
         globalTaxCalc: taxCodeId ? 'TaxExcluded' : 'NotApplicable',
+        txnTaxDetail,
       }, clientId);
       const txnId = purchaseResult.Id;
 
