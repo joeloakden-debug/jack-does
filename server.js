@@ -5068,9 +5068,25 @@ app.post('/api/admin/clients/:clientId/shareholder-invoices/:invoiceId/post', re
         // pass through as a normal line so the user's intent is preserved.
         const isRecoverableTax = (isTaxPayableAcct && !isPstShape) || (hasTaxShape && !isPstShape);
         if (isRecoverableTax) {
-          const taxType = /HST/i.test(desc) ? 'hst' : 'gst';
+          // Classify GST vs HST by the rate parsed from the description
+          // (5% → GST; 12%+ → HST). The AI often labels the line as
+          // "GST/HST (5%)" because the GL account is a combined "GST/HST
+          // Payable" — naïvely matching the substring "HST" in that
+          // label would pick the HST tax code and post the wrong rate
+          // (12-13%) to QBO. The rate digit is the unambiguous signal.
+          const rateMatch = (line.description || '').match(/(\d+(?:\.\d+)?)\s*%/);
+          const ratePct = rateMatch ? parseFloat(rateMatch[1]) : null;
+          let taxType;
+          if (ratePct !== null) {
+            taxType = ratePct >= 10 ? 'hst' : 'gst';
+          } else {
+            // No rate parsed — fall back to label words. Treat as HST
+            // only when HST appears in the description WITHOUT GST also
+            // present (avoids "GST/HST" being misread as HST).
+            taxType = (/\bHST\b/i.test(desc) && !/\bGST\b/i.test(desc)) ? 'hst' : 'gst';
+          }
           recoverableTaxLines.push({ type: taxType, amount: amt, description: line.description });
-          console.log(`[shareholder-invoice] recoverable-tax line stripped (${taxType}): "${line.description}" $${amt}`);
+          console.log(`[shareholder-invoice] recoverable-tax line stripped (${taxType}, rate=${ratePct ?? 'unknown'}%): "${line.description}" $${amt}`);
         } else {
           expenseLines.push({
             accountId: line.accountId,
