@@ -1729,6 +1729,7 @@ async function exportFixedAssetsExcel() {
   const panel = document.getElementById('claude-review-panel');
   if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
   renderReviewPanel({ status: 'loading' });
+  let downloadedFileName = null;
   try {
     const res = await fetch(`/api/admin/clients/${selectedClientId}/fixed-assets/export-excel`, {
       headers: { 'Authorization': getAuth() },
@@ -1739,7 +1740,8 @@ async function exportFixedAssetsExcel() {
     const a = document.createElement('a');
     a.href = url;
     const client = allClients.find(c => c.id === selectedClientId);
-    a.download = `${client?.name || selectedClientId} - Fixed Assets.xlsx`;
+    downloadedFileName = `${client?.name || selectedClientId} - Fixed Assets.xlsx`;
+    a.download = downloadedFileName;
     a.click();
     URL.revokeObjectURL(url);
     try {
@@ -1747,10 +1749,11 @@ async function exportFixedAssetsExcel() {
         headers: { 'Authorization': getAuth() },
       });
       const data = await reviewRes.json();
-      renderReviewPanel(data.review);
+      const reviewWithDownload = data.review ? { ...data.review, _downloadedFileName: downloadedFileName } : null;
+      renderReviewPanel(reviewWithDownload);
     } catch (e) {
       console.error('Failed to fetch review:', e);
-      renderReviewPanel({ status: 'error', summary: 'Could not load review result.', findings: [] });
+      renderReviewPanel({ status: 'error', summary: 'Could not load review result.', findings: [], _downloadedFileName: downloadedFileName });
     }
   } catch (e) { alert('export failed: ' + e.message); renderReviewPanel(null); }
   btns.forEach((b, i) => { b.textContent = originalLabels[i]; b.disabled = false; });
@@ -1766,6 +1769,7 @@ async function exportPrepaidExcel() {
   const panel = document.getElementById('prepaid-review-panel');
   if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
   renderPrepaidReviewPanel({ status: 'loading' });
+  let downloadedFileName = null;
   try {
     const month = currentClosePeriod?.month;
     const exportUrl = `/api/admin/clients/${selectedClientId}/prepaid-expenses/export-excel${month ? `?month=${month}` : ''}`;
@@ -1776,7 +1780,8 @@ async function exportPrepaidExcel() {
     const a = document.createElement('a');
     a.href = dlUrl;
     const client = allClients.find(c => c.id === selectedClientId);
-    a.download = `${client?.name || selectedClientId} - Prepaid Expenses.xlsx`;
+    downloadedFileName = `${client?.name || selectedClientId} - Prepaid Expenses.xlsx`;
+    a.download = downloadedFileName;
     a.click();
     URL.revokeObjectURL(dlUrl);
     try {
@@ -1784,10 +1789,14 @@ async function exportPrepaidExcel() {
         headers: { 'Authorization': getAuth() },
       });
       const data = await reviewRes.json();
-      renderPrepaidReviewPanel(data.review);
+      // Carry the download filename through so the panel banner can confirm
+      // the export. Without this, the user sees AI "ERRORS/WARNINGS" findings
+      // and can't tell whether the Excel actually downloaded or not.
+      const reviewWithDownload = data.review ? { ...data.review, _downloadedFileName: downloadedFileName } : null;
+      renderPrepaidReviewPanel(reviewWithDownload);
     } catch (e) {
       console.error('Failed to fetch prepaid review:', e);
-      renderPrepaidReviewPanel({ status: 'error', summary: 'Could not load review result.', findings: [] });
+      renderPrepaidReviewPanel({ status: 'error', summary: 'Could not load review result.', findings: [], _downloadedFileName: downloadedFileName });
     }
   } catch (e) { alert('export failed: ' + e.message); renderPrepaidReviewPanel(null); }
   btns.forEach((b, i) => { b.textContent = originalLabels[i]; b.disabled = false; });
@@ -3190,6 +3199,8 @@ async function acceptScanResult(encodedJson) {
       if (!endDate) return;
       data.endDate = endDate;
     }
+    // Pass closeMonth so the server can date the reclass JE to period-end.
+    data.closeMonth = currentClosePeriod?.month || null;
     const res = await fetch(`/api/admin/clients/${selectedClientId}/prepaid-expenses/scan/accept`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': getAuth() },
@@ -3197,7 +3208,16 @@ async function acceptScanResult(encodedJson) {
     });
     const result = await res.json();
     if (!res.ok) { alert('failed: ' + (result.error || res.status)); return; }
-    alert(`Added "${data.vendor}" to the prepaid schedule.\n\nIt will be amortized ${fmtMoney(data.prepaidAmount)} from ${data.startDate} to ${data.endDate}.`);
+    const item = result.item || {};
+    // Compose the success alert so the user knows BOTH that the schedule
+    // entry was created AND whether the reclass JE landed in QBO.
+    let msg = `Added "${data.vendor}" to the prepaid schedule.\n\nIt will be amortized ${fmtMoney(data.prepaidAmount)} from ${data.startDate} to ${data.endDate}.`;
+    if (item.reclassJournalEntryId) {
+      msg += `\n\n✓ Posted reclass JE #${item.reclassJournalEntryId} to QuickBooks (Dr Prepaid Expenses $${Number(item.openingBalance || 0).toFixed(2)} / Cr ${item.expenseAccountName || 'expense account'} $${Number(item.openingBalance || 0).toFixed(2)}).`;
+    } else if (item.reclassError) {
+      msg += `\n\n⚠ Reclass JE was NOT posted: ${item.reclassError}\nYou'll need to post the entry manually in QBO.`;
+    }
+    alert(msg);
     await loadClientPrepaid();
     renderCloseSteps();
   } catch (e) { alert('error: ' + e.message); }
@@ -4122,8 +4142,21 @@ function _renderReviewPanelCore(panel, review, panelId) {
     : '<div style="font-size:0.82rem;color:var(--gray-400);margin-top:8px;font-style:italic;">No findings.</div>';
 
   const dismissBtnId = `btn-dismiss-${panelId}`;
+  // When the panel was opened via the "Export to Excel" action, surface a
+  // clear confirmation banner ABOVE the review so the user can tell at a
+  // glance that the Excel did download. The findings table below is then
+  // unambiguously the optional Claude review, not export errors.
+  const downloadBanner = review._downloadedFileName ? `
+    <div style="background:#064e3b;border-left:4px solid #22c55e;padding:10px 14px;border-radius:6px;margin-bottom:10px;color:#d1fae5;font-size:0.88rem;display:flex;align-items:center;gap:10px;">
+      <span style="font-size:1rem;">✓</span>
+      <div>
+        <strong>Excel downloaded</strong>
+        <div style="font-size:0.78rem;color:#a7f3d0;margin-top:1px;">Saved to your Downloads folder as <code>${escapeHtml(review._downloadedFileName)}</code>. Claude's findings on the schedule are below.</div>
+      </div>
+    </div>` : '';
   panel.style.display = '';
   panel.innerHTML = `
+    ${downloadBanner}
     <div style="background:var(--gray-800);border-left:4px solid ${c.bar};padding:12px 16px;border-radius:6px;">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">
         <span style="background:${c.bar};color:#fff;font-weight:700;font-size:0.78rem;padding:3px 10px;border-radius:3px;letter-spacing:0.5px;">${c.label}</span>

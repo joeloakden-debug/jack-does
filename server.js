@@ -3794,23 +3794,30 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan', requireAdmin, asy
 });
 
 // POST /api/admin/clients/:clientId/prepaid-expenses/scan/accept
-// Takes a scan result and adds it as a prepaid item to the schedule
-app.post('/api/admin/clients/:clientId/prepaid-expenses/scan/accept', requireAdmin, (req, res) => {
+// Takes a scan result and (a) adds it as a prepaid item to the schedule,
+// (b) posts a reclass JE to QBO moving the prepaid portion off the
+// expense GL and onto the prepaid asset GL. The user still expects the
+// original vendor invoice to be in QBO; the reclass corrects the
+// month-end position without touching the original transaction.
+app.post('/api/admin/clients/:clientId/prepaid-expenses/scan/accept', requireAdmin, async (req, res) => {
   try {
+    const clientId = req.params.clientId;
     const { vendor, description, totalAmount, prepaidAmount, startDate, endDate,
-            expenseAccountId, expenseAccountName, sourceTxnId, sourceTxnType } = req.body || {};
+            expenseAccountId, expenseAccountName, sourceTxnId, sourceTxnType,
+            closeMonth } = req.body || {};
 
     if (!vendor || !totalAmount || !startDate || !endDate || !expenseAccountId) {
       return res.status(400).json({ error: 'vendor, totalAmount, startDate, endDate, expenseAccountId required' });
     }
 
-    const c = getClientPrepaid(req.params.clientId);
+    const c = getClientPrepaid(clientId);
+    const openingBalance = Number(prepaidAmount || totalAmount);
     const item = {
       id: Date.now().toString() + Math.random().toString(36).slice(2, 7),
       vendor: String(vendor),
       description: description || '',
       totalAmount: Number(totalAmount),
-      openingBalance: Number(prepaidAmount || totalAmount),
+      openingBalance,
       startDate,
       endDate,
       expenseAccountId: String(expenseAccountId),
@@ -3819,7 +3826,76 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan/accept', requireAdm
       sourceTxnType: sourceTxnType || null,
       createdAt: new Date().toISOString(),
       completedAt: null,
+      reclassJournalEntryId: null,
+      reclassPostedAt: null,
+      reclassError: null,
     };
+
+    // Reclass JE: Dr Prepaid Expenses (openingBalance) / Cr the original
+    // expense GL. Dated the last day of the close month so the GL
+    // position is correct as of period-end. Only attempted when QBO is
+    // connected AND a prepaid GL account is configured.
+    if (qbo.isConnected(clientId) && c.prepaidAccount && openingBalance > 0) {
+      try {
+        // Determine the JE date — end of closeMonth if provided, else
+        // current close period, else today.
+        let jeDate;
+        const monthStr = (closeMonth && /^\d{4}-\d{2}$/.test(closeMonth)) ? closeMonth : null;
+        if (monthStr) {
+          const { year, monthIndex } = parseMonthStr(monthStr);
+          jeDate = localDateStr(lastDayOfMonthDate(year, monthIndex));
+        } else {
+          // Fallback: current close period from the existing helper.
+          const fixedAssetClient = getClientAssets(clientId);
+          let closeDate = null;
+          try { closeDate = await qbo.getBookCloseDate(clientId); } catch (_) {}
+          const fallbackMonth = determineAmortizationMonth(fixedAssetClient, closeDate).month;
+          if (fallbackMonth) {
+            const { year, monthIndex } = parseMonthStr(fallbackMonth);
+            jeDate = localDateStr(lastDayOfMonthDate(year, monthIndex));
+          } else {
+            jeDate = new Date().toISOString().slice(0, 10);
+          }
+        }
+
+        const memo = `Reclass to prepaid - ${vendor}${description ? ' - ' + description : ''}`;
+        const result = await qbo.createJournalEntry({
+          date: jeDate,
+          memo,
+          lines: [
+            {
+              accountId: c.prepaidAccount.id,
+              accountName: c.prepaidAccount.name,
+              description: memo,
+              amount: openingBalance,
+              type: 'debit',
+            },
+            {
+              accountId: String(expenseAccountId),
+              accountName: expenseAccountName || '',
+              description: memo,
+              amount: openingBalance,
+              type: 'credit',
+            },
+          ],
+        }, clientId);
+
+        item.reclassJournalEntryId = result.Id || null;
+        item.reclassPostedAt = new Date().toISOString();
+        console.log(`[prepaid-scan-accept] reclass JE posted: id=${item.reclassJournalEntryId}, $${openingBalance} from ${expenseAccountName || expenseAccountId} → ${c.prepaidAccount.name}`);
+      } catch (e) {
+        // Don't block the item creation — the schedule still picks it up,
+        // user can post manually in QBO. Surface the error so the UI can
+        // flag it.
+        console.error('[prepaid-scan-accept] reclass JE failed:', e.message);
+        item.reclassError = e.message;
+      }
+    } else if (!c.prepaidAccount) {
+      item.reclassError = 'Prepaid Expenses GL account not configured — JE not posted. Configure it in settings, then post the reclass manually in QBO.';
+    } else if (!qbo.isConnected(clientId)) {
+      item.reclassError = 'QuickBooks not connected — JE not posted.';
+    }
+
     c.items.push(item);
     savePrepaidExpenses(prepaidData);
 
