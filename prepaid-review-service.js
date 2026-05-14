@@ -30,10 +30,18 @@ function lastDayOfMonthDate(year, monthIndex) {
 }
 function monthsBetweenInclusive(startYYYYMMDD, endYYYYMMDD) {
   if (!startYYYYMMDD || !endYYYYMMDD) return 0;
-  const s = new Date(startYYYYMMDD);
-  const e = new Date(endYYYYMMDD);
-  if (isNaN(s) || isNaN(e) || e < s) return 0;
-  return (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth()) + 1;
+  // Parse the YYYY-MM-DD components directly rather than going through
+  // `new Date(str)`. The Date constructor reads bare ISO dates as UTC
+  // midnight, then `.getMonth()` returns the LOCAL month — so in a TZ
+  // west of UTC, "2026-04-01" reads as March 31. That shifted the month
+  // count and produced monthly amounts of $73.46 instead of $79.58.
+  const sm = String(startYYYYMMDD).match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  const em = String(endYYYYMMDD).match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (!sm || !em) return 0;
+  const sY = parseInt(sm[1], 10), sM = parseInt(sm[2], 10);
+  const eY = parseInt(em[1], 10), eM = parseInt(em[2], 10);
+  if (eY < sY || (eY === sY && eM < sM)) return 0;
+  return (eY - sY) * 12 + (eM - sM) + 1;
 }
 function monthsRecognizedThroughEnd(item, asOfMonth) {
   // How many months have been recognized from startDate through end of asOfMonth (inclusive)
@@ -86,14 +94,32 @@ function buildItemSnapshots(clientData, asOfMonth) {
 
   const snapshots = items.map(item => {
     const totalMonths = monthsBetweenInclusive(item.startDate, item.endDate);
-    const amortizableAmount = round2(Number(item.openingBalance ?? item.totalAmount) || 0);
-    const monthlyAmount = totalMonths > 0 ? round2(amortizableAmount / totalMonths) : 0;
+    // The amortizable basis is the EXPENSED amount of the invoice — what
+    // actually hits the expense GL over the life of the prepaid (gross
+    // invoice less recoverable GST/HST). item.totalAmount now stores this
+    // post-tax-exclusion figure; legacy items used openingBalance as the
+    // amortizable amount so fall back to that if totalAmount is missing.
+    const amortizableCost = round2(Number(item.totalAmount ?? item.openingBalance) || 0);
+    // The vendor's invoice total (gross, incl. recoverable tax) — kept
+    // for reference; not used in the amortization math.
+    const originalCost = round2(Number(item.grossInvoiceTotal ?? item.totalAmount ?? item.openingBalance) || 0);
+    const recoverableTax = round2(Number(item.recoverableTaxAmount) || 0);
+    const monthlyAmount = totalMonths > 0 ? round2(amortizableCost / totalMonths) : 0;
     const monthsThrough = monthsRecognizedThroughEnd(item, asOfMonth);
+    // "Recognized to date" is what the user expects to have been moved
+    // from the prepaid asset back into expense by the as-of date —
+    // months consumed × monthly. For an item that's just been accepted,
+    // monthsThrough = 1 (current period), so recognized = one month's
+    // worth (= the portion that stayed in expense after the reclass JE).
     const expectedRecognized = totalMonths > 0
-      ? round2((amortizableAmount / totalMonths) * monthsThrough)
+      ? round2((amortizableCost / totalMonths) * monthsThrough)
       : 0;
+    // Posted amortization runs accumulate here. Variance from expected
+    // is reported separately so the Claude reviewer can flag drift
+    // without polluting the displayed numbers.
     const actualRecognized = round2(recognizedByItem.get(item.id) || 0);
-    const closingBalance = round2(amortizableAmount - actualRecognized);
+    const recognizedToDate = expectedRecognized;
+    const closingBalance = round2(amortizableCost - recognizedToDate);
     const variance = round2(actualRecognized - expectedRecognized);
     return {
       id: item.id,
@@ -102,11 +128,19 @@ function buildItemSnapshots(clientData, asOfMonth) {
       expenseAccountName: item.expenseAccountName || '',
       startDate: item.startDate || '',
       endDate: item.endDate || '',
-      totalAmount: round2(Number(item.totalAmount) || 0),
-      openingBalance: amortizableAmount,
+      // Reference fields (vendor invoice + recoverable tax) — surfaced
+      // on the Excel for audit transparency.
+      originalCost,
+      recoverableTaxAmount: recoverableTax,
+      // Amortization basis = post-tax-exclusion cost. Used to compute
+      // monthlyAmount, recognition, closing.
+      totalAmount: amortizableCost,
+      openingBalance: amortizableCost, // kept for back-compat with consumers
+      amortizableCost,
       totalMonths,
       monthlyAmount,
       monthsThrough,
+      recognizedToDate,
       expectedRecognized,
       actualRecognized,
       recognizedVariance: variance,
@@ -115,11 +149,13 @@ function buildItemSnapshots(clientData, asOfMonth) {
   });
 
   const totals = snapshots.reduce((acc, s) => {
-    acc.opening = round2(acc.opening + s.openingBalance);
-    acc.recognized = round2(acc.recognized + s.actualRecognized);
+    acc.originalCost = round2(acc.originalCost + s.originalCost);
+    acc.amortizableCost = round2(acc.amortizableCost + s.amortizableCost);
+    acc.opening = round2(acc.opening + s.amortizableCost); // back-compat alias
+    acc.recognized = round2(acc.recognized + s.recognizedToDate);
     acc.closing = round2(acc.closing + s.closingBalance);
     return acc;
-  }, { opening: 0, recognized: 0, closing: 0 });
+  }, { originalCost: 0, amortizableCost: 0, opening: 0, recognized: 0, closing: 0 });
 
   return { snapshots, totals };
 }

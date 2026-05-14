@@ -3340,15 +3340,29 @@ app.get('/api/admin/clients/:clientId/prepaid-expenses/export-excel', requireAdm
 
     // ---- Sheet 1: Schedule ----
     const ws = wb.addWorksheet('Prepaid Schedule', { properties: { tabColor: { argb: 'FF3b82f6' } } });
-    ws.mergeCells(1, 1, 1, 11);
+    ws.mergeCells(1, 1, 1, 13);
     ws.getCell(1, 1).value = `${clientName} — Prepaid Expenses Schedule (as of ${asOfMonth})`;
     ws.getCell(1, 1).font = { name: 'Calibri', size: 14, bold: true };
     ws.getRow(1).height = 22;
 
+    // Column layout — column indexes are 1-based in ExcelJS.
+    //   1 Vendor
+    //   2 Description
+    //   3 Expense Account
+    //   4 Start Date
+    //   5 End Date
+    //   6 Total Months
+    //   7 Original Cost           — vendor invoice gross (incl. recoverable tax)
+    //   8 Recoverable Tax         — GST/HST excluded from amortization base
+    //   9 Amortizable Cost        — what actually amortizes (original cost - recoverable tax)
+    //  10 Monthly Amount          — amortizable cost / total months
+    //  11 Months Through          — months recognized as of asOfMonth
+    //  12 Recognized To Date      — months through × monthly
+    //  13 Closing Balance         — amortizable cost - recognized to date (matches BS)
     const headers = [
       'Vendor', 'Description', 'Expense Account', 'Start Date', 'End Date',
-      'Total Months', 'Opening Balance', 'Monthly Amount',
-      'Months Through', 'Recognized To Date', 'Closing Balance',
+      'Total Months', 'Original Cost', 'Recoverable Tax', 'Amortizable Cost',
+      'Monthly Amount', 'Months Through', 'Recognized To Date', 'Closing Balance',
     ];
     const headerRow = 3;
     headers.forEach((h, i) => {
@@ -3360,7 +3374,7 @@ app.get('/api/admin/clients/:clientId/prepaid-expenses/export-excel', requireAdm
     });
     ws.getRow(headerRow).height = 20;
 
-    const widths = [22, 28, 28, 12, 12, 12, 16, 14, 14, 18, 16];
+    const widths = [22, 28, 28, 12, 12, 12, 16, 14, 16, 14, 14, 18, 16];
     widths.forEach((w, i) => { ws.getColumn(i + 1).width = w; });
 
     const currencyFormat = '"$"#,##0.00;[Red]-"$"#,##0.00';
@@ -3372,22 +3386,25 @@ app.get('/api/admin/clients/:clientId/prepaid-expenses/export-excel', requireAdm
       ws.getCell(r, 4).value = s.startDate;
       ws.getCell(r, 5).value = s.endDate;
       ws.getCell(r, 6).value = s.totalMonths;
-      ws.getCell(r, 7).value = s.openingBalance;
-      ws.getCell(r, 8).value = s.monthlyAmount;
-      ws.getCell(r, 9).value = s.monthsThrough;
-      ws.getCell(r, 10).value = s.actualRecognized;
-      ws.getCell(r, 11).value = s.closingBalance;
-      [7, 8, 10, 11].forEach(col => { ws.getCell(r, col).numFmt = currencyFormat; });
+      ws.getCell(r, 7).value = s.originalCost;
+      ws.getCell(r, 8).value = s.recoverableTaxAmount;
+      ws.getCell(r, 9).value = s.amortizableCost;
+      ws.getCell(r, 10).value = s.monthlyAmount;
+      ws.getCell(r, 11).value = s.monthsThrough;
+      ws.getCell(r, 12).value = s.recognizedToDate;
+      ws.getCell(r, 13).value = s.closingBalance;
+      [7, 8, 9, 10, 12, 13].forEach(col => { ws.getCell(r, col).numFmt = currencyFormat; });
     });
 
     // Totals row
     const totalsRow = headerRow + 1 + snapshots.length;
     ws.getCell(totalsRow, 1).value = 'TOTALS';
     ws.getCell(totalsRow, 1).font = { bold: true };
-    ws.getCell(totalsRow, 7).value = totals.opening;
-    ws.getCell(totalsRow, 10).value = totals.recognized;
-    ws.getCell(totalsRow, 11).value = totals.closing;
-    [7, 10, 11].forEach(col => {
+    ws.getCell(totalsRow, 7).value = totals.originalCost;
+    ws.getCell(totalsRow, 9).value = totals.amortizableCost;
+    ws.getCell(totalsRow, 12).value = totals.recognized;
+    ws.getCell(totalsRow, 13).value = totals.closing;
+    [7, 9, 12, 13].forEach(col => {
       ws.getCell(totalsRow, col).numFmt = currencyFormat;
       ws.getCell(totalsRow, col).font = { bold: true };
       ws.getCell(totalsRow, col).border = { top: { style: 'thin' } };
