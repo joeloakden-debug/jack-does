@@ -3910,10 +3910,15 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan/accept', requireAdm
 });
 
 // Resolve which close month a prepaid item belongs to. Items added after
-// the closeMonth-on-item field was introduced have it stored explicitly;
-// older items fall back to the YYYY-MM of their createdAt timestamp.
+// the closeMonth-on-item field was introduced have it stored explicitly.
+// For legacy items without it, prefer the service period START month
+// (the prepaid almost always belongs to the close period its service
+// begins in) over the createdAt timestamp — users sometimes accept a
+// prepaid for an earlier close period after the calendar has rolled
+// over, which makes createdAt a misleading proxy.
 function prepaidItemCloseMonth(item) {
   if (item.closeMonth && /^\d{4}-\d{2}$/.test(item.closeMonth)) return item.closeMonth;
+  if (item.startDate && /^\d{4}-\d{2}-\d{2}/.test(item.startDate)) return item.startDate.slice(0, 7);
   if (item.createdAt) return String(item.createdAt).slice(0, 7);
   return null;
 }

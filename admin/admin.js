@@ -1552,7 +1552,7 @@ function renderStepCard(step) {
     // buttons don't appear when there's nothing to undo.
     const month = currentClosePeriod?.month;
     const itemsThisMonth = month
-      ? (prepaidState.items || []).filter(it => (it.closeMonth || (it.createdAt || '').slice(0, 7)) === month)
+      ? (prepaidState.items || []).filter(it => prepaidItemCloseMonth(it) === month)
       : [];
     const reversibleJEs = itemsThisMonth.filter(it => it.reclassJournalEntryId && !it.reclassReversedAt);
     let reverseZone = '';
@@ -1742,6 +1742,17 @@ document.addEventListener('click', (e) => {
   }
 });
 
+// Resolve which close month a prepaid item belongs to. Mirrors the
+// server-side helper of the same name: explicit closeMonth wins; else
+// the service period start month (legacy items accepted after the
+// calendar rolled); else the createdAt timestamp's month.
+function prepaidItemCloseMonth(it) {
+  if (it.closeMonth && /^\d{4}-\d{2}$/.test(it.closeMonth)) return it.closeMonth;
+  if (it.startDate && /^\d{4}-\d{2}-\d{2}/.test(it.startDate)) return it.startDate.slice(0, 7);
+  if (it.createdAt) return String(it.createdAt).slice(0, 7);
+  return null;
+}
+
 // Reverse all prepaid reclass JEs posted under the current close month.
 // Posts reversing JEs in QBO (Dr Original Expense / Cr Prepaid Expenses)
 // dated end of close month. The schedule items remain but are marked
@@ -1751,7 +1762,7 @@ async function reversePrepaidJEsForCurrentMonth() {
   const month = currentClosePeriod?.month;
   if (!month) { alert('No close period selected.'); return; }
   const items = (prepaidState.items || []).filter(it =>
-    (it.closeMonth || (it.createdAt || '').slice(0, 7)) === month
+    prepaidItemCloseMonth(it) === month
     && it.reclassJournalEntryId
     && !it.reclassReversedAt
   );
@@ -1783,9 +1794,7 @@ async function reversePrepaidAppForCurrentMonth() {
   if (!selectedClientId) return;
   const month = currentClosePeriod?.month;
   if (!month) { alert('No close period selected.'); return; }
-  const items = (prepaidState.items || []).filter(it =>
-    (it.closeMonth || (it.createdAt || '').slice(0, 7)) === month
-  );
+  const items = (prepaidState.items || []).filter(it => prepaidItemCloseMonth(it) === month);
   if (items.length === 0) { alert(`No prepaid items on the schedule for ${month}.`); return; }
   const stillPostedToQbo = items.filter(it => it.reclassJournalEntryId && !it.reclassReversedAt);
   let warn = `Remove ${items.length} prepaid item${items.length === 1 ? '' : 's'} from the app schedule for ${month}?\n\nThis does NOT touch QuickBooks.`;
