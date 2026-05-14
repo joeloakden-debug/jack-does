@@ -3547,11 +3547,31 @@ Review the attached document and determine:
 2. Does any portion of this invoice cover services AFTER {PERIOD_END}?
 3. If yes, how much should be prepaid (deferred) vs. expensed in the current period?
 
+TAX HANDLING — CRITICAL FOR THE MATH:
+GST/HST is RECOVERABLE in Canada — the company gets it back from CRA as an input tax credit, so it does NOT hit the expense GL and must NOT be included in the prepaid base.
+
+PST / QST / RST is NON-RECOVERABLE in the provinces that levy it (BC, SK, MB, QC). It is a real cost of the purchase and IS part of the expensed amount.
+
+For the prepaid calculation:
+- recoverableTaxAmount = the GST/HST portion of the invoice (0 if none).
+- expensedAmount = totalAmount - recoverableTaxAmount = the amount that actually hits the expense GL (service + PST/QST/RST + non-tax fees).
+- prepaidAmount = the deferred portion of expensedAmount (NOT totalAmount).
+- currentPeriodAmount = the portion of expensedAmount that belongs to the current period (1 month's worth for a monthly amortization).
+
+Worked example: invoice $1,130 = $1,000 service + $50 GST + $80 PST, covering 12 months starting April 1:
+  recoverableTaxAmount = 50
+  expensedAmount      = 1080
+  monthly portion     = 1080 / 12 = 90
+  currentPeriodAmount = 90        (April's share)
+  prepaidAmount       = 11 × 90 = 990   (May through March)
+  Note: the $50 GST stays as an input tax credit (CRA refund) — no prepaid for it.
+
 IMPORTANT GUIDELINES:
 - Monthly subscriptions where the service period = the billing period are NOT prepaids (e.g. a March invoice for March service)
 - Only flag items where the service period clearly extends beyond {PERIOD_END}
 - Insurance policies, annual licenses, multi-month contracts, and retainers are common prepaids
 - If the document is unclear or you cannot determine the service period, say so — do NOT guess
+- prepaidAmount + currentPeriodAmount must equal expensedAmount (NOT totalAmount) when isPrepaid is true.
 
 Respond with ONLY a JSON object (no markdown, no explanation):
 {
@@ -3561,6 +3581,8 @@ Respond with ONLY a JSON object (no markdown, no explanation):
   "servicePeriodStart": "YYYY-MM-DD or null if unknown",
   "servicePeriodEnd": "YYYY-MM-DD or null if unknown",
   "totalAmount": number,
+  "recoverableTaxAmount": number,
+  "expensedAmount": number,
   "prepaidAmount": number or null,
   "currentPeriodAmount": number or null,
   "description": "what this invoice is for"
@@ -3804,7 +3826,7 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan/accept', requireAdm
     const clientId = req.params.clientId;
     const { vendor, description, totalAmount, prepaidAmount, startDate, endDate,
             expenseAccountId, expenseAccountName, sourceTxnId, sourceTxnType,
-            closeMonth } = req.body || {};
+            closeMonth, grossInvoiceTotal, recoverableTaxAmount } = req.body || {};
 
     if (!vendor || !totalAmount || !startDate || !endDate || !expenseAccountId) {
       return res.status(400).json({ error: 'vendor, totalAmount, startDate, endDate, expenseAccountId required' });
@@ -3817,7 +3839,13 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan/accept', requireAdm
       id: Date.now().toString() + Math.random().toString(36).slice(2, 7),
       vendor: String(vendor),
       description: description || '',
+      // totalAmount here is the EXPENSED base (gross − recoverable tax)
+      // since GST/HST is recoverable and never hits the expense GL. The
+      // raw invoice total + the recoverable portion are kept as
+      // reference fields below for the audit trail.
       totalAmount: Number(totalAmount),
+      grossInvoiceTotal: grossInvoiceTotal != null ? Number(grossInvoiceTotal) : Number(totalAmount),
+      recoverableTaxAmount: recoverableTaxAmount != null ? Number(recoverableTaxAmount) : 0,
       openingBalance,
       startDate,
       endDate,

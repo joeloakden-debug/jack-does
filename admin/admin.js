@@ -3254,12 +3254,29 @@ function renderScanResultCard(result, scanData, type) {
 
   let actionHtml = '';
   if (isFlagged) {
-    // "Accept as prepaid" button — adds to the schedule
+    // Compute the expensed base — totalAmount minus recoverable tax
+    // (GST/HST). GST/HST is recoverable from CRA and never hits the
+    // expense GL, so it must NOT be part of the prepaid amortization
+    // base. If the AI returned expensedAmount explicitly, use it; else
+    // derive from totalAmount - recoverableTaxAmount; else fall back to
+    // the gross total (legacy or AI couldn't identify the tax).
+    const gross = Number(r.totalAmount || t.amount) || 0;
+    const recoverableTax = Number(r.recoverableTaxAmount || 0) || 0;
+    const expensed = Number(r.expensedAmount) > 0
+      ? Number(r.expensedAmount)
+      : (gross - recoverableTax > 0 ? gross - recoverableTax : gross);
+    const prepaid = Number(r.prepaidAmount) > 0 ? Number(r.prepaidAmount) : expensed;
+    // "Accept as prepaid" button — adds to the schedule. totalAmount on
+    // the schedule item is the EXPENSED amount (the amortization base),
+    // not the gross invoice — so monthly amortization divides cleanly
+    // over the service period and the reclass JE uses the correct amount.
     const encoded = encodeURIComponent(JSON.stringify({
       vendor: t.vendor,
       description: r.description || '',
-      totalAmount: r.totalAmount || t.amount,
-      prepaidAmount: r.prepaidAmount || r.totalAmount || t.amount,
+      totalAmount: expensed,
+      grossInvoiceTotal: gross,
+      recoverableTaxAmount: recoverableTax,
+      prepaidAmount: prepaid,
       startDate: r.servicePeriodStart || t.date,
       endDate: r.servicePeriodEnd || '',
       expenseAccountId: t.accountId,
@@ -3274,6 +3291,20 @@ function renderScanResultCard(result, scanData, type) {
       </div>`;
   }
 
+  // Breakdown line — show the gross invoice, the recoverable tax that's
+  // excluded, and the prepaid portion so the user can see the math.
+  const gross = Number(r.totalAmount || t.amount) || 0;
+  const recoverableTax = Number(r.recoverableTaxAmount || 0) || 0;
+  const expensed = Number(r.expensedAmount) > 0
+    ? Number(r.expensedAmount)
+    : (gross - recoverableTax > 0 ? gross - recoverableTax : gross);
+  const breakdownLine = isFlagged ? `
+    <div style="margin-top:2px;font-size:0.78rem;color:var(--gray-500);">
+      service period: ${r.servicePeriodStart || '?'} → ${r.servicePeriodEnd || '?'}
+      | invoice ${fmtMoney(gross)}${recoverableTax > 0 ? ` − GST/HST ${fmtMoney(recoverableTax)}` : ''} = expensed ${fmtMoney(expensed)}
+      ${r.prepaidAmount ? ` | prepaid portion ${fmtMoney(r.prepaidAmount)}` : ''}
+    </div>` : '';
+
   return `
     <div class="scan-result-card" style="border-left:3px solid ${borderColor};background:${bgColor};padding:10px 12px;margin-bottom:6px;border-radius:4px;font-size:0.82rem;">
       <div style="display:flex;justify-content:space-between;align-items:start;">
@@ -3286,7 +3317,7 @@ function renderScanResultCard(result, scanData, type) {
         </div>
       </div>
       <div style="margin-top:4px;color:var(--gray-600);font-size:0.8rem;">${r.reasoning || ''}</div>
-      ${r.servicePeriodStart && r.servicePeriodEnd ? `<div style="margin-top:2px;font-size:0.78rem;color:var(--gray-500);">service period: ${r.servicePeriodStart} → ${r.servicePeriodEnd}${r.prepaidAmount ? ` | prepaid portion: ${fmtMoney(r.prepaidAmount)}` : ''}</div>` : ''}
+      ${breakdownLine}
       ${actionHtml}
     </div>`;
 }
