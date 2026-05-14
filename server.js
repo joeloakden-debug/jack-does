@@ -3588,6 +3588,58 @@ Respond with ONLY a JSON object (no markdown, no explanation):
   "description": "what this invoice is for"
 }`;
 
+// Recompute prepaid portions from the service-period dates so the math
+// is deterministic instead of relying on the AI's arithmetic (which has
+// drifted in observed cases — e.g. AI returned 876.25 when the actual
+// 11/12 × $955 = $875.42).
+//
+// Formula:
+//   totalMonths    = months from servicePeriodStart through end (inclusive)
+//   recognized     = months from start through closeMonth (clamped to [0, totalMonths])
+//   remaining      = totalMonths - recognized
+//   expensedAmount = totalAmount - recoverableTaxAmount
+//   prepaidAmount  = remaining / totalMonths × expensedAmount
+//   currentPeriodAmount = recognized / totalMonths × expensedAmount
+//
+// Rounding: we keep the ratio unrounded and only round the final products
+// to 2dp so prepaid + currentPeriod always reconciles to expensedAmount
+// within rounding (off by at most $0.01).
+function recomputePrepaidPortions(claudeReview, closeMonth) {
+  if (!claudeReview || !claudeReview.isPrepaid) return claudeReview;
+  const total = Number(claudeReview.totalAmount);
+  if (!isFinite(total) || total <= 0) return claudeReview;
+  const recoverableTax = Math.max(0, Number(claudeReview.recoverableTaxAmount) || 0);
+  const expensed = Math.round((total - recoverableTax) * 100) / 100;
+  if (expensed <= 0) return { ...claudeReview, expensedAmount: expensed };
+  const startStr = claudeReview.servicePeriodStart;
+  const endStr = claudeReview.servicePeriodEnd;
+  const monthRe = /^(\d{4})-(\d{2})/;
+  if (!startStr || !endStr || !monthRe.test(startStr) || !monthRe.test(endStr) || !monthRe.test(closeMonth || '')) {
+    return { ...claudeReview, expensedAmount: expensed };
+  }
+  const [sY, sM] = startStr.match(monthRe).slice(1).map(Number);
+  const [eY, eM] = endStr.match(monthRe).slice(1).map(Number);
+  const [cY, cM] = closeMonth.match(monthRe).slice(1).map(Number);
+  const totalMonths = (eY - sY) * 12 + (eM - sM) + 1;
+  if (totalMonths <= 0) return { ...claudeReview, expensedAmount: expensed };
+  let recognized = (cY - sY) * 12 + (cM - sM) + 1;
+  if (recognized < 0) recognized = 0;
+  if (recognized > totalMonths) recognized = totalMonths;
+  const remaining = totalMonths - recognized;
+  const prepaidAmount = Math.round((remaining / totalMonths) * expensed * 100) / 100;
+  const currentPeriodAmount = Math.round((recognized / totalMonths) * expensed * 100) / 100;
+  return {
+    ...claudeReview,
+    expensedAmount: expensed,
+    prepaidAmount,
+    currentPeriodAmount,
+    _computedBy: 'server',
+    _totalMonths: totalMonths,
+    _monthsRecognized: recognized,
+    _monthsRemaining: remaining,
+  };
+}
+
 // Map QBO transaction types (from findPurchases/findBills/etc.) to the
 // Attachable EntityRef.type values the QBO API expects.
 const TXN_TYPE_MAP = {
@@ -3750,6 +3802,9 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan', requireAdmin, asy
             } catch (_) {
               result.claudeReview = { isPrepaid: false, confidence: 'low', reasoning: rawText.slice(0, 500), error: 'parse_failed' };
             }
+            // Override the AI's arithmetic with the deterministic
+            // months-remaining / total-months formula.
+            result.claudeReview = recomputePrepaidPortions(result.claudeReview, targetMonth);
           } else {
             result.claudeReview = { isPrepaid: false, confidence: 'low', reasoning: `Unsupported file type: ${file.contentType}. Manual review needed.` };
           }
@@ -3779,6 +3834,10 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan', requireAdmin, asy
           } catch (_) {
             result.claudeReview = { isPrepaid: false, confidence: 'low', reasoning: rawText.slice(0, 500), error: 'parse_failed' };
           }
+          // Same recompute as the with-attachment branch above —
+          // months-remaining / total-months × expensedAmount is the
+          // canonical calculation, not the AI's arithmetic.
+          result.claudeReview = recomputePrepaidPortions(result.claudeReview, targetMonth);
         }
       } catch (e) {
         console.error(`[prepaid-scan] error scanning txn ${txn.id}:`, e.message);
