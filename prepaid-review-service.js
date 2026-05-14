@@ -114,10 +114,22 @@ function buildItemSnapshots(clientData, asOfMonth) {
     const expectedRecognized = totalMonths > 0
       ? round2((amortizableCost / totalMonths) * monthsThrough)
       : 0;
-    // Posted amortization runs accumulate here. Variance from expected
-    // is reported separately so the Claude reviewer can flag drift
-    // without polluting the displayed numbers.
-    const actualRecognized = round2(recognizedByItem.get(item.id) || 0);
+    // Posted amortization runs accumulate here. PLUS we add an "initial
+    // implicit recognition" that captures the portion of the original
+    // expensed amount that stayed in the expense GL after the reclass JE
+    // was posted (= amortizableCost − the prepaid asset openingBalance).
+    //
+    // Why: at scan-accept time we post a reclass JE that moves the
+    // deferred portion to the prepaid asset, but leaves the current-
+    // period portion sitting in expense. That portion never appears in
+    // an amortization "run" — it's just where the original invoice
+    // posted. Without counting it, the review flags the acceptance
+    // month as under-recognized when it's actually exactly right.
+    const sumOfRuns = round2(recognizedByItem.get(item.id) || 0);
+    const initialImplicit = item.reclassJournalEntryId && item.openingBalance != null
+      ? Math.max(0, round2(amortizableCost - Number(item.openingBalance)))
+      : 0;
+    const actualRecognized = round2(initialImplicit + sumOfRuns);
     const recognizedToDate = expectedRecognized;
     const closingBalance = round2(amortizableCost - recognizedToDate);
     const variance = round2(actualRecognized - expectedRecognized);

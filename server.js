@@ -3727,23 +3727,53 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan', requireAdmin, asy
       candidates = candidates.filter(t => allowedIds.has(t.accountId));
     }
 
-    console.log(`[prepaid-scan] found ${candidates.length} candidate transactions above $${threshold}`);
+    // Skip transactions that already have a prepaid item on the schedule.
+    // Catches the "I re-scanned the same period" case so we don't ask
+    // Claude to re-evaluate (and risk the user double-accepting). An item
+    // is considered active until its completedAt timestamp is set.
+    const ppClient = getClientPrepaid(clientId);
+    const trackedKey = (it) => `${it.sourceTxnType || ''}:${it.sourceTxnId || ''}`;
+    const trackedKeys = new Set(
+      (ppClient.items || [])
+        .filter(it => !it.completedAt && it.sourceTxnId)
+        .map(trackedKey)
+    );
+    const beforeFilter = candidates.length;
+    const alreadyTracked = [];
+    candidates = candidates.filter(t => {
+      const key = `${t.type}:${t.id}`;
+      if (trackedKeys.has(key)) {
+        alreadyTracked.push(t);
+        return false;
+      }
+      return true;
+    });
+    if (alreadyTracked.length > 0) {
+      console.log(`[prepaid-scan] skipped ${alreadyTracked.length} transaction(s) already on the prepaid schedule: ${alreadyTracked.map(t => `${t.vendor} (#${t.id})`).join(', ')}`);
+    }
+
+    console.log(`[prepaid-scan] found ${candidates.length} candidate transactions above $${threshold}${beforeFilter > candidates.length ? ` (filtered out ${beforeFilter - candidates.length} already-tracked)` : ''}`);
 
     if (candidates.length === 0) {
-      // Record that this month was scanned (even with no results) so calendar shows complete
-      const ppClient = getClientPrepaid(clientId);
+      // Record that this month was scanned (even with no results) so calendar shows complete.
+      // ppClient was loaded above for the already-tracked filter, reuse it here.
       if (!ppClient.scannedMonths.includes(targetMonth)) {
         ppClient.scannedMonths.push(targetMonth);
         savePrepaidExpenses(prepaidData);
       }
+      const skippedNote = alreadyTracked.length > 0
+        ? ` ${alreadyTracked.length} transaction(s) were already on the prepaid schedule and skipped.`
+        : '';
       return res.json({
         month: targetMonth,
         periodStart,
         periodEnd,
         threshold,
         candidates: [],
+        alreadyTrackedCount: alreadyTracked.length,
+        alreadyTracked: alreadyTracked.map(t => ({ id: t.id, type: t.type, vendor: t.vendor, amount: t.amount })),
         results: [],
-        summary: 'No expense transactions above the threshold for this period.',
+        summary: `No new expense transactions above the threshold for this period.${skippedNote}`,
       });
     }
 
@@ -3867,7 +3897,7 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan', requireAdmin, asy
     const flagged = results.filter(r => r.claudeReview?.isPrepaid === true);
 
     // Record that this month was scanned so calendar shows complete
-    const ppClient = getClientPrepaid(clientId);
+    // (ppClient already loaded above for the already-tracked filter)
     if (!ppClient.scannedMonths.includes(targetMonth)) {
       ppClient.scannedMonths.push(targetMonth);
       savePrepaidExpenses(prepaidData);
@@ -3879,11 +3909,13 @@ app.post('/api/admin/clients/:clientId/prepaid-expenses/scan', requireAdmin, asy
       periodEnd,
       threshold,
       candidateCount: candidates.length,
+      alreadyTrackedCount: alreadyTracked.length,
+      alreadyTracked: alreadyTracked.map(t => ({ id: t.id, type: t.type, vendor: t.vendor, amount: t.amount })),
       results,
       flaggedCount: flagged.length,
       summary: flagged.length > 0
-        ? `Found ${flagged.length} potential prepaid expense${flagged.length !== 1 ? 's' : ''} out of ${candidates.length} transactions scanned.`
-        : `No prepaid expenses detected among ${candidates.length} transactions scanned.`,
+        ? `Found ${flagged.length} potential prepaid expense${flagged.length !== 1 ? 's' : ''} out of ${candidates.length} transactions scanned${alreadyTracked.length > 0 ? ` (skipped ${alreadyTracked.length} already on the prepaid schedule)` : ''}.`
+        : `No prepaid expenses detected among ${candidates.length} transactions scanned${alreadyTracked.length > 0 ? ` (skipped ${alreadyTracked.length} already on the prepaid schedule)` : ''}.`,
     });
   } catch (e) {
     console.error('[prepaid-scan] error:', e);
