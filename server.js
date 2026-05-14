@@ -6416,18 +6416,30 @@ function buildStatements(snapshot, dimensions, accountsMap) {
     }
 
     // ---- Pre-compute current-year-earnings per period for the BS ----
-    // Net income for each period = Σ (sign × displayed IS row) where sign
-    // is +1 for revenue/other-income and −1 for the four expense buckets.
-    // (Display now shows expenses as positive figures, so the running NI
-    // has to subtract them rather than just sum the displayed row.) This
-    // value is what we inject as a synthetic equity row on the BS so
-    // Assets = Liab + Equity actually holds.
+    // BS equity needs CUMULATIVE earnings through end of each period.
+    // We accumulate the discrete IS contribution sequentially through
+    // the FY's months so cyEarningsByPeriod[N] = sum of net income for
+    // months FY-start through N.
+    //
+    // (IS rows are stored on signedRows / displayedRows as YTD values
+    // for IS accounts — that's how QBO's TrialBalance returns income/
+    // expense accounts even when we ask for a narrow date range. The
+    // YTD-to-discrete conversion for the IS display happens further
+    // down, after cyEarningsByPeriod is locked in.)
+    //
+    // Strategy: use the LATEST month's YTD per IS row × the section's
+    // sign, but capture it month-by-month so the BS shows the running
+    // total at each column.
+    const IS_BUCKETS_SET = new Set(['revenue','cost_of_sales','operating_expense','other_income','other_expense','tax_expense','is_other']);
     const cyEarningsByPeriod = {};
     for (const m of months) cyEarningsByPeriod[m.period] = 0;
     for (const r of displayedRows) {
       const sign = IS_SECTION_SIGNS[r.bucket];
       if (sign === undefined) continue;
       for (const m of months) {
+        // r.nets[m.period] is FY-to-date through that period (QBO TB
+        // behavior for IS accounts), so this directly gives cumulative
+        // earnings per period without further accumulation.
         cyEarningsByPeriod[m.period] = round2((cyEarningsByPeriod[m.period] || 0) + sign * (r.nets[m.period] || 0));
       }
     }
@@ -6594,6 +6606,42 @@ function buildStatements(snapshot, dimensions, accountsMap) {
           }
         }
       }
+    }
+
+    // ---- Convert IS rows from YTD to per-period discrete ----
+    // QBO's TrialBalance returns FY-to-date balances for income/expense
+    // accounts (e.g. May column = April + May activity). The user wants
+    // each column to show that month's activity only, with the existing
+    // "FY total" column carrying the cumulative number. We walk each IS
+    // row's months in order and subtract the prior month's YTD value to
+    // get the period-only amount, then refresh r.total from the discrete
+    // values (the FY-total column reads r.total, so this also produces
+    // the correct cumulative figure on the right edge).
+    //
+    // This MUST run AFTER cyEarningsByPeriod is computed above — that
+    // calculation depends on the YTD form to derive cumulative equity
+    // contribution per period for the BS.
+    for (const r of displayedRows) {
+      if (!IS_BUCKETS_SET.has(r.bucket)) continue;
+      let priorYtd = 0;
+      for (const m of months) {
+        const cur = r.nets[m.period];
+        if (cur === undefined) {
+          // No data for this period; treat the chain as reset so the
+          // next month's discrete value isn't mistakenly subtracted
+          // from a stale prior YTD.
+          priorYtd = 0;
+          continue;
+        }
+        const discrete = round2(cur - priorYtd);
+        priorYtd = cur;
+        r.nets[m.period] = discrete;
+      }
+      // Recompute the row total. With discrete values, summing across
+      // months gives the FY total (= the last month's YTD).
+      let total = 0;
+      for (const m of months) total += (r.nets[m.period] || 0);
+      r.total = round2(total);
     }
 
     // ---- Build the IS row list ----
